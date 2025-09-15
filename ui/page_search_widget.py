@@ -486,6 +486,8 @@ class PageSearchWidget(Widget):
 
     def get_result_edit_index(self, result: SourceTextEdit) -> int:
         try:
+            if (len(self.search_rstedit_list) == 0):
+                return -1
             return self.search_rstedit_list.index(result)
         except ValueError:
             return -1

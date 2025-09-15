@@ -63,6 +63,9 @@ class ComicTextDetector(TextDetectorBase):
             self.model = load_ctd_model(CTD_ONNX_PATH, self.device, self.detect_size)
 
     def _detect(self, img: np.ndarray, proj: ProjImgTrans) -> Tuple[np.ndarray, List[TextBlock]]:
+        # import debugpy
+        # debugpy.debug_this_thread()
+        # debugpy.breakpoint()
         _, mask, blk_list = self.model(img)
         
         fnt_rsz = self.get_param_value('font size multiplier')

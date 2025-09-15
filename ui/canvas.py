@@ -6,10 +6,10 @@ from qtpy.QtWidgets import QApplication, QSlider, QMenu, QGraphicsScene, QGraphi
 from qtpy.QtCore import Qt, QDateTime, QRectF, QPointF, QPoint, Signal, QSizeF, QEvent
 from qtpy.QtGui import QKeySequence, QPixmap, QImage, QHideEvent, QKeyEvent, QWheelEvent, QResizeEvent, QPainter, QPen, QPainterPath, QCursor, QNativeGestureEvent
 
-try:
-    from qtpy.QtWidgets import QUndoStack, QUndoCommand
-except:
-    from qtpy.QtGui import QUndoStack, QUndoCommand
+# try:
+    # from qtpy.QtWidgets import QUndoStack, QUndoCommand
+# except:
+from qtpy.QtGui import QUndoStack, QUndoCommand
 
 from .misc import ndarray2pixmap, QKEY, QNUMERIC_KEYS, ARROWKEY2DIRECTION
 from .textitem import TextBlkItem, TextBlock

@@ -299,6 +299,11 @@ class OCROneAPI(OCRBase):
         im_h, im_w = img.shape[:2]
         for i, blk in enumerate(blk_list):
             x1, y1, x2, y2 = blk.xyxy
+            # pad
+            x1 = x1 - 15 if x1 - 15 > 0 else 0
+            x2 = x2 + 15 if x2 + 15 < im_w else im_w
+            y1 = y1 - 2 if y1 - 2 > 0 else 0
+            y2 = y2 + 5 if y2 + 5 < im_h else im_h
             if 0 <= y1 < y2 <= im_h and 0 <= x1 < x2 <= im_w:
                 crop = img[y1:y2, x1:x2]
                 if crop.size == 0:

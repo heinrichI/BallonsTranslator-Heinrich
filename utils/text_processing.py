@@ -235,3 +235,8 @@ def seg_text(text: str, lang: str) -> Tuple[List, str]:
 
 def is_cjk(lang: str) -> bool:
     return lang in LANGSET_CJK
+
+def should_be_uppercase( text: str) -> bool:
+    uppercase_count = sum(1 for c in text if c.isupper())
+    total_letters = sum(1 for c in text if c.isalpha())
+    return total_letters > 0 and uppercase_count / total_letters > 0.7

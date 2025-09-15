@@ -146,6 +146,9 @@ class ProgramConfig(Config):
     text_advanced_format_panel: bool = True
     expand_tadvanced_panel: bool = True
 
+    vocab_list_config: bool = True
+    vocab_list_expand_state: bool = True
+
     @staticmethod
     def load(cfg_path: str):
         

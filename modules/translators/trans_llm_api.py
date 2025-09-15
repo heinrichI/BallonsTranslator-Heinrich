@@ -68,6 +68,9 @@ class LLM_API_Translator(BaseTranslator):
             "value": "",
             "description": "Base URL for the API. Leave empty for provider default.",
         },
+            # "value": "Please help me to translate the following text from a manga to {to_lang} (if it's already in {to_lang} or looks like gibberish you have to output it as it is instead):\n",
+            # "value": "Please help me to translate the following text from a comics to {to_lang}. If the input text is presented in segments, each marked with <|NUMBER|>, then your output MUST strictly follow this format: <|1|>TRANSLATION_FOR_SEGMENT_1<|2|>TRANSLATION_FOR_SEGMENT_2<|3|>... and so on for all segments.\nDo NOT add any other numbering (like \"1.\", \"2.\") or introductory/concluding text.\nPreserve newlines within a single translation if they were present in the original segment's meaning.",
+            #"value": "Please help me to translate the following text from a comics to {to_lang}. If the input text is presented in segments, each marked with <|NUMBER|>, then your output MUST strictly follow this format: <|1|>TRANSLATION_FOR_SEGMENT_1<|2|>TRANSLATION_FOR_SEGMENT_2<|3|>... and so on for all segments.\nDo NOT add any other numbering (like \"1.\", \"2.\") or introductory/concluding text.",
         "chat system template": {
             "type": "editor",
             "value": "You are an expert translator. Your task is to accurately translate the given text snippets. You must provide the output strictly in the specified JSON format, without any additional explanations or markdown formatting. The JSON must conform to this schema: {\"translations\": [{\"id\": integer, \"translation\": string}]}. If a text snippet is untranslatable or does not require translation, return the original text in the 'translation' field.",

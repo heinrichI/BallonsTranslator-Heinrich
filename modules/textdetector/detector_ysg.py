@@ -110,7 +110,6 @@ class YSGYoloDetector(TextDetectorBase):
         return osp.basename(self.get_param_value('model path').startswith('ysg'))
 
     def _detect(self, img: np.ndarray, proj: ProjImgTrans = None) -> Tuple[np.ndarray, List[TextBlock]]:
-
         result = self.model.predict(
             source=img, save=False, show=False, verbose=False, 
             conf=self.get_param_value('confidence threshold'), iou=self.get_param_value('IoU threshold'),
@@ -157,6 +156,10 @@ class YSGYoloDetector(TextDetectorBase):
                 valid_mask = dets.cls == textblock_idx
                 is_vertical = self.get_param_value('source text is vertical')
                 if torch.any(valid_mask):
+                    # import debugpy
+                    # debugpy.debug_this_thread()
+                    # debugpy.breakpoint()
+
                     xyxy_list = dets.xyxy[valid_mask]
                     xyxy_list = xyxy_list.to(device='cpu', dtype=torch.float32).round().to(torch.int32)
                     xyxy_list[:, [0, 2]] = torch.clip(xyxy_list[:, [0, 2]], 0, im_w - 1)

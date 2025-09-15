@@ -427,6 +427,11 @@ class LLM_OCR(OCRBase):
             self.logger.debug(f"Image dimensions: {im_h}x{im_w}")
         for blk in blk_list:
             x1, y1, x2, y2 = blk.xyxy
+            # pad
+            x1 = x1 - 15 if x1 - 15 > 0 else 0
+            x2 = x2 + 15 if x2 + 15 < im_w else im_w
+            y1 = y1 - 2 if y1 - 2 > 0 else 0
+            y2 = y2 + 5 if y2 + 5 < im_h else im_h
             if self.debug_mode:
                 self.logger.debug(f"Processing block: ({x1}, {y1}, {x2}, {y2})")
             if (
@@ -439,7 +444,8 @@ class LLM_OCR(OCRBase):
             ):
                 cropped_img = img[y1:y2, x1:x2]
 
-                _, buffer = cv2.imencode(".jpg", cropped_img)
+                # Encode the cropped image to base64
+                _, buffer = cv2.imencode(".png", cropped_img)
                 img_base64 = base64.b64encode(buffer).decode("utf-8")
 
                 if self.debug_mode:

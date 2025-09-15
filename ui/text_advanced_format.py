@@ -1,6 +1,6 @@
-from typing import Any, Callable
+from typing import Any, Callable, List
 
-from qtpy.QtWidgets import QSizePolicy, QVBoxLayout, QPushButton, QGroupBox, QLabel, QHBoxLayout
+from qtpy.QtWidgets import QSizePolicy, QVBoxLayout, QPushButton, QGroupBox, QLabel, QHBoxLayout, QListWidget, QListWidgetItem, QWidget
 from qtpy.QtCore import Signal, Qt
 
 from .custom_widget import SmallColorPickerLabel, SmallParamLabel, PanelArea, SmallSizeControlLabel, SmallSizeComboBox, SmallParamLabel, SmallSizeComboBox, SmallComboBox, TextCheckerLabel
@@ -212,3 +212,176 @@ class TextAdvancedFormatPanel(PanelArea):
         self.gradient_group.start_picker.setPickerColor(font_format.gradient_start_color)
         self.gradient_group.end_picker.setPickerColor(font_format.gradient_end_color)
         # self.tate_chu_yoko_checker.setChecked(font_format.font)
+
+class WordListItemWidget(QWidget):
+    def __init__(self, word: str, callback):
+        super().__init__()
+        self.word = word
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 0, 5, 0)
+        
+        self.label = QLabel(word)
+        self.button = QPushButton("X")
+        self.button.setFixedSize(25, 20)
+        self.button.clicked.connect(lambda: callback(word))
+        
+        layout.addWidget(self.label)
+        layout.addStretch()
+        layout.addWidget(self.button)
+
+class WordListPanel(PanelArea):
+    """
+    A panel displaying a list of words.
+    Inherits from PanelArea to provide collapsible/expandable functionality.
+    """
+
+    # Signal emitted when a word in the list is selected/clicked
+    # The signal carries the string value of the selected word.
+    # The signal now carries a tuple (selected_word, textblock_obj).
+    word_selected = Signal(str, object)  # Assuming textblock_obj is of type 'object'
+    wordDeleted = Signal(str)
+
+     # Define the maximum height this panel is allowed to be
+    WORD_LIST_PANEL_MAXH = 210  # Adjust value as needed
+    ITEM_HEIGHT_FALLBACK = 30    # Fallback item height if dynamic calculation fails
+
+    def __init__(self, panel_name: str, config_name: str, config_expand_name: str):
+        # Initialize the base PanelArea class
+        # This sets up the panel's title bar, collapse state handling, etc.
+        super().__init__(panel_name, config_name, config_expand_name)
+
+        # --- UI Elements ---
+
+        # QListWidget is suitable for displaying a list of items
+        self.word_list_widget = QListWidget(self)
+        self.word_list_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Enable sorting for easier navigation (optional)
+        # self.word_list_widget.setSortingEnabled(True)
+
+        # --- Layout ---
+
+        # Create a layout for the content area of the panel
+        content_layout = QVBoxLayout()
+        content_layout.addWidget(self.word_list_widget)
+        content_layout.setAlignment(Qt.AlignmentFlag.AlignTop) # Align widgets to the top
+
+        # Set the created layout as the content for the scrollable area of the PanelArea
+        self.setContentLayout(content_layout)
+
+        # --- Signal Connections ---
+
+        # Connect the QListWidget's itemClicked signal to our internal handler
+        self.word_list_widget.itemClicked.connect(self._on_word_clicked)
+        # Alternatively, you could use currentItemChanged for selection changes
+        # regardless of click (e.g., using arrow keys)
+        # self.word_list_widget.currentItemChanged.connect(self._on_current_word_changed)
+
+
+        # Connect to the after_resized signal to adjust panel height
+        # self.scrollContent.after_resized.connect(self._adjust_size)
+
+    # def _adjust_size(self):
+    #     """
+    #     Adjusts the height of the WordListPanel based on content height.
+    #     If content height exceeds the maximum allowed, limit height and enable scrolling.
+    #     If content fits, shrink panel to fit content.
+    #     """
+    #     content_height = self.scrollContent.height()
+    #     desired_height = min(WordListPanel.WORD_LIST_PANEL_MAXH, content_height)
+    #     self.setFixedHeight(desired_height)
+
+    def adjust_panel_height(self):
+        # if not self.word_list_widget.verticalScrollBar().isVisible():
+        #     self.setFixedHeight(self.word_list_widget.sizeHintForRow(0) * self.word_list_widget.count())
+        # # Adjust panel height to fit contents if there's no scrollbar
+        # content_height = self.sizeHintForRow(0) * self.count() + 2 * self.frameWidth()
+        # max_height = 200  # Optional: set a max height
+        # self.setMaximumHeight(min(content_height, max_height))
+
+
+        # current_height = self.sizeHint().height()
+        # if current_height < self.min_height:
+        #     self.setFixedHeight(current_height)  # Set to current height if it's less than min
+        # else:
+        #     self.setFixedHeight(self.min_height)  # Set to min height
+
+        """
+        Adjusts the panel height based on the number of list items.
+        Calculates height as number of items × item height (from sizeHintForRow).
+        Clamps the height to WORD_LIST_PANEL_MAXH if necessary.
+        """
+        count = self.word_list_widget.count()
+        if count == 0:
+            self.setFixedHeight(0)
+            return
+
+        # Estimate height of one item
+        item_height = self.word_list_widget.sizeHintForRow(0)
+        if item_height <= 0:
+            item_height = WordListPanel.ITEM_HEIGHT_FALLBACK
+
+        total_height = count * item_height + 30
+
+        desired_height = min(WordListPanel.WORD_LIST_PANEL_MAXH, total_height)
+        self.setFixedHeight(desired_height)
+
+    def set_words(self, words: List[str]):
+        """
+        Sets the list of words to be displayed in the panel.
+        Clears the current list before adding new words.
+        """
+        self.word_list_widget.clear() # Remove all current items
+        for word in words:
+            # self.word_list_widget.addItem(word) # Add each word as a list item
+            text_content, textblock_obj = word # Unpack the tuple
+            self.add_word_item(text_content, textblock_obj)
+
+        self.adjust_panel_height()
+        # self._adjust_size()  # Set initial height based on content
+
+
+    def add_word_item(self, word: str, textblock_obj: object):
+        item = QListWidgetItem()
+        widget = WordListItemWidget(word, self.on_delete_clicked)
+        item.setSizeHint(widget.sizeHint())
+        self.word_list_widget.addItem(item)
+        self.word_list_widget.setItemWidget(item, widget)
+
+        # Store the textblock_obj in the item's data for later retrieval
+        item.setData(Qt.UserRole, textblock_obj)
+
+    def on_delete_clicked(self, word: str):
+        self.wordDeleted.emit(word)  # Make sure this signal is defined   
+
+    def _on_word_clicked(self, item: QListWidgetItem):
+        """
+        Internal slot triggered when an item in the QListWidget is clicked.
+        Emits the word_selected signal with the text of the clicked item.
+        """
+        itemWidget = self.word_list_widget.itemWidget(item)
+        selected_word = itemWidget.word
+        textblock_obj = item.data(Qt.UserRole)  # Retrieve associated textblock_obj
+        self.word_selected.emit(selected_word, textblock_obj)  # Emit the signal with both values
+        # print(f"Word clicked: {selected_word}") # Optional: for debugging
+        # self.word_selected.emit(selected_word) # Emit the signal
+
+    # Optional: Handler for current item changed (if using currentItemChanged signal)
+    # def _on_current_word_changed(self, current: QListWidgetItem | None, previous: QListWidgetItem | None):
+    #     if current:
+    #         selected_word = current.text()
+    #         print(f"Current word changed to: {selected_word}")
+    #         self.word_selected.emit(selected_word)
+    #     else:
+    #         print("No item selected.")
+    #         # Decide how you want to handle no selection (e.g., emit None, or empty string)
+    #         # self.word_selected.emit("") # Or emit a specific value for no selection
+
+    # You could add methods to get the currently selected word if needed
+    def get_selected_word(self) -> str | None:
+        """
+        Returns the text of the currently selected word, or None if nothing is selected.
+        """
+        current_item = self.word_list_widget.currentItem()
+        if current_item:
+            return current_item.text()
+        return None

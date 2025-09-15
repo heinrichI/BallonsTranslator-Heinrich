@@ -150,7 +150,7 @@ class InpainterBase(BaseModule):
                 if need_inpaint:
                     inpainted[xyxy_e[1]:xyxy_e[3], xyxy_e[0]:xyxy_e[2]] = self.memory_safe_inpaint(im, msk)
 
-                mask[xyxy[1]:xyxy[3], xyxy[0]:xyxy[2]] = 0
+                mask[int(xyxy[1]):int(xyxy[3]), int(xyxy[0]):int(xyxy[2])] = 0
             
             # Recombine with alpha if original was RGBA
             if original_alpha is not None:

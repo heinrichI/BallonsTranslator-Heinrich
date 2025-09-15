@@ -1,6 +1,6 @@
 import os.path as osp
 import os, re, traceback, sys
-from typing import List, Union
+from typing import List, Union, Dict
 from pathlib import Path
 import subprocess
 from functools import partial
@@ -8,7 +8,7 @@ import time
 import cv2
 
 from tqdm import tqdm
-from qtpy.QtWidgets import QAction, QFileDialog, QMenu, QHBoxLayout, QVBoxLayout, QApplication, QStackedWidget, QSplitter, QListWidget, QShortcut, QListWidgetItem, QMessageBox, QTextEdit, QPlainTextEdit
+from qtpy.QtWidgets import QAction, QFileDialog, QMenu, QHBoxLayout, QVBoxLayout, QApplication, QStackedWidget, QSplitter, QListWidget, QShortcut, QListWidgetItem, QMessageBox, QTextEdit, QPlainTextEdit, QDialog
 from qtpy.QtCore import Qt, QPoint, QSize, QEvent, Signal
 from qtpy.QtGui import QContextMenuEvent, QTextCursor, QGuiApplication, QIcon, QCloseEvent, QKeySequence, QKeyEvent, QPainter, QClipboard, QImage
 
@@ -38,22 +38,45 @@ from .drawing_commands import RunBlkTransCommand
 from .keywordsubwidget import KeywordSubWidget
 from . import shared_widget as SW
 from .custom_widget import MessageBox, FrameLessMessageBox, ImgtransProgressMessageBox
+# from utils.SpellCheckEngine import SpellCheckEngine
+# from .SpellCheckDialog import SpellCheckDialog
 
 class PageListView(QListWidget):
 
     reveal_file = Signal()
+    run_selected_act = Signal(list)
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.setIconSize(QSize(shared.PAGELIST_THUMBNAIL_SIZE, shared.PAGELIST_THUMBNAIL_SIZE))
+        self.setSelectionMode(QListWidget.ExtendedSelection)
 
     def contextMenuEvent(self, e: QContextMenuEvent):
         menu = QMenu()
-        reveal_act = menu.addAction(self.tr('Reveal in File Explorer'))
-        rst = menu.exec_(e.globalPos())
 
-        if rst == reveal_act:
-            self.reveal_file.emit()
+        # Get selected items
+        selected_items = self.selectedItems()
+
+        if len(selected_items) == 1:
+            # Single file selected
+            reveal_act = menu.addAction(self.tr('Reveal in File Explorer'))
+            menu.addSeparator()
+            run_selected_act = menu.addAction(self.tr(f'Run {len(selected_items)} files'))
+            
+            rst = menu.exec_(e.globalPos())
+        
+            if rst == reveal_act:
+                self.reveal_file.emit()
+            elif rst ==  run_selected_act:
+                self.run_selected_act.emit(selected_items)
+        else:
+            # Multiple files selected
+            run_selected_act = menu.addAction(self.tr(f'Run {len(selected_items)} files'))
+
+            rst = menu.exec_(e.globalPos())
+            
+            if rst ==  run_selected_act:
+                self.run_selected_act.emit(selected_items)
 
         return super().contextMenuEvent(e)
 
@@ -71,6 +94,9 @@ class MainWindow(mainwindow_cls):
     restart_signal = Signal()
     create_errdialog = Signal(str, str, str)
     create_infodialog = Signal(dict)
+
+     # Define the signal at the class level with correct types
+    data_updated = Signal(str, str, QImage, list)
     
     def __init__(self, app: QApplication, config: ProgramConfig, open_dir='', **exec_args) -> None:
         super().__init__()
@@ -109,6 +135,8 @@ class MainWindow(mainwindow_cls):
             # https://bugreports.qt.io/browse/QTBUG-133215
             self.hideSystemTitleBar()
             self.showMaximized()
+
+        # self.AbortSpellCheck = False
 
     def setStyleSheet(self, styleSheet: str) -> None:
         self.imgtrans_progress_msgbox.setStyleSheet(styleSheet)
@@ -153,6 +181,7 @@ class MainWindow(mainwindow_cls):
 
         self.pageList = PageListView()
         self.pageList.reveal_file.connect(self.on_reveal_file)
+        self.pageList.run_selected_act.connect(self.on_run_selected) 
         self.pageList.setHidden(True)
         self.pageList.currentItemChanged.connect(self.pageListCurrentItemChanged)
 
@@ -259,6 +288,19 @@ class MainWindow(mainwindow_cls):
         self.comicTransSplitter.setStretchFactor(2, 1)
         self.imgtrans_progress_msgbox = ImgtransProgressMessageBox()
         self.resetStyleSheet()
+        
+        
+        # self.data_updated = Signal(str, bytes, list)
+        # self.data_updated.connect(self.update_dialog)
+        # self.__class__.data_updated.connect(self.update_dialog)
+
+        # self.spellCheckDialog = SpellCheckDialog(self)
+        # self.spellCheckDialog.setParent(self)
+        # self.spellCheckDialog.setWindowFlags(Qt.WindowType.Window)
+        # self.spellCheckDialog.hide()
+
+    # def update_dialog(self, text, word: str, img: QImage, suggestions):
+    #     self.spellCheckDialog.setText(text, word, img, suggestions)
 
     def on_finish_setdetector(self):
         module_manager = self.module_manager
@@ -268,6 +310,7 @@ class MainWindow(mainwindow_cls):
             self.configPanel.detect_config_panel.setDetector(name)
             self.bottomBar.textdet_selector.setSelectedValue(name)
             LOGGER.info('Text detector set to {}'.format(name))
+
 
     def on_finish_setocr(self):
         module_manager = self.module_manager
@@ -1120,8 +1163,10 @@ class MainWindow(mainwindow_cls):
             if pcfg.let_uppercase_flag:
                 blk.translation = blk.translation.upper()
 
-    def on_pagtrans_finished(self, page_index: int):
-        blk_list = self.imgtrans_proj.get_blklist_byidx(page_index)
+    def on_pagtrans_finished(self, page: str):
+        keys_list = list(self.imgtrans_proj.pages.keys())
+        page_index = keys_list.index(page)
+        blk_list = self.imgtrans_proj.pages[page]
         ffmt_list = None
         if len(self.backup_blkstyles) == self.imgtrans_proj.num_pages and len(self.backup_blkstyles[page_index]) == len(blk_list):
             ffmt_list: List[FontFormat] = self.backup_blkstyles[page_index]
@@ -1254,20 +1299,22 @@ class MainWindow(mainwindow_cls):
             pcfg.display_lang = lang
             self.set_display_lang(lang)
 
-    def run_imgtrans(self):
+    def run_imgtrans(self, pages: Dict[str, List[TextBlock]] = None):
         if not self.imgtrans_proj.is_all_pages_no_text and not pcfg.module.keep_exist_textlines:
             reply = QMessageBox.question(self, self.tr('Confirmation'),
                                          self.tr('Are you sure to run image translation again?\nAll existing translation results will be cleared!'),
                                          QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
-        self.on_run_imgtrans()
+        if not isinstance(pages, dict):
+            pages = self.imgtrans_proj.pages
+        self.on_run_imgtrans(pages)
 
     def run_imgtrans_wo_textstyle_update(self):
         self._run_imgtrans_wo_textstyle_update = True
         self.run_imgtrans()
 
-    def on_run_imgtrans(self):
+    def on_run_imgtrans(self, pages: Dict[str, List[TextBlock]]):
         self.backup_blkstyles.clear()
 
         if self.bottomBar.textblockChecker.isChecked():
@@ -1276,13 +1323,13 @@ class MainWindow(mainwindow_cls):
 
         all_disabled = pcfg.module.all_stages_disabled()
         if pcfg.module.enable_detect:
-            for page in self.imgtrans_proj.pages:
+            for page in pages:
                 if not pcfg.module.keep_exist_textlines:
                     self.imgtrans_proj.pages[page].clear()
         else:
             self.st_manager.updateTextBlkList()
             textblk: TextBlock = None
-            for blklist in self.imgtrans_proj.pages.values():
+            for blklist in pages.values():
                 ffmt_list = []
                 self.backup_blkstyles.append(ffmt_list)
                 for textblk in blklist:
@@ -1294,7 +1341,7 @@ class MainWindow(mainwindow_cls):
                     if pcfg.module.enable_translate or (all_disabled and not self._run_imgtrans_wo_textstyle_update) or pcfg.module.enable_ocr:
                         textblk.rich_text = ''
                     textblk.vertical = textblk.src_is_vertical
-        self.module_manager.runImgtransPipeline()
+        self.module_manager.runImgtransPipeline(pages)
 
     def on_transpanel_changed(self):
         self.canvas.editor_index = self.rightComicTransStackPanel.currentIndex()
@@ -1414,6 +1461,15 @@ class MainWindow(mainwindow_cls):
             p = "\""+current_img_path+"\""
             subprocess.Popen("open -R "+p, shell=True)
 
+    def on_run_selected(self, items: list):
+        """Handling launch on multiple files"""
+        pages: Dict[str, List[TextBlock]] = {}
+        items_converted = [i.text() for i in items]
+        for page in self.imgtrans_proj.pages:
+            if (page in items_converted):
+                pages[page] =  self.imgtrans_proj.pages[page]
+        self.run_imgtrans(pages)
+
     def on_set_gsearch_widget(self):
         setup = self.leftBar.globalSearchChecker.isChecked()
         if setup:
@@ -1445,10 +1501,62 @@ class MainWindow(mainwindow_cls):
         self.resetStyleSheet(reverse_icon=True)
         self.save_config()
 
+    # def SpellCheck(self, text: str, xyxy, img):
+    #     import numpy as np
+
+    #     # Unpack the coordinates
+    #     x1, y1, x2, y2 = xyxy
+    #      # Crop the image using NumPy array slicing
+    #     cropped_img = img[y1:y2, x1:x2]
+
+    #     # Convert NumPy array to QImage
+    #     height, width, channel = cropped_img.shape
+    #     bytes_per_line = width * channel
+
+    #     # Ensure the image data is contiguous in memory
+    #     if not cropped_img.flags['C_CONTIGUOUS']:
+    #         cropped_img = np.ascontiguousarray(cropped_img)
+
+    #     # qimg = QImage(img.data, width, height, bytes_per_line, QImage.Format.Format_ARGB32)
+    #     qimg = QImage(cropped_img.data.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
+
+    #     # breakpoint()  # or debugpy.breakpoint()
+    #     # wordsNotFound: int = self.SpellCheckEngine.CountUnknownWordsViaDictionary(text)
+    #     # unknownWords = self.SpellCheckEngine.GetUnknownWordsViaDictionary(text)
+    #     for word in self.SpellCheckEngine.UnknownWords(text):
+    #         suggestions = self.SpellCheckEngine.DoSuggest(word)
+    #         # dialog = SpellCheckEngine(suggestions)
+    #         self.data_updated.emit(text, word, qimg, suggestions)  # Emit the signal
+    #         # self.spellCheckDialog.activateWindow()
+    #         # self.spellCheckDialog.setText(text, img, suggestions)
+    #         result = self.spellCheckDialog.exec()
+    #         if result == QDialog.Accepted:
+    #             LOGGER.debug(f"Dialog state: {self.spellCheckDialog.state}")
+    #             self.SpellCheckEngine.Handle(self.spellCheckDialog)
+    #         else:
+    #             LOGGER.debug("Dialog rejected")
+    #             return None
+
+    #         # if self.spellCheckDialog.exec():
+    #             # Handle the acceptance of the dialog if needed
+
+    #     return self.SpellCheckEngine.fixed_text
+
+
     def ocr_postprocess(self, textblocks: List[TextBlock], img, ocr_module=None, **kwargs):
         for blk in textblocks:
             text = blk.get_text()
             blk.text = self.ocrSubWidget.sub_text(text)
+        # if (not self.AbortSpellCheck):
+        #     for blk in textblocks:
+        #         text = blk.get_text()
+        #         result = self.SpellCheck(text, blk.xyxy, img)
+        #         if (result is None):
+        #             self.AbortSpellCheck = True
+        #             break
+        #         else:
+        #             text = result
+        #         blk.text = self.ocrSubWidget.sub_text(text)
 
     def translate_preprocess(self, translations: List[str] = None, textblocks: List[TextBlock] = None, translator = None, source_text:list = []):
         for i in range(len(source_text)):

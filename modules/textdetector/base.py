@@ -36,7 +36,7 @@ class TextDetectorBase(BaseModule):
     def setup_detector(self):
         raise NotImplementedError
 
-    def detect(self, img: np.ndarray, proj: ProjImgTrans = None) -> Tuple[np.ndarray, List[TextBlock]]:
+    def detect(self, img: np.ndarray, proj: ProjImgTrans = None, imgname = None) -> Tuple[np.ndarray, List[TextBlock],]:
         # TODO: allow processing proj entirely in _detect and yield progress
         if not self.all_model_loaded():
             self.load_model()
@@ -46,6 +46,19 @@ class TextDetectorBase(BaseModule):
             img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
 
         mask, blk_list = self._detect(img, proj)
-        for blk in blk_list:
+
+        # import debugpy
+        # debugpy.debug_this_thread()
+        # debugpy.breakpoint()
+
+        # for i, blk in blk_list:
+        for i, blk in enumerate(blk_list):
             blk.det_model = self.name
+ 
+            # save ballons
+            # x1, y1, x2, y2 = blk.xyxy
+            # from PIL import Image
+            # from pathlib import Path
+            # im = Image.fromarray(img[y1:y2 + 5, x1 - 15:x2 + 15])
+            # im.save(f'{Path(imgname).stem}_{i}.png')
         return mask, blk_list

@@ -197,6 +197,8 @@ def build_funcmap(module_str: str, params_names: List[str], func_prefix: str = '
     funcmap = {}
     for param in params_names:
         tgt_func = f'{func_prefix}{param}{func_suffix}'
+        if tgt_func in {'ffmt_change__style_name', 'ffmt_change_deprecated_attributes'}:
+            continue
         try:
             tgt_func = getattr(module, tgt_func)
         except Exception as e:
