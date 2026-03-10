@@ -7,6 +7,7 @@ from .ctd import CTDModel
 
 CTD_ONNX_PATH = 'data/models/comictextdetector.pt.onnx'
 CTD_TORCH_PATH = 'data/models/comictextdetector.pt'
+# CTD_TORCH_PATH = r'j:/Comic translate/comic-text-detector/data/comictextdetector_finetuned.pt'
 
 def load_ctd_model(model_path, device, detect_size=1024) -> CTDModel:
     model = CTDModel(model_path, detect_size=detect_size, device=device)

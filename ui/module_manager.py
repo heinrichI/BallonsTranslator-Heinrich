@@ -202,10 +202,10 @@ class TranslateThread(ModuleThread):
 
     def _translate_page(self, page_dict, page_key: str, emit_finished=True):
         page = page_dict[page_key]
-        try:
-            self.translator.translate_textblk_lst(page)
-        except Exception as e:
-            create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
+        # try:
+        self.translator.translate_textblk_lst(page)
+        # except Exception as e:
+        #     create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
         if emit_finished:
             self.finish_translate_page.emit(page_key)
 
@@ -237,6 +237,10 @@ class TranslateThread(ModuleThread):
                 
                 # TODO: allowing retry/skip/terminate
 
+                # import debugpy
+                # debugpy.debug_this_thread()
+                # debugpy.breakpoint()
+
                 msg = self.tr('Translation Failed.')
                 if isinstance(e, MissingTranslatorParams):
                     msg = msg + '\n' + str(e) + self.tr(' is required for ' + self.translator.name)
@@ -246,7 +250,7 @@ class TranslateThread(ModuleThread):
                 # self.imgtrans_proj = None
                 # self.finished_counter = 0
                 # self.pipeline_pagekey_queue = []
-                # return
+                return
             self.blockSignals(False)
             self.finished_counter += 1
             self.progress_changed.emit(self.finished_counter)

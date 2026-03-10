@@ -163,6 +163,13 @@ class SourceTextEdit(QTextEdit):
         self.setFixedHeight(max(h, self.min_height))
 
     def on_content_changed(self):
+        # import debugpy
+        # debugpy.debug_this_thread()
+        # debugpy.breakpoint()
+        # import traceback
+        # import sys
+        # traceback.print_stack(file=sys.stdout) 
+        # LOGGER.debug(f"on_content_changed `{self.toPlainText()}`.")
         if self.text_content_changed:
             self.text_content_changed = False
             if not self.highlighting:
@@ -294,6 +301,7 @@ class SourceTextEdit(QTextEdit):
         cursor = QTextCursor(self.document())
         cursor.select(QTextCursor.SelectionType.Document)
         cursor.insertText(text)
+        # LOGGER.debug(f"insertText `{text}`.")
 
     def highlight_one_word(self, word: str, color: QColor, bgcolor: QColor):
         """

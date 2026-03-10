@@ -254,15 +254,15 @@ if hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backe
     DEFAULT_DEVICE = 'mps'
     AVAILABLE_DEVICES.append(DEFAULT_DEVICE)
 
-try: 
-    import torch_directml
-    if hasattr(torch, 'privateuseone') and torch_directml.device_count() > 0:
-        torch.dml = torch_directml
-        DEFAULT_DEVICE = f'privateuseone:{torch.dml.default_device()}'
-        AVAILABLE_DEVICES += [f"privateuseone:{d}" for d in range(torch.dml.device_count())]
-except:
+# try: 
+#     import torch_directml
+#     if hasattr(torch, 'privateuseone') and torch_directml.device_count() > 0:
+#         torch.dml = torch_directml
+#         DEFAULT_DEVICE = f'privateuseone:{torch.dml.default_device()}'
+#         AVAILABLE_DEVICES += [f"privateuseone:{d}" for d in range(torch.dml.device_count())]
+# except:
     # directml is not supported
-    pass
+    # pass
 BF16_SUPPORTED = DEFAULT_DEVICE == 'cuda' and torch.cuda.is_bf16_supported() or DEFAULT_DEVICE == 'xpu' and torch.xpu.is_bf16_supported()
 
 def is_nvidia():
