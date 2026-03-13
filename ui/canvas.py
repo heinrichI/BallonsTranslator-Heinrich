@@ -169,6 +169,7 @@ class Canvas(QGraphicsScene):
     layout_textblks = Signal()
     reset_angle = Signal()
     squeeze_blk = Signal()
+    savePng_blk = Signal()
 
     run_blktrans = Signal(int)
 
@@ -777,6 +778,7 @@ class Canvas(QGraphicsScene):
             layout_act = menu.addAction(self.tr("Auto layout"))
             angle_act = menu.addAction(self.tr("Reset Angle"))
             squeeze_act = menu.addAction(self.tr("Squeeze"))
+            savePng_act = menu.addAction(self.tr("Save PNG"))
             menu.addSeparator()
             translate_act = menu.addAction(self.tr("translate"))
             ocr_act = menu.addAction(self.tr("OCR"))
@@ -806,6 +808,8 @@ class Canvas(QGraphicsScene):
                 self.reset_angle.emit()
             elif rst == squeeze_act:
                 self.squeeze_blk.emit()
+            elif rst == savePng_act:
+                self.savePng_blk.emit()                
             elif rst == translate_act:
                 self.run_blktrans.emit(-1)
             elif rst == ocr_act:
