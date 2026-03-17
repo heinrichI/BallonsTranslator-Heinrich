@@ -56,7 +56,7 @@ class TransGemmaTranslator(BaseTranslator):
             "description": "Top P for sampling.",
         },
         "retry attempts": {
-            "value": 3,
+            "value": 1,
             "description": "Number of retry attempts on API connection or parsing failures.",
         },
         "retry timeout": {
@@ -145,6 +145,7 @@ class TransGemmaTranslator(BaseTranslator):
         for i, query in enumerate(queries):
             query = query.replace('\n', ' ')
             element = f"id={i + 1 - i_offset}: {query}\n"
+            # element = f"<ID>{i + 1 - i_offset}</ID>\n<TEXT>{query}</TEXT>\n<<<END>>>"
             if len(current_prompt_content) + len(element) > max_len_approx and num_src > 0:
                 yield current_prompt_content, num_src
                 current_prompt_content = element
@@ -159,7 +160,7 @@ class TransGemmaTranslator(BaseTranslator):
 
     def _request_translation(self, text: str) -> Optional[TranslationResponse]:
         current_api_key = "lm-studio"
-        
+        text = text.replace("\n", " ")
         # import debugpy
         # debugpy.debug_this_thread()
         # debugpy.breakpoint()
@@ -198,6 +199,7 @@ class TransGemmaTranslator(BaseTranslator):
         #         "text": text,
         #     }
         # ],
+        # print(messages)
 
         api_args = {
             "model": model_name,
@@ -215,8 +217,8 @@ class TransGemmaTranslator(BaseTranslator):
             },
         }
 
-        api_args["frequency_penalty"] = self.frequency_penalty
-        api_args["presence_penalty"] = self.presence_penalty
+        # api_args["frequency_penalty"] = self.frequency_penalty
+        # api_args["presence_penalty"] = self.presence_penalty
     
         try:
             completion = self.client.chat.completions.create(**api_args)
@@ -263,69 +265,112 @@ class TransGemmaTranslator(BaseTranslator):
         to_lang = self.lang_map.get(self.lang_target, self.lang_target)
 
         for text, num_src in self._assemble_prompts(src_list, to_lang=to_lang):
-            api_retry_attempt = 0
-            mismatch_retry_attempt = 0
-            skipped_translation_retry_attempt = 0
+            # api_retry_attempt = 0
+            # mismatch_retry_attempt = 0
+            # skipped_translation_retry_attempt = 0
             
-            while True:
-                try:
-                    parsed_response = self._request_translation(text)
+            # while True:
+                # try:
+            parsed_response = self._request_translation(text)
                             
                     # import debugpy
                     # debugpy.debug_this_thread()
                     # debugpy.breakpoint()
 
-                    if not parsed_response or not parsed_response.translations:
-                        raise ValueError("Received empty or invalid parsed response from API.")
+            if not parsed_response or not parsed_response.translations:
+                raise ValueError("Received empty or invalid parsed response from API.")
+            
+            translations_dict = {item.id: item.translation for item in parsed_response.translations}
 
-                    if len(parsed_response.translations) != num_src:
-                        raise InvalidNumTranslations(f"Expected {num_src}, got {len(parsed_response.translations)}")
-
-                    translations_dict = {item.id: item.translation for item in parsed_response.translations}
-                    ordered_translations = [translations_dict.get(i, "") for i in range(1, num_src + 1)]
-
-                    for i, (src, trans) in enumerate(zip(src_list, ordered_translations)):
-                        if len(src) < 60:
-                            continue
-                        # 1. Проверка на пустой результат при непустом источнике
-                        if not trans.strip() and src.strip():
-                            raise TranslationIntegrityError(f"ID {i}: Empty translation for source '{src[:20]}...'")
-                            continue
-                        # 2. Эвристика коэффициента сжатия
-                        current_ratio = len(trans) / len(src)
-                        if current_ratio < 0.47:
-                           raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {0.47}). \n{src} \n{trans}")
-
-                    translations.extend(ordered_translations)
-                    self.logger.info(f"Successfully translated batch of {num_src}. Tokens used: {self.token_count_last}")
-                    break
-
-                except TranslationIntegrityError as e:
-                    skipped_translation_retry_attempt += 1
-                    self.logger.warning(f"Skipped translation: {e}. Attempt {skipped_translation_retry_attempt}/3.")
-                    if skipped_translation_retry_attempt >= 3:
-                        self.logger.error("Failed to translate after retries.")
-                        translations.extend(["[ERROR: Skipped translation]"] * num_src)
-                        raise  
-                    time.sleep(self.retry_timeout / 2)
-
-                except InvalidNumTranslations as e:
-                    mismatch_retry_attempt += 1
-                    self.logger.warning(f"Translation structure mismatch: {e}. Attempt {mismatch_retry_attempt}/{self.invalid_repeat_count}.")
-                    if mismatch_retry_attempt >= self.invalid_repeat_count:
-                        self.logger.error("Failed to get correct translation structure after retries.")
-                        translations.extend(["[ERROR: Structure Mismatch]"] * num_src)
-                        raise  
-                    time.sleep(self.retry_timeout / 2)
+            if len(parsed_response.translations) != num_src:
+            #     raise InvalidNumTranslations(f"Expected {num_src}, got {len(parsed_response.translations)}")
+                self.logger.warning(f"Translation structure mismatch: scr={num_src}/translations={len(parsed_response.translations)}.")
+            
+                # Получаем список недостающих ID
+                existing_ids = {item.id for item in parsed_response.translations}
+                missing_ids = [i for i in range(1, num_src + 1) if i not in existing_ids]
                 
-                except Exception as e:
-                    api_retry_attempt += 1
-                    self.logger.warning(f"API request/parsing failed: {e}. Attempt {api_retry_attempt}/{self.retry_attempts}.")
-                    if api_retry_attempt >= self.retry_attempts:
-                        self.logger.error(f"Failed to translate batch after {self.retry_attempts} attempts: {traceback.format_exc()}")
-                        translations.extend([f"[ERROR: API Failed]"] * num_src)
-                        raise  
-                    time.sleep(self.retry_timeout)
+                for missing_id in sorted(missing_ids):
+                    self.logger.warning(f"Missing ID: {missing_id}. Requesting separately...")
+                    # import debugpy
+                    # debugpy.debug_this_thread()
+                    # debugpy.breakpoint()
+                    # Запрашиваем только недостающие элементы
+                    missing_text = src_list[missing_id-1]
+                    missing_response = self._request_translation(missing_text)
+                    tr: str = missing_response.translations[0].translation
+                    if (tr.strip()):
+                        self.logger.warning(f"Get missing translation: {tr}.")
+                        translations_dict[missing_id] = tr
+                    else:
+                        raise InvalidNumTranslations(f"Missing translation. Can not translate {missing_text}.")
+
+            ordered_translations = [translations_dict.get(i, "") for i in range(1, num_src + 1)]
+
+            for i, (src, trans) in enumerate(zip(src_list, ordered_translations)):
+                # Проверка на пустой результат при непустом источнике
+                if not trans.strip() and src.strip():
+                    self.logger.warning(f"Empty translation for source: '{src[:20]}...'")
+                    # import debugpy
+                    # debugpy.debug_this_thread()
+                    # debugpy.breakpoint()
+                    empty_response = self._request_translation(src)
+                    tr: str = empty_response.translations[0].translation
+                    if not tr:
+                        raise TranslationIntegrityError(f"ID {i}: Empty translation for source '{src[:20]}...'")
+                    else:
+                        ordered_translations[i] = tr
+
+                # if len(src) < 3:
+                #     continue
+
+                # Эвристика коэффициента сжатия
+                RATIO_THRESHOLD = 0.47
+                current_ratio = len(trans) / len(src)
+                if current_ratio < RATIO_THRESHOLD:
+                    self.logger.warning(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \n{src} \n{trans}")
+                    # import debugpy
+                    # debugpy.debug_this_thread()
+                    # debugpy.breakpoint()
+                    ratio_response = self._request_translation(src)
+                    tr: str = ratio_response.translations[0].translation
+                    current_ratio = len(tr) / len(src)
+                    if current_ratio < RATIO_THRESHOLD:
+                        raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \n{src} \n{trans}")
+                    else:
+                        self.logger.warning(f"Get translation for low compression: {tr}.")
+                        ordered_translations[i] = tr
+
+            translations.extend(ordered_translations)
+            self.logger.info(f"Successfully translated batch of {num_src}. Tokens used: {self.token_count_last}")
+            # break
+
+                # except TranslationIntegrityError as e:
+                #     skipped_translation_retry_attempt += 1
+                #     self.logger.warning(f"Skipped translation: {e}. Attempt {skipped_translation_retry_attempt}/3.")
+                #     if skipped_translation_retry_attempt >= 3:
+                #         self.logger.error("Failed to translate after retries.")
+                #         translations.extend(["[ERROR: Skipped translation]"] * num_src)
+                #         raise  
+                #     time.sleep(self.retry_timeout / 2)
+
+                # except InvalidNumTranslations as e:
+                #     mismatch_retry_attempt += 1
+                #     self.logger.warning(f"Translation structure mismatch: {e}. Attempt {mismatch_retry_attempt}/{self.invalid_repeat_count}.")
+                #     if mismatch_retry_attempt >= self.invalid_repeat_count:
+                #         self.logger.error("Failed to get correct translation structure after retries.")
+                #         translations.extend(["[ERROR: Structure Mismatch]"] * num_src)
+                #         raise  
+                #     time.sleep(self.retry_timeout / 2)
+                
+                # except Exception as e:
+                #     api_retry_attempt += 1
+                #     self.logger.warning(f"API request/parsing failed: {e}. Attempt {api_retry_attempt}/{self.retry_attempts}.")
+                #     if api_retry_attempt >= self.retry_attempts:
+                #         self.logger.error(f"Failed to translate batch after {self.retry_attempts} attempts: {traceback.format_exc()}")
+                #         translations.extend([f"[ERROR: API Failed]"] * num_src)
+                #         raise  
+                #     time.sleep(self.retry_timeout)
                     
         return translations
 
