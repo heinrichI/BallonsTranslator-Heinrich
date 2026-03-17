@@ -17,7 +17,11 @@ class PaddleOCRVLMy(OCRBase):
         "max_new_tokens": {
             "value": 1024,
             "description": "Max generation tokens"
-        }
+        },
+        "model_path": {
+            "value": "",
+            "description": "Path to PaddleOCR-VL.",
+        },
     }
     device = DEFAULT_DEVICE
 
@@ -77,7 +81,7 @@ class PaddleOCRVLMy(OCRBase):
     def _load_model(self):
         if self.model is None:
             model = AutoModelForCausalLM.from_pretrained(
-                MODEL_PATH,
+                self.params['model_path']['value'],
                 trust_remote_code=True,
                 dtype=torch.float16 if self.device == "cuda" else torch.float32
                 # dtype=torch.bfloat16,
@@ -126,6 +130,13 @@ class PaddleOCRVLMy(OCRBase):
 
     def updateParam(self, param_key: str, param_content):
         super().updateParam(param_key, param_content)
+        # if param_key == 'model_path':
+        #     model = AutoModelForCausalLM.from_pretrained(
+        #         self.params['model_path']['value'],
+        #         trust_remote_code=True,
+        #         dtype=torch.float16 if self.device == "cuda" else torch.float32
+        #         # dtype=torch.bfloat16,
+        #     ).to(self.device).eval()
         device = self.params['device']['value']
         if self.device != device and self.model is not None:
             self.model.to(device)
