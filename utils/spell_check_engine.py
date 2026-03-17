@@ -199,10 +199,10 @@ class SpellCheckEngine:
                 word = word.strip(''.join(split_chars))
 
                 if (word in self.skipped_words):
-                    self.logger.debug(f'word {word} skipped')
+                    # self.logger.debug(f'word {word} skipped')
                     continue
                 if self.is_number(word):
-                    self.logger.debug(f'number {word} skipped')
+                    # self.logger.debug(f'number {word} skipped')
                     # unknown_words.append((word, textblock_obj))
                     continue
                     # if len(word) == 1 or not self.dictionary.lookup(word):

@@ -19,7 +19,7 @@ from .textedit_commands import propagate_user_edit, TextEditCommand, ReshapeItem
 from .text_panel import FontFormatPanel
 from utils.config import pcfg
 from utils import shared
-from utils.imgproc_utils import extract_ballon_region, rotate_polygons, get_block_mask
+from utils.imgproc_utils import extract_ballon_region, rotate_polygons, get_block_mask, union_area
 from utils.text_processing import seg_text, is_cjk
 from utils.text_layout import layout_text
 
@@ -35,6 +35,12 @@ LAYOUT_HEIGHT_PADDING = 1.06  # multiplier for block height (bottom margin)
 LAYOUT_WIDTH_STROKE_FACTOR = 1.28  # width = max line width * this (stroke/outline clearance)
 LAYOUT_SCALE_UP_MAX = 1.4  # allow scaling font up to this when bubble is large and text is short
 LAYOUT_SCALE_UP_FILL = 0.78  # target fill ratio when scaling up in large bubbles
+LAYOUT_OVERLAP_THRESHOLD = 0  # минимальная площадь пересечения для считания перекрытием (0 = любое)
+LAYOUT_OVERLAP_CHECK_ENABLED = True  # включить/выключить проверку перекрытий
+LAYOUT_OVERLAP_SIGNIFICANT_AREA = 400  # минимальная площадь для учёта ухудшения
+LAYOUT_OVERLAP_WORSEN_FACTOR = 3.0      # было 1.3 — только если утроилось
+LAYOUT_MAX_DRIFT_RATIO = 0.4  # block center can drift at most 40% of its original size
+
 
 
 class CreateItemCommand(QUndoCommand):
@@ -822,10 +828,142 @@ class SceneTextManager(QObject):
             else:
                 self.formatpanel.set_textblk_item(multi_select=bool(textitems))
 
-    def layout_textblk(self, blkitem: TextBlkItem, text: str = None, mask: np.ndarray = None, bounding_rect: List = None, region_rect: List = None):
-        '''
-        auto text layout, vertical writing is not supported yet.
-        '''
+
+    def check_block_overlaps(self, blkitem: TextBlkItem) -> dict:
+        """
+        Проверяет перекрытие блока с другими в self.textblk_item_list.
+        Returns: dict {idx: overlap_area}
+        """
+        overlaps = {}
+        blk_rect = blkitem.absBoundingRect(qrect=True)
+        blk_xyxy = [blk_rect.x(), blk_rect.y(),
+                    blk_rect.x() + blk_rect.width(),
+                    blk_rect.y() + blk_rect.height()]
+
+        for idx, other_item in enumerate(self.textblk_item_list):
+            if other_item is blkitem:
+                continue
+            other_rect = other_item.absBoundingRect(qrect=True)
+            other_xyxy = [other_rect.x(), other_rect.y(),
+                        other_rect.x() + other_rect.width(),
+                        other_rect.y() + other_rect.height()]
+            inter_area = union_area(blk_xyxy, other_xyxy)
+            if inter_area > LAYOUT_OVERLAP_THRESHOLD:
+                overlaps[idx] = inter_area
+        return overlaps
+
+
+    def _has_overlap_problems(self, overlaps_before: dict, overlaps_after: dict,
+                            blkitem: TextBlkItem) -> Tuple[bool, set, set]:
+        """
+        Проверяет на новые или значительно ухудшившиеся перекрытия.
+        Игнорирует незначительные перекрытия (< LAYOUT_OVERLAP_SIGNIFICANT_AREA).
+        """
+        new_overlaps = set()
+        worsened_overlaps = set()
+
+        for idx, area_after in overlaps_after.items():
+            # Игнорируем незначительные перекрытия
+            if area_after < LAYOUT_OVERLAP_SIGNIFICANT_AREA:
+                continue
+
+            area_before = overlaps_before.get(idx, 0)
+
+            if area_before < LAYOUT_OVERLAP_SIGNIFICANT_AREA:
+                # Раньше перекрытия не было (или было незначительное) → новое
+                new_overlaps.add(idx)
+            else:
+                # Перекрытие уже было — проверяем, стало ли намного хуже
+                if area_after > area_before * LAYOUT_OVERLAP_WORSEN_FACTOR:
+                    worsened_overlaps.add(idx)
+
+        has_problems = bool(new_overlaps) or bool(worsened_overlaps)
+        return has_problems, new_overlaps, worsened_overlaps
+
+
+    def _rollback_layout_changes(self, blkitem: TextBlkItem, original_font_size: float,
+                                original_rect: List, text_to_set: str,
+                                restore_charfmts: bool = False, char_fmts=None):
+        """
+        Откатывает изменения к исходному состоянию.
+        
+        НЕ уменьшает шрифт — сохраняет читаемость.
+        Текст может визуально выходить за пределы rect,
+        но bounding rect остаётся на месте, предотвращая каскадные
+        ложные срабатывания у следующих блоков.
+        """
+        blkitem.textCursor().clearSelection()
+
+        # Восстанавливаем исходный шрифт — БЕЗ УМЕНЬШЕНИЯ
+        blkitem.setFontSize(original_font_size)
+
+        # Устанавливаем текст
+        blkitem.setPlainText(text_to_set)
+        if len(self.pairwidget_list) > blkitem.idx:
+            self.pairwidget_list[blkitem.idx].e_trans.setPlainText(text_to_set)
+
+        # Восстанавливаем форматирование если нужно
+        if restore_charfmts and char_fmts:
+            try:
+                self.restore_charfmts(blkitem, text_to_set, text_to_set, char_fmts)
+            except Exception:
+                pass
+
+        # Устанавливаем rect ПОСЛЕДНИМ — перебивает авто-ресайз от setPlainText
+        blkitem.setRect(original_rect, repaint=True)
+        # НЕ вызываем squeezeBoundingRect() — он бы изменил rect
+
+        LOGGER.debug(
+            f"[OVERLAP] Rollback: font kept at {original_font_size:.1f}, "
+            f"rect={[round(v, 1) for v in original_rect]}"
+        )
+
+
+    def _clamp_block_position(self, blkitem: TextBlkItem, original_rect: List,
+                            im_w: int, im_h: int):
+        """
+        Ограничивает дрифт центра блока от исходной позиции.
+        """
+        new_rect = blkitem.absBoundingRect(qrect=True)
+        new_x, new_y = new_rect.x(), new_rect.y()
+        new_w, new_h = new_rect.width(), new_rect.height()
+
+        orig_cx = original_rect[0] + original_rect[2] / 2
+        orig_cy = original_rect[1] + original_rect[3] / 2
+        new_cx = new_x + new_w / 2
+        new_cy = new_y + new_h / 2
+
+        max_drift_x = max(original_rect[2] * LAYOUT_MAX_DRIFT_RATIO, 15)
+        max_drift_y = max(original_rect[3] * LAYOUT_MAX_DRIFT_RATIO, 15)
+
+        drift_x = new_cx - orig_cx
+        drift_y = new_cy - orig_cy
+
+        clamped_x = new_x
+        clamped_y = new_y
+
+        if abs(drift_x) > max_drift_x:
+            correction = drift_x - np.sign(drift_x) * max_drift_x
+            clamped_x = new_x - correction
+        if abs(drift_y) > max_drift_y:
+            correction = drift_y - np.sign(drift_y) * max_drift_y
+            clamped_y = new_y - correction
+
+        clamped_x = max(0, min(clamped_x, im_w - new_w))
+        clamped_y = max(0, min(clamped_y, im_h - new_h))
+
+        if abs(clamped_x - new_x) > 0.5 or abs(clamped_y - new_y) > 0.5:
+            LOGGER.debug(
+                f"[OVERLAP] idx={blkitem.idx} clamped: "
+                f"({new_x:.0f},{new_y:.0f})→({clamped_x:.0f},{clamped_y:.0f})"
+            )
+            blkitem.setRect([clamped_x, clamped_y, new_w, new_h], repaint=True)
+
+
+    def layout_textblk(self, blkitem: TextBlkItem, text: str = None,
+                    mask: np.ndarray = None, bounding_rect: List = None,
+                    region_rect: List = None):
+        '''auto text layout, vertical writing is not supported yet.'''
         img = self.imgtrans_proj.img_array
         if img is None:
             return
@@ -835,19 +973,41 @@ class SceneTextManager(QObject):
         src_is_cjk = is_cjk(pcfg.module.translate_source)
         tgt_is_cjk = is_cjk(pcfg.module.translate_target)
 
-        # disable for vertical writing
         if blkitem.blk.vertical:
             return
-        
+
         old_br = blkitem.absBoundingRect(qrect=True)
         old_br = [old_br.x(), old_br.y(), old_br.width(), old_br.height()]
         if old_br[2] < 1:
             return
 
+        # ====== СОХРАНЯЕМ ИСХОДНОЕ СОСТОЯНИЕ ======
+        original_font_size = blkitem.font().pointSizeF()
+        original_rect = old_br.copy()
+
+        LOGGER.debug(
+            f"[OVERLAP] === layout_textblk START idx={blkitem.idx}, "
+            f"font={original_font_size:.2f}, "
+            f"rect={[round(v, 1) for v in original_rect]}, "
+            f"textblk_item_list_size={len(self.textblk_item_list)}"
+        )
+
+        # ====== ПРОВЕРКА ПЕРЕКРЫТИЙ ДО ИЗМЕНЕНИЙ ======
+        overlaps_before = {}
+        has_enough_items_for_check = (
+            LAYOUT_OVERLAP_CHECK_ENABLED
+            and len(self.textblk_item_list) > 0
+        )
+        if has_enough_items_for_check:
+            overlaps_before = self.check_block_overlaps(blkitem)
+            if overlaps_before:
+                LOGGER.debug(f"[OVERLAP] overlaps_before={overlaps_before}")
+
         blk_font = blkitem.font()
         fmt = blkitem.get_fontformat()
-        blk_font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, fmt.letter_spacing * 100)
-        text_size_func = lambda text: get_text_size(QFontMetricsF(blk_font), text)
+        blk_font.setLetterSpacing(QFont.SpacingType.PercentageSpacing,
+                                fmt.letter_spacing * 100)
+        text_size_func = lambda t: get_text_size(QFontMetricsF(blk_font), t)
 
         restore_charfmts = False
         if text is None:
@@ -857,7 +1017,9 @@ class SceneTextManager(QObject):
         if not text.strip():
             return
 
-        original_block_area = None  # used later to cap resize for huge blocks
+        rollback_text = text
+
+        original_block_area = None
         if mask is None:
             bounding_rect = blkitem.absBoundingRect(max_h=im_h, max_w=im_w)
             if bounding_rect[2] <= 0 or bounding_rect[3] <= 0:
@@ -865,7 +1027,6 @@ class SceneTextManager(QObject):
                 if len(self.pairwidget_list) > blkitem.idx:
                     self.pairwidget_list[blkitem.idx].e_trans.setPlainText(text)
                 return
-            # Constrain only clearly abnormal blocks (>50% image) so normal bubbles keep good size
             block_area = bounding_rect[2] * bounding_rect[3]
             original_block_area = block_area
             if img_area > 0 and block_area > 0.5 * img_area:
@@ -874,10 +1035,7 @@ class SceneTextManager(QObject):
                 cx = bounding_rect[0] + bounding_rect[2] / 2
                 cy = bounding_rect[1] + bounding_rect[3] / 2
                 bounding_rect = [
-                    int(cx - max_w / 2),
-                    int(cy - max_h / 2),
-                    max_w,
-                    max_h,
+                    int(cx - max_w / 2), int(cy - max_h / 2), max_w, max_h,
                 ]
                 bounding_rect[0] = max(0, min(bounding_rect[0], im_w - max_w))
                 bounding_rect[1] = max(0, min(bounding_rect[1], im_h - max_h))
@@ -885,11 +1043,20 @@ class SceneTextManager(QObject):
                 max_enlarge_ratio = 2.5
             else:
                 max_enlarge_ratio = 3
-            enlarge_ratio = min(max(bounding_rect[2] / bounding_rect[3], bounding_rect[3] / bounding_rect[2]) * 1.5, max_enlarge_ratio)
-            mask, ballon_area, mask_xyxy, region_rect = extract_ballon_region(img, bounding_rect, enlarge_ratio=enlarge_ratio, cal_region_rect=True)
+            enlarge_ratio = min(
+                max(bounding_rect[2] / bounding_rect[3],
+                    bounding_rect[3] / bounding_rect[2]) * 1.5,
+                max_enlarge_ratio
+            )
+            mask, ballon_area, mask_xyxy, region_rect = extract_ballon_region(
+                img, bounding_rect, enlarge_ratio=enlarge_ratio,
+                cal_region_rect=True
+            )
         else:
-            mask_xyxy = [bounding_rect[0], bounding_rect[1], bounding_rect[0]+bounding_rect[2], bounding_rect[1]+bounding_rect[3]]
-        
+            mask_xyxy = [bounding_rect[0], bounding_rect[1],
+                        bounding_rect[0] + bounding_rect[2],
+                        bounding_rect[1] + bounding_rect[3]]
+
         words, delimiter = seg_text(text, pcfg.module.translate_target)
         if len(words) < 1:
             return
@@ -902,7 +1069,7 @@ class SceneTextManager(QObject):
         else:
             line_height = int(round(fmt.line_spacing * text_size_func('X')[1]))
         delimiter_len = text_size_func(delimiter)[0]
- 
+
         ref_src_lines = False
         if not blkitem.blk.src_is_vertical:
             ref_src_lines = blkitem.blk.line_coord_valid(old_br)
@@ -910,49 +1077,84 @@ class SceneTextManager(QObject):
         adaptive_fntsize = False
         resize_ratio = 1
 
-        # import debugpy
-        # debugpy.debug_this_thread()
-        # debugpy.breakpoint()
-        if self.auto_textlayout_flag and pcfg.let_fntsize_flag == 0 and pcfg.let_autolayout_flag:
-            if blkitem.blk.src_is_vertical and blkitem.blk.vertical != blkitem.blk.src_is_vertical:
+        if (self.auto_textlayout_flag and pcfg.let_fntsize_flag == 0
+                and pcfg.let_autolayout_flag):
+            if (blkitem.blk.src_is_vertical
+                    and blkitem.blk.vertical != blkitem.blk.src_is_vertical):
                 adaptive_fntsize = True
                 area_ratio = ballon_area / text_area
                 ballon_area_thresh = 1.7
                 downscale_constraint = 0.6
-                resize_ratio = np.clip(min(area_ratio / ballon_area_thresh, region_rect [2] / max(wl_list)), downscale_constraint, 1.0)
-
+                resize_ratio = np.clip(
+                    min(area_ratio / ballon_area_thresh,
+                        region_rect[2] / max(wl_list)),
+                    downscale_constraint, 1.0
+                )
             else:
                 if not src_is_cjk:
-                    # Stricter scale-down so text stays inside bubble with margin (avoid overflow)
                     resize_ratio_ballon = max(ballon_area / 1.70 / text_area, 0.4)
                     if ref_src_lines:
-                        _, src_width = blkitem.blk.normalizd_width_list(normalize=False)
-                        resize_ratio_src = src_width / (sum(wl_list) + max((len(wl_list) - 1 - len(blkitem.blk.lines_array())), 0) * delimiter_len)
+                        _, src_width = blkitem.blk.normalizd_width_list(
+                            normalize=False)
+                        resize_ratio_src = src_width / (
+                            sum(wl_list) + max(
+                                (len(wl_list) - 1
+                                - len(blkitem.blk.lines_array())), 0
+                            ) * delimiter_len
+                        )
                         resize_ratio = min(resize_ratio_ballon, resize_ratio_src)
                     else:
                         resize_ratio = resize_ratio_ballon
                 elif not blkitem.blk.src_is_vertical and ref_src_lines:
-                    _, src_width = blkitem.blk.normalizd_width_list(normalize=False)
-                    resize_ratio_src = src_width / (sum(wl_list) + max((len(wl_list) - 1 - len(blkitem.blk.lines_array())), 0) * delimiter_len)
+                    _, src_width = blkitem.blk.normalizd_width_list(
+                        normalize=False)
+                    resize_ratio_src = src_width / (
+                        sum(wl_list) + max(
+                            (len(wl_list) - 1
+                            - len(blkitem.blk.lines_array())), 0
+                        ) * delimiter_len
+                    )
                     resize_ratio = max(resize_ratio_src * 1.5, 0.4)
-                # Minimum scale so text fits but isn't too small; only cap for truly huge blocks
                 resize_ratio = min(max(resize_ratio, 0.5), 1.0)
-                area_for_cap = (original_block_area if original_block_area is not None else bounding_rect[2] * bounding_rect[3])
+                area_for_cap = (original_block_area
+                                if original_block_area is not None
+                                else bounding_rect[2] * bounding_rect[3])
                 if img_area > 0 and area_for_cap > 0.5 * img_area:
                     resize_ratio = min(resize_ratio, 0.5)
-                # When region is much larger than text: scale UP so short text in big bubbles is readable (was: cap only)
-                if region_rect is not None and len(region_rect) >= 4 and text_area > 0:
+                if (region_rect is not None and len(region_rect) >= 4
+                        and text_area > 0):
                     region_area = region_rect[2] * region_rect[3]
                     if region_area > 2.5 * text_area:
-                        scale_up = np.sqrt(LAYOUT_SCALE_UP_FILL * region_area / text_area)
+                        scale_up = np.sqrt(
+                            LAYOUT_SCALE_UP_FILL * region_area / text_area
+                        )
                         scale_up = min(scale_up, LAYOUT_SCALE_UP_MAX)
-                        resize_ratio = max(resize_ratio, min(scale_up, LAYOUT_SCALE_UP_MAX))
+                        resize_ratio = max(resize_ratio,
+                                        min(scale_up, LAYOUT_SCALE_UP_MAX))
 
+        # ====== CAP upscaling при существующих ЗНАЧИТЕЛЬНЫХ перекрытиях ======
+        if overlaps_before and resize_ratio > 1.0:
+            # Проверяем есть ли ЗНАЧИТЕЛЬНЫЕ перекрытия
+            has_significant = any(
+                area >= LAYOUT_OVERLAP_SIGNIFICANT_AREA
+                for area in overlaps_before.values()
+            )
+            if has_significant:
+                LOGGER.debug(
+                    f"[OVERLAP] idx={blkitem.idx}: capping resize_ratio "
+                    f"{resize_ratio:.2f}→1.0 (significant pre-existing overlaps)"
+                )
+                resize_ratio = 1.0
+
+        LOGGER.debug(
+            f"[OVERLAP] idx={blkitem.idx} resize_ratio={resize_ratio:.4f}"
+        )
 
         if resize_ratio != 1:
-            new_font_size = blk_font.pointSizeF() * resize_ratio   
+            new_font_size = blk_font.pointSizeF() * resize_ratio
             blk_font.setPointSizeF(new_font_size)
-            wl_list = (np.array(wl_list, np.float64) * resize_ratio).astype(np.int32).tolist()
+            wl_list = (np.array(wl_list, np.float64) * resize_ratio
+                    ).astype(np.int32).tolist()
             line_height = int(line_height * resize_ratio)
             text_w = int(text_w * resize_ratio)
             delimiter_len = int(delimiter_len * resize_ratio)
@@ -976,20 +1178,15 @@ class SceneTextManager(QObject):
                 centroid[1] = int(abs_centroid[1] - mask_xyxy[1])
 
         new_text, xywh, start_from_top, adjust_xy = layout_text(
-            blkitem.blk,
-            mask, 
-            mask_xyxy, 
-            centroid, 
-            words, 
-            wl_list, 
-            delimiter, 
-            delimiter_len, 
-            line_height, 
-            0, 
-            max_central_width,
-            src_is_cjk=src_is_cjk,
-            tgt_is_cjk=tgt_is_cjk,
+            blkitem.blk, mask, mask_xyxy, centroid,
+            words, wl_list, delimiter, delimiter_len,
+            line_height, 0, max_central_width,
+            src_is_cjk=src_is_cjk, tgt_is_cjk=tgt_is_cjk,
             ref_src_lines=ref_src_lines
+        )
+
+        LOGGER.debug(
+            f"[OVERLAP] idx={blkitem.idx} layout_text xywh={xywh}"
         )
 
         # font size post adjustment
@@ -997,10 +1194,11 @@ class SceneTextManager(QObject):
         if adaptive_fntsize:
             downscale_constraint = 0.5
             w = xywh[2]
-            post_resize_ratio = np.clip(max(region_rect[2] / w, downscale_constraint), 0, 1)
+            post_resize_ratio = np.clip(
+                max(region_rect[2] / w, downscale_constraint), 0, 1
+            )
             resize_ratio *= post_resize_ratio
         elif region_rect is not None and len(region_rect) >= 4:
-            # If laid-out text overflows region, scale down so it fits inside bubble with margin
             rw, rh = region_rect[2], region_rect[3]
             w, h = xywh[2], xywh[3]
             if rw > 0 and rh > 0 and (w > rw or h > rh):
@@ -1018,27 +1216,38 @@ class SceneTextManager(QObject):
             new_font_size = max(1.0, blkitem.font().pointSizeF() * resize_ratio)
             if new_font_size < LAYOUT_MIN_FONT_PT:
                 new_font_size = LAYOUT_MIN_FONT_PT
-                resize_ratio = new_font_size / max(1.0, blkitem.font().pointSizeF())
+                resize_ratio = new_font_size / max(
+                    1.0, blkitem.font().pointSizeF()
+                )
             blkitem.textCursor().clearSelection()
             blkitem.setFontSize(new_font_size)
             blk_font.setPointSizeF(new_font_size)
+            LOGGER.debug(
+                f"[OVERLAP] idx={blkitem.idx} applied font_size="
+                f"{new_font_size:.2f}"
+            )
 
         if restore_charfmts:
-            char_fmts = blkitem.get_char_fmts()        
-        
+            char_fmts = blkitem.get_char_fmts()
+
         ffmt = QFontMetricsF(blk_font)
         maxw = max([ffmt.horizontalAdvance(t) for t in new_text.split('\n')])
-        # Height: ensure minimum (single-line/descenders) and add bottom padding so last line doesn't sit on edge
         layout_h = max(int(xywh[3]), line_height)
         layout_h = int(layout_h * LAYOUT_HEIGHT_PADDING)
-        blkitem.set_size(maxw * LAYOUT_WIDTH_STROKE_FACTOR, layout_h, set_layout_maxsize=True)
+
+        blkitem.set_size(maxw * LAYOUT_WIDTH_STROKE_FACTOR, layout_h,
+                        set_layout_maxsize=True)
         blkitem.setPlainText(new_text)
         if len(self.pairwidget_list) > blkitem.idx:
             self.pairwidget_list[blkitem.idx].e_trans.setPlainText(new_text)
         if restore_charfmts:
             self.restore_charfmts(blkitem, text, new_text, char_fmts)
         blkitem.squeezeBoundingRect()
-        # Clamp block to image bounds so text never draws outside the panel
+
+        # Ограничение дрифта позиции
+        self._clamp_block_position(blkitem, original_rect, im_w, im_h)
+
+        # Clamp to image bounds
         abr = blkitem.absBoundingRect(qrect=True)
         x, y, w, h = abr.x(), abr.y(), abr.width(), abr.height()
         if w > 0 and h > 0:
@@ -1046,8 +1255,56 @@ class SceneTextManager(QObject):
             y2 = max(0, min(y, im_h - h))
             if x2 != x or y2 != y:
                 blkitem.setRect([x2, y2, w, h], repaint=True)
+
+        final_rect = blkitem.absBoundingRect(qrect=True)
+        LOGGER.debug(
+            f"[OVERLAP] idx={blkitem.idx} FINAL rect="
+            f"[{final_rect.x():.1f}, {final_rect.y():.1f}, "
+            f"{final_rect.width():.1f}, {final_rect.height():.1f}]"
+        )
+
+        # ====== ПРОВЕРКА ПЕРЕКРЫТИЙ ПОСЛЕ ИЗМЕНЕНИЙ ======
+        if has_enough_items_for_check:
+            overlaps_after = self.check_block_overlaps(blkitem)
+            has_problems, new_set, worsened_set = self._has_overlap_problems(
+                overlaps_before, overlaps_after, blkitem
+            )
+
+            LOGGER.debug(
+                f"[OVERLAP] idx={blkitem.idx} after: {overlaps_after}, "
+                f"new={new_set}, worsened={worsened_set}"
+            )
+
+            if has_problems:
+                LOGGER.warning(
+                    f"[OVERLAP] ROLLBACK idx={blkitem.idx}: "
+                    f"new={new_set}, worsened={worsened_set}. "
+                    f"Keeping font={original_font_size:.2f}, "
+                    f"rect={[round(v, 1) for v in original_rect]}"
+                )
+                self._rollback_layout_changes(
+                    blkitem, original_font_size, original_rect,
+                    rollback_text, restore_charfmts,
+                    char_fmts if restore_charfmts else None
+                )
+
+                verify_rect = blkitem.absBoundingRect(qrect=True)
+                LOGGER.debug(
+                    f"[OVERLAP] idx={blkitem.idx} AFTER ROLLBACK rect="
+                    f"[{verify_rect.x():.1f}, {verify_rect.y():.1f}, "
+                    f"{verify_rect.width():.1f}, {verify_rect.height():.1f}]"
+                )
+                return False
+            else:
+                LOGGER.debug(
+                    f"[OVERLAP] idx={blkitem.idx} no problems — accepted"
+                )
+
+        LOGGER.debug(
+            f"[OVERLAP] === layout_textblk END idx={blkitem.idx} (SUCCESS)"
+        )
         return True
-    
+        
     def restore_charfmts(self, blkitem: TextBlkItem, text: str, new_text: str, char_fmts: List[QTextCharFormat]):
         cursor = blkitem.textCursor()
         cpos = 0
