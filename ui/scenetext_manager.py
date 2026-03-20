@@ -845,72 +845,178 @@ class SceneTextManager(QObject):
     def layout_textblk(self, blkitem: TextBlkItem, text: str = None, mask: np.ndarray = None,
                        bounding_rect: List = None, region_rect: List = None):
         '''
-        Auto text layout: find the maximum font size that fits text
-        inside the block's original bounding rectangle.
-        Vertical writing is not supported yet.
+        Auto text layout, vertical writing is not supported yet.
+        - auto_textlayout_flag ON:  binary search for max font size fitting in block
+        - auto_textlayout_flag OFF: original mask-based layout with global font size
         '''
-        if blkitem.blk.vertical:
-            return
-
         img = self.imgtrans_proj.img_array
         if img is None:
             return
+        im_h, im_w = img.shape[:2]
 
-        # ---- target = original block rectangle ----
-        orig_rect = blkitem.absBoundingRect(qrect=True)
-        target_w = orig_rect.width()
-        target_h = orig_rect.height()
+        src_is_cjk = is_cjk(pcfg.module.translate_source)
+        tgt_is_cjk = is_cjk(pcfg.module.translate_target)
 
-        blk_br = blkitem.blk.bounding_rect()
-        if len(blk_br) >= 4:
-            target_w = max(target_w, blk_br[2])
-            target_h = max(target_h, blk_br[3])
-
-        if target_w < 2 or target_h < 2:
-            LOGGER.warning(f"[layout_textblk] idx={blkitem.idx} target too small: "
-                           f"{target_w:.1f}x{target_h:.1f}")
+        # disable for vertical writing
+        if blkitem.blk.vertical:
             return
 
-        # ---- text ----
+        old_br = blkitem.absBoundingRect(qrect=True)
+        old_br = [old_br.x(), old_br.y(), old_br.width(), old_br.height()]
+        if old_br[2] < 1:
+            return
+
         restore_charfmts = False
         if text is None:
             text = blkitem.toPlainText()
             restore_charfmts = True
+
         if not text.strip():
             return
+
+        # =====================================================
+        # AUTO MODE: binary search for max font fitting in block
+        # =====================================================
+        if self.auto_textlayout_flag and pcfg.let_fntsize_flag == 0 and pcfg.let_autolayout_flag:
+
+            orig_rect = blkitem.absBoundingRect(qrect=True)
+            target_w = orig_rect.width()
+            target_h = orig_rect.height()
+
+            blk_br = blkitem.blk.bounding_rect()
+            if len(blk_br) >= 4:
+                target_w = max(target_w, blk_br[2])
+                target_h = max(target_h, blk_br[3])
+
+            if target_w < 2 or target_h < 2:
+                LOGGER.warning(f"[layout_textblk] idx={blkitem.idx} target too small: "
+                               f"{target_w:.1f}x{target_h:.1f}")
+                return
+
+            if restore_charfmts:
+                char_fmts = blkitem.get_char_fmts()
+
+            original_size = blkitem.font().pointSizeF()
+            if original_size < 1:
+                original_size = 12.0
+
+            LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} text={repr(text[:60])} "
+                         f"orig_size={original_size:.1f} target=({target_w:.1f}x{target_h:.1f})")
+
+            optimal_size = self._find_best_font_size(
+                blkitem, text, target_w, target_h, original_size
+            )
+
+            LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} optimal_size={optimal_size:.2f}pt")
+
+            blkitem.setFontSize(optimal_size)
+            blkitem.set_size(target_w, target_h, set_layout_maxsize=True)
+            blkitem.setPlainText(text)
+
+            if len(self.pairwidget_list) > blkitem.idx:
+                self.pairwidget_list[blkitem.idx].e_trans.setPlainText(text)
+
+            if restore_charfmts:
+                for cf in char_fmts:
+                    cf.setFontPointSize(optimal_size)
+                self.restore_charfmts(blkitem, text, text, char_fmts)
+
+            final_h = blkitem.document().size().height()
+            LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} FINAL font={optimal_size:.2f}pt "
+                         f"doc_h={final_h:.1f} target_h={target_h:.1f}")
+            return True
+
+        # =====================================================
+        # ORIGINAL MODE: mask-based layout with global font size
+        # =====================================================
+        blk_font = blkitem.font()
+        fmt = blkitem.get_fontformat()
+        blk_font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, fmt.letter_spacing * 100)
+        text_size_func = lambda text: get_text_size(QFontMetricsF(blk_font), text)
+
+        if mask is None:
+            bounding_rect = blkitem.absBoundingRect(max_h=im_h, max_w=im_w)
+            if bounding_rect[2] <= 0 or bounding_rect[3] <= 0:
+                blkitem.setPlainText(text)
+                if len(self.pairwidget_list) > blkitem.idx:
+                    self.pairwidget_list[blkitem.idx].e_trans.setPlainText(text)
+                return
+            if tgt_is_cjk:
+                max_enlarge_ratio = 2.5
+            else:
+                max_enlarge_ratio = 3
+            enlarge_ratio = min(max(bounding_rect[2] / bounding_rect[3], bounding_rect[3] / bounding_rect[2]) * 1.5, max_enlarge_ratio)
+            mask, ballon_area, mask_xyxy, region_rect = extract_ballon_region(img, bounding_rect, enlarge_ratio=enlarge_ratio, cal_region_rect=True)
+        else:
+            mask_xyxy = [bounding_rect[0], bounding_rect[1], bounding_rect[0]+bounding_rect[2], bounding_rect[1]+bounding_rect[3]]
+
+        words, delimiter = seg_text(text, pcfg.module.translate_target)
+        if len(words) < 1:
+            return
+
+        wl_list = get_words_length_list(QFontMetricsF(blk_font), words)
+        text_w, text_h = text_size_func(text)
+        text_area = text_w * text_h
+        if tgt_is_cjk:
+            line_height = int(round(fmt.line_spacing * text_size_func('X木')[1]))
+        else:
+            line_height = int(round(fmt.line_spacing * text_size_func('X')[1]))
+        delimiter_len = text_size_func(delimiter)[0]
+
+        ref_src_lines = False
+        if not blkitem.blk.src_is_vertical:
+            ref_src_lines = blkitem.blk.line_coord_valid(old_br)
+
+        # No adaptive font sizing in original mode — global font kept as-is
+        resize_ratio = 1
+
+        max_central_width = np.inf
+        if fmt.alignment == 1:
+            if len(blkitem.blk) > 0:
+                centroid = blkitem.blk.center().astype(np.int64).tolist()
+                centroid[0] -= mask_xyxy[0]
+                centroid[1] -= mask_xyxy[1]
+            else:
+                centroid = [bounding_rect[2] // 2, bounding_rect[3] // 2]
+        else:
+            max_central_width = np.inf
+            centroid = [0, 0]
+            abs_centroid = [bounding_rect[0], bounding_rect[1]]
+            if len(blkitem.blk) > 0:
+                blkitem.blk.lines[0]
+                abs_centroid = blkitem.blk.lines[0][0]
+                centroid[0] = int(abs_centroid[0] - mask_xyxy[0])
+                centroid[1] = int(abs_centroid[1] - mask_xyxy[1])
+
+        new_text, xywh, start_from_top, adjust_xy = layout_text(
+            blkitem.blk,
+            mask,
+            mask_xyxy,
+            centroid,
+            words,
+            wl_list,
+            delimiter,
+            delimiter_len,
+            line_height,
+            0,
+            max_central_width,
+            src_is_cjk=src_is_cjk,
+            tgt_is_cjk=tgt_is_cjk,
+            ref_src_lines=ref_src_lines
+        )
+
         if restore_charfmts:
             char_fmts = blkitem.get_char_fmts()
 
-        original_size = blkitem.font().pointSizeF()
-        if original_size < 1:
-            original_size = 12.0
-
-        LOGGER.info(f"[layout_textblk] idx={blkitem.idx} text={repr(text[:60])} "
-                     f"orig_size={original_size:.1f} target=({target_w:.1f}x{target_h:.1f})")
-
-        # ---- binary search on the REAL TextBlkItem (custom layout stays active) ----
-        optimal_size = self._find_best_font_size(
-            blkitem, text, target_w, target_h, original_size
-        )
-
-        LOGGER.info(f"[layout_textblk] idx={blkitem.idx} optimal_size={optimal_size:.2f}pt")
-
-        # ---- apply final result ----
-        blkitem.setFontSize(optimal_size)
-        blkitem.set_size(target_w, target_h, set_layout_maxsize=True)
-        blkitem.setPlainText(text)
-
+        ffmt = QFontMetricsF(blk_font)
+        maxw = max([ffmt.horizontalAdvance(t) for t in new_text.split('\n')])
+        blkitem.set_size(maxw * 1.5, xywh[3], set_layout_maxsize=True)
+        blkitem.setPlainText(new_text)
         if len(self.pairwidget_list) > blkitem.idx:
-            self.pairwidget_list[blkitem.idx].e_trans.setPlainText(text)
-
+            self.pairwidget_list[blkitem.idx].e_trans.setPlainText(new_text)
         if restore_charfmts:
-            for cf in char_fmts:
-                cf.setFontPointSize(optimal_size)
-            self.restore_charfmts(blkitem, text, text, char_fmts)
-
-        final_h = blkitem.document().size().height()
-        LOGGER.info(f"[layout_textblk] idx={blkitem.idx} FINAL font={optimal_size:.2f}pt "
-                     f"doc_h={final_h:.1f} target_h={target_h:.1f}")
+            self.restore_charfmts(blkitem, text, new_text, char_fmts)
+        blkitem.squeezeBoundingRect()
         return True
 
 
