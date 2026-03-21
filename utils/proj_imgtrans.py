@@ -310,7 +310,7 @@ class ProjImgTrans:
             os.replace(tmp_save_tgt, self.proj_path)
         else:
             os.replace(tmp_save_tgt, self.proj_path)
-        LOGGER.debug(f'project saved to {self.proj_path}')
+        # LOGGER.debug(f'project saved to {self.proj_path}')
 
     def to_dict(self) -> Dict:
         pages = self.pages.copy()

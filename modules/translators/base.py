@@ -211,6 +211,7 @@ class BaseTranslator(BaseModule):
 
         # non_empty_txtlst_str = ',\n'.join(text_list)
         # LOGGER.debug(f'non empty src text list: \n[{non_empty_txtlst_str}]')
+        LOGGER.debug(f'Translate {len(translations)} lines')
 
         for callback_name, callback in self._preprocess_hooks.items():
             callback(translations = translations, textblocks = textblk_lst, translator = self, source_text = text_list)

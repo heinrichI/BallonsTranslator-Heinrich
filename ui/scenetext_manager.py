@@ -900,14 +900,14 @@ class SceneTextManager(QObject):
             if original_size < 1:
                 original_size = 12.0
 
-            LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} text={repr(text[:60])} "
-                         f"orig_size={original_size:.1f} target=({target_w:.1f}x{target_h:.1f})")
+            # LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} text={repr(text[:60])} "
+            #              f"orig_size={original_size:.1f} target=({target_w:.1f}x{target_h:.1f})")
 
             optimal_size = self._find_best_font_size(
                 blkitem, text, target_w, target_h, original_size
             )
 
-            LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} optimal_size={optimal_size:.2f}pt")
+            # LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} optimal_size={optimal_size:.2f}pt")
 
             blkitem.setFontSize(optimal_size)
             blkitem.set_size(target_w, target_h, set_layout_maxsize=True)
@@ -922,8 +922,8 @@ class SceneTextManager(QObject):
                 self.restore_charfmts(blkitem, text, text, char_fmts)
 
             final_h = blkitem.document().size().height()
-            LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} FINAL font={optimal_size:.2f}pt "
-                         f"doc_h={final_h:.1f} target_h={target_h:.1f}")
+            # LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} FINAL font={optimal_size:.2f}pt "
+            #              f"doc_h={final_h:.1f} target_h={target_h:.1f}")
             return True
 
         # =====================================================
@@ -1050,8 +1050,8 @@ class SceneTextManager(QObject):
         # Internal document signals still reach the custom layout engine
         blkitem.blockSignals(True)
 
-        LOGGER.info(f"[_find_best_font_size] idx={blkitem.idx} lo={lo:.1f} hi={hi:.1f} "
-                     f"target=({target_w:.1f}x{target_h:.1f})")
+        # LOGGER.info(f"[_find_best_font_size] idx={blkitem.idx} lo={lo:.1f} hi={hi:.1f} "
+        #              f"target=({target_w:.1f}x{target_h:.1f})")
 
         try:
             iteration = 0
@@ -1084,8 +1084,8 @@ class SceneTextManager(QObject):
                 else:
                     hi = mid
 
-            LOGGER.info(f"[_find_best_font_size] idx={blkitem.idx} "
-                         f"RESULT best={best:.2f}pt after {iteration+1} iters")
+            # LOGGER.info(f"[_find_best_font_size] idx={blkitem.idx} "
+            #              f"RESULT best={best:.2f}pt after {iteration+1} iters")
 
         finally:
             blkitem.blockSignals(False)
