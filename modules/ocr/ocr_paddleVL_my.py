@@ -5,6 +5,8 @@ from typing import List
 
 from .base import OCRBase, register_OCR, DEFAULT_DEVICE, DEVICE_SELECTOR, TextBlock
 
+from collections import Counter
+
 # MODEL_PATH = 'j:/Comic translate/PaddleOCR-VL-For-Manga/PaddleOCR-VL'
 # MODEL_PATH = 'j:/Comic translate/PaddleOCR-VL-For-Manga/Archie-0.0004'
 MODEL_PATH = 'j:/Comic translate/PaddleOCR-VL-For-Manga/Empowered-0.0071'
@@ -32,6 +34,23 @@ class PaddleOCRVLMy(OCRBase):
         self.device = self.params['device']['value']
         self.model = None
         self.processor = None
+
+    def is_garbage(self, text, min_len=18):
+        if not text: return False
+        
+        # Remove whitespace to analyze actual characters
+        clean_text = "".join(text.split())
+        if len(clean_text) < min_len: 
+            return False  # Короткие фразы типа "MMMF" игнорируем
+        
+        # Count characters
+        most_common = Counter(clean_text).most_common(1)
+        char, count = most_common[0]
+        
+        # If one character makes up > 60% of the text, it's garbage
+        if count / len(clean_text) > 0.6:
+            return True
+        return False
 
     def ocr_img(self, img: np.ndarray) -> str:
         # save ballons
@@ -74,6 +93,9 @@ class PaddleOCRVLMy(OCRBase):
         input_length = inputs["input_ids"].shape[1]
         generated_tokens = generated[:, input_length:]
         answer = self.processor.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+
+        if self.is_garbage(answer):
+            raise Exception(f"Garbage OCR output: {answer}")
         # return answer.split('\n')
         # return answer.replace('\n', ' ')
         return answer
@@ -110,23 +132,23 @@ class PaddleOCRVLMy(OCRBase):
             x2 = int(min(im_w, x2 + 10))
             y1 = int(max(0, y1 - 2))
             y2 = int(min(im_h, y2 + 5))
-            try:
-                if y2 < im_h and x2 < im_w and \
-                    x1 > 0 and y1 > 0 and x1 < x2 and y1 < y2: 
-                    # Extract region and convert RGBA to RGB if necessary for model input
-                    region = img[y1:y2, x1:x2]
-                    answer = self.ocr_img(region)
-                    blk.text = answer
-                else:
-                    self.logger.warning('invalid textbbox to target img')
-                    blk.text = ['']
-            except Exception as e:
-                import debugpy
-                debugpy.debug_this_thread()
-                debugpy.breakpoint()
-                if self.logger:
-                    self.logger.error(
-                        f"_ocr_blk_list: {e}", exc_info=self.debug_mode)
+            # try:
+            if y2 < im_h and x2 < im_w and \
+                x1 > 0 and y1 > 0 and x1 < x2 and y1 < y2: 
+                # Extract region and convert RGBA to RGB if necessary for model input
+                region = img[y1:y2, x1:x2]
+                answer = self.ocr_img(region)
+                blk.text = answer
+            else:
+                self.logger.warning('invalid textbbox to target img')
+                blk.text = ['']
+            # except Exception as e:
+                # import debugpy
+                # debugpy.debug_this_thread()
+                # debugpy.breakpoint()
+                # if self.logger:
+                #     self.logger.error(
+                #         f"_ocr_blk_list: {e}", exc_info=self.debug_mode)
 
     def updateParam(self, param_key: str, param_content):
         super().updateParam(param_key, param_content)

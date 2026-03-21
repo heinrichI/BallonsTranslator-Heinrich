@@ -335,7 +335,7 @@ class TransGemmaTranslator(BaseTranslator):
                     ratio_response = self._request_translation(src)
                     tr: str = ratio_response.translations[0].translation
                     current_ratio = len(tr) / len(src)
-                    if current_ratio < RATIO_THRESHOLD and (len(src) > 14):
+                    if current_ratio < RATIO_THRESHOLD and (len(src) > 20):
                         raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \n{src} \n{trans}")
                     else:
                         self.logger.warning(f"Get translation for low compression: {tr}.")
