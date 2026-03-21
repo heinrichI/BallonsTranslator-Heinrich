@@ -137,7 +137,7 @@ class TransGemmaTranslator(BaseTranslator):
     @property
     def global_delay(self) -> float: return float(self.get_param_value("delay"))
 
-    def _assemble_prompts(self, queries: List[str], to_lang: str, max_len_approx=16000):
+    def _assemble_prompts(self, queries: List[str], to_lang: str, max_len_approx=24000):
         current_prompt_content = ""
         num_src = 0
         i_offset = 0
@@ -321,11 +321,27 @@ class TransGemmaTranslator(BaseTranslator):
                     else:
                         ordered_translations[i] = tr
 
-                # if len(src) < 3:
-                #     continue
+                if self._has_id_leak(trans):
+                    self.logger.warning(
+                        f"ID leak detected in translation #{i+1}: "
+                        f"'{trans[:100]}'. Retrying individually..."
+                    )
+                    id_leak_response = self._request_translation(src)
+                    tr: str = id_leak_response.translations[0].translation
+                    if not tr:
+                        raise TranslationIntegrityError(f"ID {i}: ID leak detected in translation '{trans[:20]}...'")
+                    else:
+                        if self._has_id_leak(tr):
+                              raise TranslationIntegrityError(f"ID {i}: ID leak detected in translation '{trans[:20]}...'")
+                        else:
+                            ordered_translations[i] = tr
 
                 # Эвристика коэффициента сжатия
-                RATIO_THRESHOLD = 0.47
+                RATIO_THRESHOLD = 0.46
+                # Das darf doch nicht wahr sein!
+                # Не может быть!
+                # Wi-wie ein Leuchtturm!  Low compression ratio (0.41 < 0.46).
+                # Как маяк!
                 current_ratio = len(trans) / len(src)
                 if current_ratio < RATIO_THRESHOLD:
                     self.logger.warning(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \n{src} \n{trans}")
@@ -335,7 +351,7 @@ class TransGemmaTranslator(BaseTranslator):
                     ratio_response = self._request_translation(src)
                     tr: str = ratio_response.translations[0].translation
                     current_ratio = len(tr) / len(src)
-                    if current_ratio < RATIO_THRESHOLD and (len(src) > 20):
+                    if current_ratio < RATIO_THRESHOLD and (len(src) > 25):
                         raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \n{src} \n{trans}")
                     else:
                         self.logger.warning(f"Get translation for low compression: {tr}.")
@@ -373,6 +389,19 @@ class TransGemmaTranslator(BaseTranslator):
                 #     time.sleep(self.retry_timeout)
                     
         return translations
+    
+    # Паттерн для обнаружения утечки ID в переводе
+    _ID_LEAK_RE = re.compile(
+        r'\{\s*ID\s*[=:]\s*\d+[^}]*\}'    # {ID=2}, {ID: 2}, {ID=2: текст...}, {ID: 3}
+        r'|(?:^|\s)id\s*[=:]\s*\d+\s*:'   # id=2: или id: 3: в начале или после пробела
+        r'|\}\s*\]\s*\}\s*$',             # хвостовые JSON-артефакты } ]}
+        re.IGNORECASE
+    )
+
+    @staticmethod
+    def _has_id_leak(text: str) -> bool:
+        """Check if translation contains ID artifacts from the request."""
+        return bool(TransGemmaTranslator._ID_LEAK_RE.search(text))
 
     def updateParam(self, param_key: str, param_content):
         super().updateParam(param_key, param_content)
