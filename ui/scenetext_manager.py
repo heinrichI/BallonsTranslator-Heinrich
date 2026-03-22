@@ -28,7 +28,7 @@ from utils.logger import logger as LOGGER
 from utils.spell_check_engine import SpellCheckEngine
 
 # Оставить — используется как нижняя граница поиска:
-LAYOUT_MIN_FONT_PT = 10.0
+LAYOUT_MIN_FONT_PT = 8.0
 LAYOUT_BEST_FONT_SIZE_ITERATION = 30
 LAYOUT_FIT_FILL_W_RATIO = 1  # fit text to this fraction of block size (1.0 = fill 100%, 0.95 = 5% padding)
 LAYOUT_FIT_FILL_H_RATIO = 0.98
@@ -1096,8 +1096,8 @@ class SceneTextManager(QObject):
                 else:
                     hi = mid
 
-            # LOGGER.info(f"[_find_best_font_size] idx={blkitem.idx} "
-            #              f"RESULT best={best:.2f}pt after {iteration+1} iters")
+            LOGGER.info(f"[_find_best_font_size] idx={blkitem.idx} "
+                         f"RESULT best={best:.2f}pt after {iteration+1} iters")
 
         finally:
             blkitem.blockSignals(False)
