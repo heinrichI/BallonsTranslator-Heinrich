@@ -345,6 +345,7 @@ class SceneTextManager(QObject):
         self.canvas.layout_textblks.connect(self.onAutoLayoutTextblks)
         self.canvas.reset_angle.connect(self.onResetAngle)
         self.canvas.squeeze_blk.connect(self.onSqueezeBlk)
+        self.canvas.savePng_blk.connect(self.onSavePngBlk)        
         self.canvas.incanvas_selection_changed.connect(self.on_incanvas_selection_changed)
         self.txtblkShapeControl = canvas.txtblkShapeControl
         self.textpanel = textpanel
@@ -832,6 +833,17 @@ class SceneTextManager(QObject):
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) > 0:
             self.canvas.push_undo_command(SqueezeCommand(selected_blks, self.txtblkShapeControl))
+
+    def onSavePngBlk(self):
+        selected_blks = self.canvas.selected_text_items()
+        if len(selected_blks) > 0:
+            for blkitem in selected_blks:
+                x1, y1, x2, y2 = map(int, blkitem.blk.xyxy)
+                from PIL import Image
+                from pathlib import Path
+                im = Image.fromarray(self.imgtrans_proj.img_array[y1:y2, x1:x2])
+                im.save(f'{Path(self.imgtrans_proj.current_img).stem}_{blkitem.idx}.png')
+
 
     def on_incanvas_selection_changed(self):
         if self.canvas.textEditMode():

@@ -65,6 +65,11 @@ class TransGemmaTranslator(BaseTranslator):
         },
         "frequency penalty": {"value": 0.0, "description": "Frequency penalty (OpenAI)."},
         "presence penalty": {"value": 0.0, "description": "Presence penalty (OpenAI)."},
+        'low vram mode': {
+            'value': True,
+            'description': 'check it if you\'re running it locally on a single device and encountered a crash due to vram OOM',
+            'type': 'checkbox',
+        }
     }
 
     def _setup_translator(self):
@@ -337,11 +342,13 @@ class TransGemmaTranslator(BaseTranslator):
                             ordered_translations[i] = tr
 
                 # Эвристика коэффициента сжатия
-                RATIO_THRESHOLD = 0.46
+                RATIO_THRESHOLD = 0.40
                 # Das darf doch nicht wahr sein!
                 # Не может быть!
                 # Wi-wie ein Leuchtturm!  Low compression ratio (0.41 < 0.46).
                 # Как маяк!
+                #VOUS ETES VRAIMENT SÉRIEUXI? Low compression ratio (0.43 < 0.46).
+                #ВЫ СЕРЬЁЗНО?
                 current_ratio = len(trans) / len(src)
                 if current_ratio < RATIO_THRESHOLD:
                     self.logger.warning(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \n{src} \n{trans}")
