@@ -27,11 +27,11 @@ from utils.logger import logger as LOGGER
 
 from utils.spell_check_engine import SpellCheckEngine
 
-# Оставить — используется как нижняя граница поиска:
 LAYOUT_MIN_FONT_PT = 8.0
 LAYOUT_BEST_FONT_SIZE_ITERATION = 30
 LAYOUT_FIT_FILL_W_RATIO = 1  # fit text to this fraction of block size (1.0 = fill 100%, 0.95 = 5% padding)
-LAYOUT_FIT_FILL_H_RATIO = 0.98
+LAYOUT_FIT_FILL_H_RATIO = 0.9
+LAYOUT_BLOCK_SHRINK_W = 1.0   # уменьшить ширину блока 
 
 class CreateItemCommand(QUndoCommand):
     def __init__(self, blk_item: TextBlkItem, ctrl, parent=None):
@@ -921,9 +921,10 @@ class SceneTextManager(QObject):
 
             # LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} optimal_size={optimal_size:.2f}pt")
 
+            block_w = target_w * LAYOUT_BLOCK_SHRINK_W          # ← ДОБАВЛЕНО
             blkitem.setFontSize(optimal_size)
-            blkitem.set_size(target_w, target_h, set_layout_maxsize=True)
-            blkitem.setPlainText(text)
+            blkitem.setPlainText(text)                                      # сначала текст
+            blkitem.set_size(block_w, target_h, set_layout_maxsize=True)    # потом размер (последним!)
 
             if len(self.pairwidget_list) > blkitem.idx:
                 self.pairwidget_list[blkitem.idx].e_trans.setPlainText(text)
@@ -1050,7 +1051,7 @@ class SceneTextManager(QObject):
         best = lo
 
         # Apply fill ratio — text must fit within this fraction of the block
-        target_w = target_w * LAYOUT_FIT_FILL_W_RATIO
+        target_w = target_w * LAYOUT_BLOCK_SHRINK_W * LAYOUT_FIT_FILL_W_RATIO
         target_h = target_h * LAYOUT_FIT_FILL_H_RATIO
 
         # Suppress ONLY visual repainting — layout engine stays ACTIVE
@@ -1096,8 +1097,8 @@ class SceneTextManager(QObject):
                 else:
                     hi = mid
 
-            LOGGER.info(f"[_find_best_font_size] idx={blkitem.idx} "
-                         f"RESULT best={best:.2f}pt after {iteration+1} iters")
+            # LOGGER.info(f"[_find_best_font_size] idx={blkitem.idx} "
+            #              f"RESULT best={best:.2f}pt after {iteration+1} iters")
 
         finally:
             blkitem.blockSignals(False)
