@@ -42,14 +42,31 @@ class PaddleOCRVLMy(OCRBase):
         clean_text = "".join(text.split())
         if len(clean_text) < min_len: 
             return False  # Короткие фразы типа "MMMF" игнорируем
-        
+        # self.logger.debug(f"clean_text={clean_text})")
+            
         # Count characters
-        most_common = Counter(clean_text).most_common(1)
+        counts = Counter(clean_text)
+        most_common = counts.most_common(1)
         char, count = most_common[0]
         
-        # If one character makes up > 60% of the text, it's garbage
+        # NEW: Calculate how "diverse" the text is
+        unique_count = len(counts)
+        self.logger.debug(
+            "Analysis: most_char=%r (%d), total=%d, unique_chars=%d",
+            char, count, len(clean_text), unique_count
+        )
+       
+         # 1. Original check: Single character dominance
         if count / len(clean_text) > 0.6:
+            self.logger.warning("Flagged: Single character dominance")
             return True
+        
+        # 2. NEW: Low diversity check (e.g., only [X] repeating)
+        # If string is long but uses very few unique characters
+        if len(clean_text) > 30 and unique_count <= 4:
+            self.logger.warning(f"Flagged: Low character diversity ({unique_count} unique chars)")
+            return True
+    
         return False
 
     def ocr_img(self, img: np.ndarray) -> str:
@@ -94,8 +111,10 @@ class PaddleOCRVLMy(OCRBase):
         generated_tokens = generated[:, input_length:]
         answer = self.processor.batch_decode(generated_tokens, skip_special_tokens=True)[0]
 
+        #  if pcfg.restore_ocr_empty:
         if self.is_garbage(answer):
-            raise Exception(f"Garbage OCR output: {answer}")
+            return ''
+            # raise Exception(f"Garbage OCR output: {answer}")
         # return answer.split('\n')
         # return answer.replace('\n', ' ')
         return answer

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .base import BaseTranslator, register_translator
 
+from utils.message import create_error_dialog
 
 class InvalidNumTranslations(Exception):
     """Exception raised when the number of translations does not match the number of sources."""
@@ -251,6 +252,7 @@ class TransGemmaTranslator(BaseTranslator):
             except (ValidationError, json.JSONDecodeError) as e:
                 self.logger.error(f"Pydantic validation or JSON parsing failed: {e}")
                 self.logger.debug(f"Raw JSON content from API: {raw_content}")
+                create_error_dialog(e, 'Translation failed.')
                 raise
         else:
             self.logger.warning("No valid message content in API response.")
