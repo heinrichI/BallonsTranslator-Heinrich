@@ -51,10 +51,10 @@ class PaddleOCRVLMy(OCRBase):
         
         # NEW: Calculate how "diverse" the text is
         unique_count = len(counts)
-        self.logger.debug(
-            "Analysis: most_char=%r (%d), total=%d, unique_chars=%d",
-            char, count, len(clean_text), unique_count
-        )
+        # self.logger.debug(
+        #     "Analysis: most_char=%r (%d), total=%d, unique_chars=%d",
+        #     char, count, len(clean_text), unique_count
+        # )
        
          # 1. Original check: Single character dominance
         if count / len(clean_text) > 0.6:

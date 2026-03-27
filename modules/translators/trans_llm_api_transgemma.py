@@ -12,6 +12,8 @@ from .base import BaseTranslator, register_translator
 
 from utils.message import create_error_dialog
 
+MAX_LEN_APPROX = 36000
+
 class InvalidNumTranslations(Exception):
     """Exception raised when the number of translations does not match the number of sources."""
     pass
@@ -143,7 +145,7 @@ class TransGemmaTranslator(BaseTranslator):
     @property
     def global_delay(self) -> float: return float(self.get_param_value("delay"))
 
-    def _assemble_prompts(self, queries: List[str], to_lang: str, max_len_approx=24000):
+    def _assemble_prompts(self, queries: List[str], to_lang: str, max_len_approx=MAX_LEN_APPROX):
         current_prompt_content = ""
         num_src = 0
         i_offset = 0
@@ -153,6 +155,7 @@ class TransGemmaTranslator(BaseTranslator):
             element = f"id={i + 1 - i_offset}: {query}\n"
             # element = f"<ID>{i + 1 - i_offset}</ID>\n<TEXT>{query}</TEXT>\n<<<END>>>"
             if len(current_prompt_content) + len(element) > max_len_approx and num_src > 0:
+                self.logger.debug(f"Нарезка текста, {len(current_prompt_content) + len(element)}>{max_len_approx}")
                 yield current_prompt_content, num_src
                 current_prompt_content = element
                 num_src = 1
@@ -336,9 +339,11 @@ class TransGemmaTranslator(BaseTranslator):
                     id_leak_response = self._request_translation(src)
                     tr: str = id_leak_response.translations[0].translation
                     if not tr:
+                        create_error_dialog(f"ID {i}: ID leak detected in translation '{trans[:20]}...'", 'Translation failed.')
                         raise TranslationIntegrityError(f"ID {i}: ID leak detected in translation '{trans[:20]}...'")
                     else:
                         if self._has_id_leak(tr):
+                              create_error_dialog(f"ID {i}: ID leak detected in translation '{trans[:20]}...'", 'Translation failed.')
                               raise TranslationIntegrityError(f"ID {i}: ID leak detected in translation '{trans[:20]}...'")
                         else:
                             ordered_translations[i] = tr
@@ -353,7 +358,7 @@ class TransGemmaTranslator(BaseTranslator):
                 #ВЫ СЕРЬЁЗНО?
                 current_ratio = len(trans) / len(src)
                 if current_ratio < RATIO_THRESHOLD:
-                    self.logger.warning(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \n{src} \n{trans}")
+                    self.logger.warning(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={trans}")
                     # import debugpy
                     # debugpy.debug_this_thread()
                     # debugpy.breakpoint()
@@ -361,13 +366,18 @@ class TransGemmaTranslator(BaseTranslator):
                     tr: str = ratio_response.translations[0].translation
                     current_ratio = len(tr) / len(src)
                     if current_ratio < RATIO_THRESHOLD and (len(src) > 25):
-                        raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \n{src} \n{trans}")
+                        create_error_dialog(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}", 'Translation failed.')
+                        raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
                     else:
                         self.logger.warning(f"Get translation for low compression: {tr}.")
                         ordered_translations[i] = tr
 
+                if not src.endswith("{}") and ordered_translations[i].endswith("{}"):
+                    self.logger.warning("Удален суффикс {}.")
+                    ordered_translations[i] = ordered_translations[i].removesuffix("{}")
+
             translations.extend(ordered_translations)
-            self.logger.info(f"Successfully translated batch of {num_src}. Tokens used: {self.token_count_last}")
+            self.logger.info(f"Successfully translated batch of {num_src}. Tokens used: {self.token_count_last}, max_len_approx={MAX_LEN_APPROX}")
             # break
 
                 # except TranslationIntegrityError as e:
