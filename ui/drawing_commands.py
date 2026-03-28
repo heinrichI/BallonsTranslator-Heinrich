@@ -12,7 +12,7 @@ from utils.logger import logger
 from .image_edit import ImageEditMode, PixmapItem, DrawingLayer, StrokeImgItem
 from .canvas import Canvas, TextBlkItem
 from .textedit_area import TransPairWidget
-
+from utils.config import pcfg
 
 class StrokeItemUndoCommand(QUndoCommand):
     def __init__(self, target_layer: DrawingLayer, rect: Tuple[int], qimg: QImage, erasing=False):
@@ -82,7 +82,7 @@ class EmptyCommand(QUndoCommand):
     
 
 class RunBlkTransCommand(QUndoCommand):
-    def __init__(self, canvas: Canvas, blkitems: List[TextBlkItem], transpairw_list: List[TransPairWidget],  mode: int):
+    def __init__(self, canvas: Canvas, blkitems: List[TextBlkItem], transpairw_list: List[TransPairWidget], mode: int, st_manager=None):
         super().__init__()
 
         self.empty_command = None
@@ -94,12 +94,81 @@ class RunBlkTransCommand(QUndoCommand):
         self.blkitems = blkitems
         self.transpairw_list = transpairw_list
 
+        # Per-block font-size auto-adjustment data
+        self.layout_data = []
+
         if mode < 3:
             for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
-                if mode != 0:
-                    trs = blkitem.blk.translation
-                    transpairw.e_trans.setPlainTextAndKeepUndoStack(trs)
-                    blkitem.setPlainTextAndKeepUndoStack(trs)
+                trs = blkitem.blk.translation if mode != 0 else ''
+
+                # Check whether auto font-size fitting should be applied
+                needs_layout = (
+                    mode != 0
+                    and st_manager is not None
+                    # and st_manager.auto_textlayout_flag
+                    and pcfg.let_fntsize_flag == 0
+                    and pcfg.let_autolayout_flag
+                    and not blkitem.blk.vertical
+                    and bool(trs.strip())
+                )
+
+                if needs_layout:
+                    # ---- save old state ----
+                    old_html = blkitem.toHtml()
+                    old_font_size = blkitem.font().pointSizeF()
+                    if old_font_size < 1:
+                        old_font_size = 12.0
+                    old_rect = blkitem.absBoundingRect(qrect=True)
+                    old_w = old_rect.width()
+                    old_h = old_rect.height()
+
+                    # ---- target dimensions (same logic as layout_textblk auto-mode) ----
+                    target_w = old_w
+                    target_h = old_h
+                    blk_br = blkitem.blk.bounding_rect()
+                    if len(blk_br) >= 4:
+                        target_w = max(target_w, blk_br[2])
+                        target_h = max(target_h, blk_br[3])
+
+                    layout_ok = False
+                    if target_w >= 2 and target_h >= 2:
+                        optimal_size = st_manager._find_best_font_size(
+                            blkitem, trs, target_w, target_h, old_font_size
+                        )
+
+                        block_w = target_w
+                        blkitem.setFontSize(optimal_size)
+                        blkitem.setPlainText(trs)
+                        blkitem.set_size(block_w, target_h, set_layout_maxsize=True)
+
+                        # transpairw uses undo-safe method (its own undo stack)
+                        transpairw.e_trans.setPlainTextAndKeepUndoStack(trs)
+
+                        # ---- save new state ----
+                        self.layout_data.append({
+                            'old_html': old_html,
+                            'old_font_size': old_font_size,
+                            'old_w': old_w,
+                            'old_h': old_h,
+                            'new_html': blkitem.toHtml(),
+                            'new_font_size': optimal_size,
+                            'new_w': block_w,
+                            'new_h': target_h,
+                        })
+                        layout_ok = True
+
+                    if not layout_ok:
+                        # target too small — fall back to plain text
+                        transpairw.e_trans.setPlainTextAndKeepUndoStack(trs)
+                        blkitem.setPlainTextAndKeepUndoStack(trs)
+                        self.layout_data.append(None)
+                else:
+                    # no layout — original behaviour
+                    if mode != 0:
+                        transpairw.e_trans.setPlainTextAndKeepUndoStack(trs)
+                        blkitem.setPlainTextAndKeepUndoStack(trs)
+                    self.layout_data.append(None)
+
                 blkitem.blk.rich_text = ''
                 if mode >= 0:
                     transpairw.e_source.setPlainTextAndKeepUndoStack(blkitem.blk.get_text())
@@ -157,10 +226,16 @@ class RunBlkTransCommand(QUndoCommand):
             return
 
         if self.mode < 3:
-            for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
+            for i, (blkitem, transpairw) in enumerate(zip(self.blkitems, self.transpairw_list)):
                 if self.mode != 0:
                     transpairw.e_trans.redo()
-                    blkitem.redo()
+                    ld = self.layout_data[i] if i < len(self.layout_data) else None
+                    if ld is not None:
+                        blkitem.setFontSize(ld['new_font_size'])
+                        blkitem.setHtml(ld['new_html'])
+                        blkitem.set_size(ld['new_w'], ld['new_h'], set_layout_maxsize=True)
+                    else:
+                        blkitem.redo()
                 if self.mode >= 0:
                     transpairw.e_source.redo()
 
@@ -182,9 +257,15 @@ class RunBlkTransCommand(QUndoCommand):
             self.canvas.updateLayers()
 
         if self.mode < 3:
-            for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
+            for i, (blkitem, transpairw) in enumerate(zip(self.blkitems, self.transpairw_list)):
                 if self.mode != 0:
                     transpairw.e_trans.undo()
-                    blkitem.undo()
+                    ld = self.layout_data[i] if i < len(self.layout_data) else None
+                    if ld is not None:
+                        blkitem.setFontSize(ld['old_font_size'])
+                        blkitem.setHtml(ld['old_html'])
+                        blkitem.set_size(ld['old_w'], ld['old_h'], set_layout_maxsize=True)
+                    else:
+                        blkitem.undo()
                 if self.mode >= 0:
                     transpairw.e_source.undo()

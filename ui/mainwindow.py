@@ -1266,7 +1266,6 @@ class MainWindow(mainwindow_cls):
         self.translateBlkitemList(blkitem_list, mode)
 
     def on_blktrans_finished(self, mode: int, blk_ids: List[int]):
-
         if len(blk_ids) < 1:
             return
         
@@ -1275,7 +1274,7 @@ class MainWindow(mainwindow_cls):
         pairw_list = []
         for blk in blkitem_list:
             pairw_list.append(self.st_manager.pairwidget_list[blk.idx])
-        self.canvas.push_undo_command(RunBlkTransCommand(self.canvas, blkitem_list, pairw_list, mode))
+        self.canvas.push_undo_command(RunBlkTransCommand(self.canvas, blkitem_list, pairw_list, mode, self.st_manager))
 
     def on_imgtrans_progressbox_showed(self):
         msg_size = self.module_manager.progress_msgbox.size()
