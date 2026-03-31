@@ -1,3 +1,4 @@
+import re
 from transformers import AutoModelForCausalLM, AutoProcessor
 import numpy as np
 import torch
@@ -66,6 +67,24 @@ class PaddleOCRVLMy(OCRBase):
         if len(clean_text) > 30 and unique_count <= 4:
             self.logger.warning(f"Flagged: Low character diversity ({unique_count} unique chars)")
             return True
+
+        # 3. Top-N character dominance (catches [n][n][n]..., ♪♪♪, etc.)
+        #    Normal English text: top-3 chars ≈ 25-35%
+        #    Repetitive garbage:  top-3 chars ≈ 80-99%
+        if len(clean_text) > 30:
+            top3_count = sum(c for _, c in counts.most_common(3))
+            top3_ratio = top3_count / len(clean_text)
+            if top3_ratio > 0.75:
+                self.logger.warning(
+                    f"Flagged: Top-3 chars cover {top3_ratio:.0%} of text "
+                    f"({counts.most_common(3)})"
+                )
+                return True
+
+        # 4. Repeated short pattern (catches any 1-6 char pattern repeated 20+ times)
+        if re.search(r'(.{1,6})\s*(\1[\s]*){19,}', text):
+            self.logger.warning("Flagged: Repeated short pattern")
+            return True
     
         return False
 
@@ -113,8 +132,8 @@ class PaddleOCRVLMy(OCRBase):
 
         #  if pcfg.restore_ocr_empty:
         if self.is_garbage(answer):
-            return ''
-            # raise Exception(f"Garbage OCR output: {answer}")
+            # return ''
+            raise Exception(f"Garbage OCR output: {answer}")
         # return answer.split('\n')
         # return answer.replace('\n', ' ')
         return answer
