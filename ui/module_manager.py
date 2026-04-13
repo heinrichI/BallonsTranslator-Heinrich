@@ -363,6 +363,7 @@ class ImgtransThread(QThread):
             self.translate_thread.runTranslatePipeline(self.imgtrans_proj, self.num_pages)
 
         for imgname in self.pages:
+            LOGGER.debug(f'imgtrans_pipeline {imgname}')
             img = self.imgtrans_proj.read_img(imgname)
             mask = blk_list = None
             need_save_mask = False
@@ -468,6 +469,7 @@ class ImgtransThread(QThread):
         if cfg_module.enable_translate and low_vram_trans:
             unload_modules(self, ['textdetector', 'inpainter', 'ocr'])
             for imgname in self.pages:
+                LOGGER.debug(f'imgtrans_pipeline translate {imgname}')
                 blk_list = self.imgtrans_proj.pages[imgname]
                 self.translator.translate_textblk_lst(blk_list)
                 self.translate_counter += 1

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .base import BaseTranslator, register_translator
 
+from utils.message import create_error_dialog
 
 class InvalidNumTranslations(Exception):
     """Exception raised when the number of translations does not match the number of sources."""
@@ -118,6 +119,11 @@ class LLM_API_Translator(BaseTranslator):
         },
         "frequency penalty": {"value": 0.0, "description": "Frequency penalty (OpenAI)."},
         "presence penalty": {"value": 0.0, "description": "Presence penalty (OpenAI)."},
+        'low vram mode': {
+            'value': True,
+            'description': 'check it if you\'re running it locally on a single device and encountered a crash due to vram OOM',
+            'type': 'checkbox',
+        }
     }
 
     def _setup_translator(self):
@@ -231,6 +237,7 @@ class LLM_API_Translator(BaseTranslator):
         for i, query in enumerate(queries):
             element = f"id={i + 1 - i_offset}: {query}\n"
             if len(prompt_instructions) + len(current_prompt_content) + len(element) > max_len_approx and num_src > 0:
+                self.logger.debug(f"Нарезка текста, {len(current_prompt_content) + len(element)}>{max_len_approx}")
                 yield prompt_instructions + current_prompt_content, num_src
                 current_prompt_content = element
                 num_src = 1
@@ -409,67 +416,143 @@ class LLM_API_Translator(BaseTranslator):
             mismatch_retry_attempt = 0
             skipped_translation_retry_attempt = 0
             
-            while True:
-                try:
-                    parsed_response = self._request_translation(prompt)
-                    
-                    if not parsed_response or not parsed_response.translations:
-                        raise ValueError("Received empty or invalid parsed response from API.")
+            # while True:
+            #     try:
+            parsed_response = self._request_translation(prompt)
+            
+            if not parsed_response or not parsed_response.translations:
+                raise ValueError("Received empty or invalid parsed response from API.")
 
-                    if len(parsed_response.translations) != num_src:
-                        raise InvalidNumTranslations(f"Expected {num_src}, got {len(parsed_response.translations)}")
-                    
+            translations_dict = {item.id: item.translation for item in parsed_response.translations}
+
+            if len(parsed_response.translations) != num_src:
+            #     raise InvalidNumTranslations(f"Expected {num_src}, got {len(parsed_response.translations)}")
+                self.logger.warning(f"Translation structure mismatch: scr={num_src}/translations={len(parsed_response.translations)}.")
+            
+                # Получаем список недостающих ID
+                existing_ids = {item.id for item in parsed_response.translations}
+                missing_ids = [i for i in range(1, num_src + 1) if i not in existing_ids]
+                
+                for missing_id in sorted(missing_ids):
+                    self.logger.warning(f"Missing ID: {missing_id}. Requesting separately...")
                     # import debugpy
                     # debugpy.debug_this_thread()
                     # debugpy.breakpoint()
+                    # Запрашиваем только недостающие элементы
+                    missing_text = src_list[missing_id-1]
+                    missing_response = self._request_translation(missing_text)
+                    tr: str = missing_response.translations[0].translation
+                    if (tr.strip()):
+                        self.logger.warning(f"Get missing translation: {tr}.")
+                        translations_dict[missing_id] = tr
+                    else:
+                        raise InvalidNumTranslations(f"Missing translation. Can not translate {missing_text}.")
 
-                    translations_dict = {item.id: item.translation for item in parsed_response.translations}
-                    ordered_translations = [translations_dict.get(i, "") for i in range(1, num_src + 1)]
+            ordered_translations = [translations_dict.get(i, "") for i in range(1, num_src + 1)]
 
-                    for i, (src, trans) in enumerate(zip(src_list, ordered_translations)):
-                        if len(src) < 60:
-                            continue
-                        # 1. Проверка на пустой результат при непустом источнике
-                        if not trans.strip() and src.strip():
-                            raise TranslationIntegrityError(f"ID {i}: Empty translation for source '{src[:20]}...'")
-                            continue
-                        # 2. Эвристика коэффициента сжатия
-                        current_ratio = len(trans) / len(src)
-                        if current_ratio < 0.5:
-                           raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {0.5}). \n{src} \n{trans}")
+            for i, (src, trans) in enumerate(zip(src_list, ordered_translations)):
+                # Проверка на пустой результат при непустом источнике
+                if not trans.strip() and src.strip():
+                    self.logger.warning(f"Empty translation for source: '{src[:20]}...'")
+                    # import debugpy
+                    # debugpy.debug_this_thread()
+                    # debugpy.breakpoint()
+                    empty_response = self._request_translation(src)
+                    tr: str = empty_response.translations[0].translation
+                    if not tr:
+                        raise TranslationIntegrityError(f"ID {i}: Empty translation for source '{src[:20]}...'")
+                    else:
+                        ordered_translations[i] = tr
 
-                    translations.extend(ordered_translations)
-                    self.logger.info(f"Successfully translated batch of {num_src}. Tokens used: {self.token_count_last}")
-                    break
+                if self._has_id_leak(trans):
+                    self.logger.warning(
+                        f"ID leak detected in translation #{i+1}: "
+                        f"'{trans[:100]}'. Retrying individually..."
+                    )
+                    id_leak_response = self._request_translation(src)
+                    tr: str = id_leak_response.translations[0].translation
+                    if not tr:
+                        create_error_dialog(f"ID {i}: ID leak detected in translation '{trans[:20]}...'", 'Translation failed.')
+                        raise TranslationIntegrityError(f"ID {i}: ID leak detected in translation '{trans[:20]}...'")
+                    else:
+                        if self._has_id_leak(tr):
+                                create_error_dialog(f"ID {i}: ID leak detected in translation '{trans[:20]}...'", 'Translation failed.')
+                                raise TranslationIntegrityError(f"ID {i}: ID leak detected in translation '{trans[:20]}...'")
+                        else:
+                            ordered_translations[i] = tr
 
-                except TranslationIntegrityError as e:
-                    skipped_translation_retry_attempt += 1
-                    self.logger.warning(f"Skipped translation: {e}. Attempt {skipped_translation_retry_attempt}/3.")
-                    if skipped_translation_retry_attempt >= 3:
-                        self.logger.error("Failed to translate after retries.")
-                        translations.extend(["[ERROR: Skipped translation]"] * num_src)
-                        raise  
-                    time.sleep(self.retry_timeout / 2)
+                # Эвристика коэффициента сжатия
+                RATIO_THRESHOLD = 0.40
+                # Das darf doch nicht wahr sein!
+                # Не может быть!
+                # Wi-wie ein Leuchtturm!  Low compression ratio (0.41 < 0.46).
+                # Как маяк!
+                #VOUS ETES VRAIMENT SÉRIEUXI? Low compression ratio (0.43 < 0.46).
+                #ВЫ СЕРЬЁЗНО?
+                current_ratio = len(trans) / len(src)
+                if current_ratio < RATIO_THRESHOLD:
+                    self.logger.warning(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={trans}")
+                    # import debugpy
+                    # debugpy.debug_this_thread()
+                    # debugpy.breakpoint()
+                    ratio_response = self._request_translation(src)
+                    tr: str = ratio_response.translations[0].translation
+                    current_ratio = len(tr) / len(src)
+                    if current_ratio < RATIO_THRESHOLD and (len(src) > 25):
+                        create_error_dialog(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}", 'Translation failed.')
+                        raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
+                    else:
+                        self.logger.warning(f"Get translation for low compression: {tr}.")
+                        ordered_translations[i] = tr
 
-                except InvalidNumTranslations as e:
-                    mismatch_retry_attempt += 1
-                    self.logger.warning(f"Translation structure mismatch: {e}. Attempt {mismatch_retry_attempt}/{self.invalid_repeat_count}.")
-                    if mismatch_retry_attempt >= self.invalid_repeat_count:
-                        self.logger.error("Failed to get correct translation structure after retries.")
-                        translations.extend(["[ERROR: Structure Mismatch]"] * num_src)
-                        raise  
-                    time.sleep(self.retry_timeout / 2)
+                if not src.endswith("{}") and ordered_translations[i].endswith("{}"):
+                    self.logger.warning("Удален суффикс {}.")
+                    ordered_translations[i] = ordered_translations[i].removesuffix("{}")
+
+            translations.extend(ordered_translations)
+            self.logger.info(f"Successfully translated batch of {num_src}. Tokens used: {self.token_count_last}")
+
+                # except TranslationIntegrityError as e:
+                #     skipped_translation_retry_attempt += 1
+                #     self.logger.warning(f"Skipped translation: {e}. Attempt {skipped_translation_retry_attempt}/3.")
+                #     if skipped_translation_retry_attempt >= 3:
+                #         self.logger.error("Failed to translate after retries.")
+                #         translations.extend(["[ERROR: Skipped translation]"] * num_src)
+                #         raise  
+                #     time.sleep(self.retry_timeout / 2)
+
+                # except InvalidNumTranslations as e:
+                #     mismatch_retry_attempt += 1
+                #     self.logger.warning(f"Translation structure mismatch: {e}. Attempt {mismatch_retry_attempt}/{self.invalid_repeat_count}.")
+                #     if mismatch_retry_attempt >= self.invalid_repeat_count:
+                #         self.logger.error("Failed to get correct translation structure after retries.")
+                #         translations.extend(["[ERROR: Structure Mismatch]"] * num_src)
+                #         raise  
+                #     time.sleep(self.retry_timeout / 2)
                 
-                except Exception as e:
-                    api_retry_attempt += 1
-                    self.logger.warning(f"API request/parsing failed: {e}. Attempt {api_retry_attempt}/{self.retry_attempts}.")
-                    if api_retry_attempt >= self.retry_attempts:
-                        self.logger.error(f"Failed to translate batch after {self.retry_attempts} attempts: {traceback.format_exc()}")
-                        translations.extend([f"[ERROR: API Failed]"] * num_src)
-                        raise  
-                    time.sleep(self.retry_timeout)
+                # except Exception as e:
+                #     api_retry_attempt += 1
+                #     self.logger.warning(f"API request/parsing failed: {e}. Attempt {api_retry_attempt}/{self.retry_attempts}.")
+                #     if api_retry_attempt >= self.retry_attempts:
+                #         self.logger.error(f"Failed to translate batch after {self.retry_attempts} attempts: {traceback.format_exc()}")
+                #         translations.extend([f"[ERROR: API Failed]"] * num_src)
+                #         raise  
+                #     time.sleep(self.retry_timeout)
                     
         return translations
+    
+     # Паттерн для обнаружения утечки ID в переводе
+    _ID_LEAK_RE = re.compile(
+        r'\{\s*ID\s*[=:]\s*\d+[^}]*\}'    # {ID=2}, {ID: 2}, {ID=2: текст...}, {ID: 3}
+        r'|(?:^|\s)id\s*[=:]\s*\d+\s*:'   # id=2: или id: 3: в начале или после пробела
+        r'|\}\s*\]\s*\}\s*$',             # хвостовые JSON-артефакты } ]}
+        re.IGNORECASE
+    )
+
+    @staticmethod
+    def _has_id_leak(text: str) -> bool:
+        """Check if translation contains ID artifacts from the request."""
+        return bool(LLM_API_Translator._ID_LEAK_RE.search(text))
 
     def updateParam(self, param_key: str, param_content):
         super().updateParam(param_key, param_content)
