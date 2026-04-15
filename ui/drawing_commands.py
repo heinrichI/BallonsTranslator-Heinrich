@@ -137,6 +137,9 @@ class RunBlkTransCommand(QUndoCommand):
                         )
 
                         block_w = target_w
+                        # blkitem.setFont(pcfg.global_fontformat)
+                        blkitem.setLetterSpacing(st_manager.formatpanel.global_format.letter_spacing)
+                        blkitem.setFontFamily(st_manager.formatpanel.global_format.font_family)
                         blkitem.setFontSize(optimal_size)
                         blkitem.setPlainText(trs)
                         blkitem.set_size(block_w, target_h, set_layout_maxsize=True)

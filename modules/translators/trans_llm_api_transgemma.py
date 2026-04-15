@@ -282,10 +282,6 @@ class TransGemmaTranslator(BaseTranslator):
             # while True:
                 # try:
             parsed_response = self._request_translation(text)
-                            
-                    # import debugpy
-                    # debugpy.debug_this_thread()
-                    # debugpy.breakpoint()
 
             if not parsed_response or not parsed_response.translations:
                 raise ValueError("Received empty or invalid parsed response from API.")
@@ -294,27 +290,43 @@ class TransGemmaTranslator(BaseTranslator):
 
             if len(parsed_response.translations) != num_src:
             #     raise InvalidNumTranslations(f"Expected {num_src}, got {len(parsed_response.translations)}")
-                self.logger.warning(f"Translation structure mismatch: scr={num_src}/translations={len(parsed_response.translations)}.")
-            
-                # Получаем список недостающих ID
-                existing_ids = {item.id for item in parsed_response.translations}
-                missing_ids = [i for i in range(1, num_src + 1) if i not in existing_ids]
-                
-                for missing_id in sorted(missing_ids):
-                    self.logger.warning(f"Missing ID: {missing_id}. Requesting separately...")
-                    # import debugpy
-                    # debugpy.debug_this_thread()
-                    # debugpy.breakpoint()
-                    # Запрашиваем только недостающие элементы
-                    missing_text = src_list[missing_id-1]
-                    missing_response = self._request_translation(missing_text)
-                    tr: str = missing_response.translations[0].translation
-                    if (tr.strip()):
-                        self.logger.warning(f"Get missing translation: {tr}.")
-                        translations_dict[missing_id] = tr
-                    else:
-                        raise InvalidNumTranslations(f"Missing translation. Can not translate {missing_text}.")
+                self.logger.warning(f"Translation structure mismatch: scr={num_src}/translations={len(parsed_response.translations)}. Translate separatly")
 
+                for i, src in enumerate(src_list, start=1):
+                    separate_translate_response = self._request_translation(src)
+                    tr: str = separate_translate_response.translations[0].translation
+                    if (tr.strip()):
+                        translations_dict[i] = tr
+                        self.logger.warning(f"Translat separatly: {i} of {num_src} scr={src}, tr={tr}")
+                    else:
+                        raise InvalidNumTranslations(f"Retranslation. Can not translate {src}.")
+
+                #     tr: str = missing_response.translations[0].translation
+                #     if (tr.strip()):
+                #         self.logger.warning(f"Get missing translation: {tr}.")
+                #         translations_dict[missing_id] = tr
+                #     else:
+                #         raise InvalidNumTranslations(f"Missing translation. Can not translate {missing_text}.")
+
+                # # Получаем список недостающих ID
+                # existing_ids = {item.id for item in parsed_response.translations}
+                # missing_ids = [i for i in range(1, num_src + 1) if i not in existing_ids]
+                
+                # for missing_id in sorted(missing_ids):
+                #     self.logger.warning(f"Missing ID: {missing_id}. Requesting separately...")
+                #     # Запрашиваем только недостающие элементы
+                #     missing_text = src_list[missing_id-1]
+                #     missing_response = self._request_translation(missing_text)
+                #     tr: str = missing_response.translations[0].translation
+                #     if (tr.strip()):
+                #         self.logger.warning(f"Get missing translation: {tr}.")
+                #         translations_dict[missing_id] = tr
+                #     else:
+                #         raise InvalidNumTranslations(f"Missing translation. Can not translate {missing_text}.")
+
+            # import debugpy
+            # debugpy.debug_this_thread()
+            # debugpy.breakpoint()
             ordered_translations = [translations_dict.get(i, "") for i in range(1, num_src + 1)]
 
             for i, (src, trans) in enumerate(zip(src_list, ordered_translations)):
@@ -327,6 +339,7 @@ class TransGemmaTranslator(BaseTranslator):
                     empty_response = self._request_translation(src)
                     tr: str = empty_response.translations[0].translation
                     if not tr:
+                        create_error_dialog(f"ID {i}: Empty translation for source '{src[:20]}...'")
                         raise TranslationIntegrityError(f"ID {i}: Empty translation for source '{src[:20]}...'")
                     else:
                         ordered_translations[i] = tr
@@ -349,27 +362,48 @@ class TransGemmaTranslator(BaseTranslator):
                             ordered_translations[i] = tr
 
                 # Эвристика коэффициента сжатия
-                RATIO_THRESHOLD = 0.40
+                LOW_RATIO_THRESHOLD = 0.40
                 # Das darf doch nicht wahr sein!
                 # Не может быть!
                 # Wi-wie ein Leuchtturm!  Low compression ratio (0.41 < 0.46).
                 # Как маяк!
                 #VOUS ETES VRAIMENT SÉRIEUXI? Low compression ratio (0.43 < 0.46).
                 #ВЫ СЕРЬЁЗНО?
+                HIGH_RATIO_THRESHOLD = 2.0
+                # High compression ratio (1.67 > 1.4). 
+                # Src=END
+                # Trans=Конец
+                # High compression ratio (1.96 > 1.9).
+                # Src=MEDDLER!
+                # BUTTINSKY!
+                # CLOWN...
+                # Trans=Назойливый тип! В наглую лезет не в своё дело! Клоун...
                 current_ratio = len(trans) / len(src)
-                if current_ratio < RATIO_THRESHOLD:
-                    self.logger.warning(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={trans}")
+                # self.logger.debug(f"current_ratio={current_ratio}")
+                if current_ratio < LOW_RATIO_THRESHOLD:
+                    self.logger.warning(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}). \nSrc={src} \nTrans={trans}")
                     # import debugpy
                     # debugpy.debug_this_thread()
                     # debugpy.breakpoint()
                     ratio_response = self._request_translation(src)
                     tr: str = ratio_response.translations[0].translation
                     current_ratio = len(tr) / len(src)
-                    if current_ratio < RATIO_THRESHOLD and (len(src) > 25):
-                        create_error_dialog(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}", 'Translation failed.')
-                        raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
+                    if current_ratio < LOW_RATIO_THRESHOLD and (len(src) > 25):
+                        create_error_dialog(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}", 'Translation failed.')
+                        raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
                     else:
                         self.logger.warning(f"Get translation for low compression: {tr}.")
+                        ordered_translations[i] = tr
+                elif current_ratio > HIGH_RATIO_THRESHOLD:
+                    self.logger.warning(f"ID {i}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}). \nSrc={src} \nTrans={trans}")
+                    ratio_response = self._request_translation(src)
+                    tr: str = ratio_response.translations[0].translation
+                    current_ratio = len(tr) / len(src)
+                    if current_ratio > HIGH_RATIO_THRESHOLD and (len(src) > 25):
+                        create_error_dialog(f"ID {i}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}", 'Translation failed.')
+                        raise TranslationIntegrityError(f"ID {i}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
+                    else:
+                        self.logger.warning(f"Get translation for high compression: {tr}.")
                         ordered_translations[i] = tr
 
                 if not src.endswith("{}") and ordered_translations[i].endswith("{}"):
