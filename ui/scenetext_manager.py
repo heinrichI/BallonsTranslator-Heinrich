@@ -12,6 +12,7 @@ except:
     from qtpy.QtGui import QUndoCommand
 
 from .textitem import TextBlkItem, TextBlock
+from .flow_textitem import FlowTextBlkItem
 from .canvas import Canvas
 from .textedit_area import TransTextEdit, SourceTextEdit, TransPairWidget, SelectTextMiniMenu, TextEditListScrollArea, QVBoxLayout, Widget
 from utils.fontformat import FontFormat
@@ -485,7 +486,7 @@ class SceneTextManager(QObject):
             if self.auto_textlayout_flag and not blk.vertical:
                 translation = blk.translation
                 blk.translation = ''
-            blk_item = TextBlkItem(blk, len(self.textblk_item_list), show_rect=self.canvas.textblock_mode)
+            blk_item = FlowTextBlkItem(blk, len(self.textblk_item_list), show_rect=self.canvas.textblock_mode)
             if translation:
                 blk.translation = translation
                 rst = self.layout_textblk(blk_item, text=translation)
@@ -1149,8 +1150,11 @@ class SceneTextManager(QObject):
         xywh[[2, 3]] -= xywh[[0, 1]]
         block.set_lines_by_xywh(xywh)
         block.src_is_vertical = self.formatpanel.global_format.vertical
-        blk_item = TextBlkItem(block, len(self.textblk_item_list), set_format=False, show_rect=True)
+        blk_item = FlowTextBlkItem(block, len(self.textblk_item_list), set_format=False, show_rect=True)
         blk_item.set_fontformat(self.formatpanel.global_format)
+        # Initialise flow boundary points from the new rect
+        if hasattr(blk_item, '_init_points_from_rect'):
+            blk_item._init_points_from_rect(blk_item.absBoundingRect(qrect=True))
         self.canvas.push_undo_command(CreateItemCommand(blk_item, self))
 
     def on_paste2selected_textitems(self):
@@ -1309,6 +1313,9 @@ class SceneTextManager(QObject):
             blk_item.blk.text = [trans_pair.e_source.toPlainText()]
             blk_item.blk._bounding_rect = blk_item.absBoundingRect()
             blk_item.updateBlkFormat()
+            # Save flow points if supported
+            if hasattr(blk_item, 'save_flow_points'):
+                blk_item.save_flow_points()
             cbl.append(blk_item.blk)
 
     def updateTranslation(self):

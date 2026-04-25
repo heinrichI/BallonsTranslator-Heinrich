@@ -46,6 +46,9 @@ class TextBlock:
 
     fontformat: FontFormat = field(default_factory=lambda: FontFormat())
 
+    left_points: List = field(default_factory=lambda: [])   # [[x,y],[x,y],[x,y]] item-local coords
+    right_points: List = field(default_factory=lambda: [])  # same
+
     deprecated_attributes: dict = field(default_factory = lambda: dict())
 
     @property

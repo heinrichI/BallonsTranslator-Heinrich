@@ -883,6 +883,14 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
     def __init__(self, doc: QTextDocument, fontformat: FontFormat):
         super().__init__(doc, fontformat)
         self.need_ideal_height = True
+        self._line_left_offsets: dict = {}   # line_idx -> left x offset
+        self._line_right_offsets: dict = {}  # line_idx -> right x boundary
+
+    def set_line_x_offsets(self, left_offsets: dict, right_offsets: dict = None):
+        """Store per-line left offsets and right boundaries, trigger relayout."""
+        self._line_left_offsets = left_offsets if left_offsets is not None else {}
+        self._line_right_offsets = right_offsets if right_offsets is not None else {}
+        self.reLayout()
 
     def reLayout(self):
         doc = self.document()
@@ -984,8 +992,17 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             line = tl.createLine()
             if not line.isValid():
                 break
-            # line.setLeadingIncluded(False)
-            line.setLineWidth(self.available_width)
+            # Calculate dynamic line width based on right boundary
+            line_y = y_offset
+            line_width = self.available_width
+            
+            # Apply right boundary offset if available for this line
+            if line_idx in self._line_right_offsets:
+                right_x = self._line_right_offsets[line_idx]
+                if right_x > doc_margin:
+                    line_width = max(right_x - doc_margin, 10)
+            
+            line.setLineWidth(line_width)
             nchar = line.textLength()
 
             dy = 0
@@ -1010,7 +1027,8 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             if idea_height == -1:
                 idea_height = block_height
                 
-            line.setPosition(QPointF(doc_margin, y_offset + dy))
+            x_pos = doc_margin + self._line_left_offsets.get(line_idx, 0)
+            line.setPosition(QPointF(x_pos, y_offset + dy))
             tw = line.naturalTextWidth()
             shrink_width = max(tw, shrink_width)
             self.shrink_height = max(idea_height + y_offset - doc_margin, self.shrink_height)    #????

@@ -14,6 +14,8 @@ from qtpy.QtGui import QUndoStack, QUndoCommand
 from .misc import ndarray2pixmap, QKEY, QNUMERIC_KEYS, ARROWKEY2DIRECTION
 from .textitem import TextBlkItem, TextBlock
 from .texteditshapecontrol import TextBlkShapeControl
+from .flow_shapecontrol import FlowShapeControl
+from .flow_textitem import FlowTextBlkItem
 from .custom_widget import ScrollBar, FadeLabel
 from .image_edit import ImageEditMode, DrawingLayer, StrokeImgItem
 from .page_search_widget import PageSearchWidget
@@ -241,7 +243,7 @@ class Canvas(QGraphicsScene):
         self.scaleFactorLabel.setText('100%')
         self.scaleFactorLabel.gv = self.gv
 
-        self.txtblkShapeControl = TextBlkShapeControl(self.gv)
+        self.txtblkShapeControl = FlowShapeControl(self.gv)
         
         self.baseLayer = QGraphicsRectItem()
         pen = QPen()
@@ -366,6 +368,11 @@ class Canvas(QGraphicsScene):
             if blk_item.isSelected():
                 blk_item.setSelected(False)
 
+        # Suppress flow boundary overlay in rendered output
+        flow_items = [item for item in self.items() if isinstance(item, FlowTextBlkItem)]
+        for item in flow_items:
+            item.draw_boundaries = False
+
         result = ndarray2pixmap(self.imgtrans_proj.inpainted_array, return_qimg=True)
         canvas_sz = self.img_window_size()
         painter = QPainter(result)
@@ -375,6 +382,10 @@ class Canvas(QGraphicsScene):
         self.render(painter, rect, rect)   #  produce blurred result if target/source rect not specified #320
         painter.end()
         
+        # Restore flow boundary overlay
+        for item in flow_items:
+            item.draw_boundaries = True
+
         if tlayer_opacity_before != 1:
             self.textLayer.setOpacity(tlayer_opacity_before)
         if not tlayer_visible:
