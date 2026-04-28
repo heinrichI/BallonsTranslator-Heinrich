@@ -6,9 +6,16 @@ boundary points of a FlowTextBlkItem.  Handles are only visible on hover
 or when the item is under control.
 """
 
+import logging
+
 from qtpy.QtWidgets import QGraphicsItem, QGraphicsEllipseItem, QGraphicsSceneMouseEvent, QWidget, QStyleOptionGraphicsItem, QLabel
 from qtpy.QtCore import Qt, QRectF, QPointF, QSizeF
 from qtpy.QtGui import QPainter, QPen, QColor, QBrush
+
+logger = logging.getLogger('BallonTranslator')
+
+def _fmt_pts(pts):
+    return '[' + ', '.join(f'({p.x():.1f},{p.y():.1f})' for p in pts) + ']'
 
 HANDLE_RADIUS = 6  # px at scale=1
 
@@ -61,6 +68,19 @@ class FlowControlHandle(QGraphicsEllipseItem):
             blk_item._right_points[self.point_idx] = new_pos
         blk_item._update_flow_layout()
         self.ctrl.updateHandlePositions()
+
+        # --- coordinate logging ---
+        item_pos = blk_item.pos()
+        item_rect = blk_item.boundingRect()
+        logger.debug(
+            'DRAG side=%s idx=%d | item_pos=(%.1f,%.1f) bounding=(%.1f,%.1f,%.1f,%.1f) | '
+            'left=%s | right=%s',
+            self.side, self.point_idx,
+            item_pos.x(), item_pos.y(),
+            item_rect.x(), item_rect.y(), item_rect.width(), item_rect.height(),
+            _fmt_pts(blk_item._left_points),
+            _fmt_pts(blk_item._right_points),
+        )
         event.accept()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
@@ -147,10 +167,18 @@ class FlowShapeControl(QGraphicsItem):
             return
         if not hasattr(blk_item, '_left_points') or not blk_item._left_points:
             return
+        # Keep control at scene origin so handle.setPos(scene_pos) == ctrl_local
+        super().setPos(QPointF(0, 0))
         all_points = blk_item._left_points + blk_item._right_points
         for handle, pt in zip(self.handles, all_points):
             scene_pos = blk_item.mapToScene(pt)
-            handle.setPos(self.mapFromScene(scene_pos))
+            handle.setPos(scene_pos)
+            logger.debug(
+                'updateHandlePositions: side=%s idx=%d | item_local=(%.1f,%.1f) -> scene=(%.1f,%.1f)',
+                handle.side, handle.point_idx,
+                pt.x(), pt.y(),
+                scene_pos.x(), scene_pos.y(),
+            )
 
     def updateBoundingRect(self):
         """Compat shim — just refresh handle positions."""
@@ -195,7 +223,8 @@ class FlowShapeControl(QGraphicsItem):
         """Compatibility method for canvas drag-create positioning."""
         if self.blk_item is not None:
             self.blk_item.setPos(pos)
-        super().setPos(pos)
+        # Do NOT move the control itself — it must always stay at scene origin (0,0)
+        # so that handle.setPos(scene_pos) places handles correctly.
 
     def setRect(self, rect: QRectF):
         """Compatibility method for canvas drag-create rectangle."""

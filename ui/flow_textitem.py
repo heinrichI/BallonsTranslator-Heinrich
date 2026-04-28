@@ -58,7 +58,11 @@ def interpolate_boundary(points: List[QPointF], y: float) -> float:
 
 def build_quad_path(points: List[QPointF]) -> QPainterPath:
     """
-    Build a quadratic Bezier path through 3 control points for visual display.
+    Build a quadratic Bezier path that passes THROUGH all 3 control points.
+    The curve passes through pts[0], pts[1] (middle), and pts[2].
+    To achieve this, we compute the true Bezier control point C such that
+    B(0.5) = pts[1]:
+        C = 2 * pts[1] - 0.5 * (pts[0] + pts[2])
     """
     path = QPainterPath()
     if len(points) < 2:
@@ -70,12 +74,11 @@ def build_quad_path(points: List[QPointF]) -> QPainterPath:
         path.moveTo(pts[0])
         path.lineTo(pts[1])
     elif len(pts) >= 3:
-        # Use middle point as control point for quadratic Bezier
-        # midpoint of start-end as actual point, middle as control
-        mid_x = (pts[0].x() + pts[2].x()) / 2
-        mid_y = (pts[0].y() + pts[2].y()) / 2
-        # Use the actual middle control point from the list
-        ctrl = pts[1]
+        # Compute control point so curve passes through pts[1] at t=0.5
+        ctrl = QPointF(
+            2 * pts[1].x() - 0.5 * (pts[0].x() + pts[2].x()),
+            2 * pts[1].y() - 0.5 * (pts[0].y() + pts[2].y()),
+        )
         path.moveTo(pts[0])
         path.quadTo(ctrl, pts[2])
     return path
