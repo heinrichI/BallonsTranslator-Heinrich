@@ -779,70 +779,93 @@ class Canvas(QGraphicsScene):
     def setTextBlockMode(self, mode: bool):
         self.textblock_mode = mode
 
+    def build_context_menu(self):
+        """Build the standard context menu and return (menu, actions_dict)."""
+        menu = QMenu(self.gv)
+        
+        copy_act = menu.addAction(self.tr("Copy"))
+        copy_act.setShortcut(QKeySequence.StandardKey.Copy)
+        paste_act = menu.addAction(self.tr("Paste"))
+        paste_act.setShortcut(QKeySequence.StandardKey.Paste)
+        delete_act = menu.addAction(self.tr("Delete"))
+        delete_act.setShortcut(QKeySequence("Ctrl+D"))
+        copy_src_act = menu.addAction(self.tr("Copy source text"))
+        copy_src_act.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        paste_src_act = menu.addAction(self.tr("Paste source text"))
+        paste_src_act.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        delete_recover_act = menu.addAction(self.tr("Delete and Recover removed text"))
+        delete_recover_act.setShortcut(QKeySequence("Ctrl+Shift+D"))
+
+        menu.addSeparator()
+
+        format_act = menu.addAction(self.tr("Apply font formatting"))
+        layout_act = menu.addAction(self.tr("Auto layout"))
+        angle_act = menu.addAction(self.tr("Reset Angle"))
+        squeeze_act = menu.addAction(self.tr("Squeeze"))
+        savePng_act = menu.addAction(self.tr("Save PNG"))
+        menu.addSeparator()
+        translate_act = menu.addAction(self.tr("translate"))
+        ocr_act = menu.addAction(self.tr("OCR"))
+        ocr_translate_act = menu.addAction(self.tr("OCR and translate"))
+        ocr_translate_inpaint_act = menu.addAction(self.tr("OCR, translate and inpaint"))
+        inpaint_act = menu.addAction(self.tr("inpaint"))
+
+        actions = {
+            delete_act: ("delete_textblks", 0),
+            delete_recover_act: ("delete_textblks", 1),
+            copy_act: ("copy", None),
+            paste_act: ("paste", None),
+            copy_src_act: ("copy_src", None),
+            paste_src_act: ("paste_src", None),
+            format_act: ("format", None),
+            layout_act: ("layout", None),
+            angle_act: ("reset_angle", None),
+            squeeze_act: ("squeeze", None),
+            savePng_act: ("savepng", None),
+            translate_act: ("trans", -1),
+            ocr_act: ("trans", 0),
+            ocr_translate_act: ("trans", 1),
+            ocr_translate_inpaint_act: ("trans", 2),
+            inpaint_act: ("trans", 3),
+        }
+        return menu, actions
+
+    def exec_context_menu(self, menu: QMenu, actions: dict, pos: QPoint):
+        """Execute context menu and handle the selected action."""
+        rst = menu.exec(pos)
+        if rst is None:
+            return
+        action_info = actions.get(rst)
+        if action_info is None:
+            return
+        action_type, param = action_info
+        if action_type == "delete_textblks":
+            self.delete_textblks.emit(param)
+        elif action_type == "copy":
+            self.on_copy()
+        elif action_type == "paste":
+            self.on_paste()
+        elif action_type == "copy_src":
+            self.copy_src_signal.emit()
+        elif action_type == "paste_src":
+            self.paste_src_signal.emit()
+        elif action_type == "format":
+            self.format_textblks.emit()
+        elif action_type == "layout":
+            self.layout_textblks.emit()
+        elif action_type == "reset_angle":
+            self.reset_angle.emit()
+        elif action_type == "squeeze":
+            self.squeeze_blk.emit()
+        elif action_type == "savepng":
+            self.savePng_blk.emit()
+        elif action_type == "trans":
+            self.run_blktrans.emit(param)
+
     def on_create_contextmenu(self, pos: QPoint, is_textpanel: bool):
         if self.textEditMode() and not self.creating_textblock:
-            menu = QMenu(self.gv)
-            copy_act = menu.addAction(self.tr("Copy"))
-            copy_act.setShortcut(QKeySequence.StandardKey.Copy)
-            paste_act = menu.addAction(self.tr("Paste"))
-            paste_act.setShortcut(QKeySequence.StandardKey.Paste)
-            delete_act = menu.addAction(self.tr("Delete"))
-            delete_act.setShortcut(QKeySequence("Ctrl+D"))
-            copy_src_act = menu.addAction(self.tr("Copy source text"))
-            copy_src_act.setShortcut(QKeySequence("Ctrl+Shift+C"))
-            paste_src_act = menu.addAction(self.tr("Paste source text"))
-            paste_src_act.setShortcut(QKeySequence("Ctrl+Shift+V"))
-            delete_recover_act = menu.addAction(self.tr("Delete and Recover removed text"))
-            delete_recover_act.setShortcut(QKeySequence("Ctrl+Shift+D"))
-
-            menu.addSeparator()
-
-            format_act = menu.addAction(self.tr("Apply font formatting"))
-            layout_act = menu.addAction(self.tr("Auto layout"))
-            angle_act = menu.addAction(self.tr("Reset Angle"))
-            squeeze_act = menu.addAction(self.tr("Squeeze"))
-            savePng_act = menu.addAction(self.tr("Save PNG"))
-            menu.addSeparator()
-            translate_act = menu.addAction(self.tr("translate"))
-            ocr_act = menu.addAction(self.tr("OCR"))
-            ocr_translate_act = menu.addAction(self.tr("OCR and translate"))
-            ocr_translate_inpaint_act = menu.addAction(self.tr("OCR, translate and inpaint"))
-            inpaint_act = menu.addAction(self.tr("inpaint"))
-
-            rst = menu.exec(pos)
-            
-            if rst == delete_act:
-                self.delete_textblks.emit(0)
-            elif rst == delete_recover_act:
-                self.delete_textblks.emit(1)
-            elif rst == copy_act:
-                self.on_copy()
-            elif rst == paste_act:
-                self.on_paste()
-            elif rst == copy_src_act:
-                self.copy_src_signal.emit()
-            elif rst == paste_src_act:
-                self.paste_src_signal.emit()
-            elif rst == format_act:
-                self.format_textblks.emit()
-            elif rst == layout_act:
-                self.layout_textblks.emit()
-            elif rst == angle_act:
-                self.reset_angle.emit()
-            elif rst == squeeze_act:
-                self.squeeze_blk.emit()
-            elif rst == savePng_act:
-                self.savePng_blk.emit()                
-            elif rst == translate_act:
-                self.run_blktrans.emit(-1)
-            elif rst == ocr_act:
-                self.run_blktrans.emit(0)
-            elif rst == ocr_translate_act:
-                self.run_blktrans.emit(1)
-            elif rst == ocr_translate_inpaint_act:
-                self.run_blktrans.emit(2)
-            elif rst == inpaint_act:
-                self.run_blktrans.emit(3)
+            menu, actions = self.build_context_menu()
+            self.exec_context_menu(menu, actions, pos)
 
     @property
     def have_selected_blkitem(self):
@@ -1016,4 +1039,3 @@ class Canvas(QGraphicsScene):
         self.blockSignals(True)
         self.text_undo_stack.blockSignals(True)
         self.draw_undo_stack.blockSignals(True)
-

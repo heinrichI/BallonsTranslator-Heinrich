@@ -1,58 +1,50 @@
 # Implementation Plan
 
 [Overview]
-Fix FlowShapeControl handles drifting away from the text item when the item is moved or edited.
-
-The bug is that `FlowShapeControl` is an independent `QGraphicsItem` on the scene with its own `pos()`. When `updateHandlePositions()` calls `self.mapFromScene(scene_pos)`, the result depends on the control's own `pos()`. Since `FlowShapeControl.setPos()` forwards to `blk_item.setPos()` AND calls `super().setPos(pos)`, it keeps them in sync only during drag-create. During normal item move (e.g. TextBlkItem being dragged), the `FlowShapeControl` pos is **not updated**, causing the `ctrl_local` coordinates to drift.
-
-The correct fix: ensure handles always use scene coordinates directly by keeping `FlowShapeControl` permanently at scene origin `(0, 0)`. Then `ctrl_local == scene_pos` always, and `handle.setPos(scene_pos)` is correct. Alternatively, after each item move, call `super().setPos(QPointF(0, 0))` to reset the control's own position.
+Fix context menu behavior: menu should only appear when right-clicking on a text block. Add "Add point to left" and "Add point to right" options to the standard context menu for all text blocks.
 
 [Types]
-No type changes needed.
-
-No new types, interfaces, or data structures are required for this fix.
+No type changes required.
 
 [Files]
-Only `ui/flow_shapecontrol.py` needs to be modified.
+### Existing files to be modified:
 
-- **Modified:** `ui/flow_shapecontrol.py`
-  - `updateHandlePositions()`: set `self.setPos(QPointF(0,0))` at the start (or use scene coords directly), then call `handle.setPos(scene_pos)` instead of `handle.setPos(self.mapFromScene(scene_pos))`
-  - `setPos()`: remove the `super().setPos(pos)` call so the control always stays at `(0,0)` on scene
-  - `__init__()`: ensure control is added at `(0,0)` on scene
+**ui/canvas.py**
+- Lines 692-708: Simplify mouseReleaseEvent right-click handling - only call on_create_contextmenu when clicked on a TextBlkItem (including FlowTextBlkItem), otherwise do nothing
+- Lines 770+: Restore `on_create_contextmenu` method with full original menu + new flow options
+
+**ui/textitem.py** (or ui/flow_textitem.py if adding point logic there)
+- Add logic to handle "Add point" menu actions
 
 [Functions]
-Two methods in `FlowShapeControl` need to be changed.
+- **Modified: Canvas.mouseReleaseEvent** (ui/canvas.py, ~line 692)
+  - Change: When right-click detected on TextBlkItem, call on_create_contextmenu
+  - When right-click on empty canvas, do nothing
+  
+- **Restored: Canvas.on_create_contextmenu** (ui/canvas.py, ~line 770)
+  - Original menu items: Copy, Paste, Delete, Copy source text, Paste source text, Delete and Recover removed text, Apply font formatting, Auto layout, Reset Angle, Squeeze, Save PNG, translate, OCR, OCR and translate, OCR translate and inpaint, inpaint
+  - New: Add flow-specific section at end:
+    - "Добавить точку слева" (Add point to left)
+    - "Добавить точку справа" (Add point to right)
+  - These options only work if the clicked item is a FlowTextBlkItem
 
-- **Modified:** `updateHandlePositions` in `ui/flow_shapecontrol.py`
-  - Add `super().setPos(QPointF(0, 0))` at top to ensure ctrl is always at origin
-  - Change `handle.setPos(self.mapFromScene(scene_pos))` → `handle.setPos(scene_pos)` (since ctrl is at origin, scene == local)
-
-- **Modified:** `setPos` in `ui/flow_shapecontrol.py`  
-  - Remove `super().setPos(pos)` — control should never move from `(0,0)`
-  - Keep only `self.blk_item.setPos(pos)` forwarding
+- **New: Helper to get clicked text item**
+  - In on_create_contextmenu, determine which text item was clicked and store reference
+  - Pass to action handlers for "Add point" actions
 
 [Classes]
-`FlowShapeControl` class in `ui/flow_shapecontrol.py` needs targeted changes.
-
-- **Modified:** `FlowShapeControl`
-  - `updateHandlePositions`: reset own pos to `(0,0)`, use scene coords for handles
-  - `setPos`: only forward to blk_item, don't move control itself
+No class changes required.
 
 [Dependencies]
-No dependency changes required.
-
-No new packages or version changes needed.
+No new dependencies.
 
 [Testing]
-Manual testing: drag a FlowTextBlkItem around the canvas, verify handles stay attached.
-
-- Move item → handles follow correctly
-- Drag handle → handle and boundary curve stay in sync
-- Open/close editing mode → handles reappear in correct positions
-- Zoom in/out → handles remain correctly positioned
+- Right-click on empty canvas: no menu should appear
+- Right-click on any TextBlkItem: full menu with add point options
+- "Add point to left/right" adds a point at click Y position
 
 [Implementation Order]
-Apply two targeted changes to `ui/flow_shapecontrol.py` in sequence.
-
-1. In `updateHandlePositions()`: add `super().setPos(QPointF(0, 0))` at start, change `handle.setPos(self.mapFromScene(scene_pos))` to `handle.setPos(scene_pos)`
-2. In `setPos()`: remove `super().setPos(pos)` to prevent control from ever drifting from scene origin
+1. Restore on_create_contextmenu method with full original menu from commit 8796ac8
+2. Simplify mouseReleaseEvent to only call on_create_contextmenu for TextBlkItem clicks
+3. Add "Add point" menu items and handler logic
+4. Test context menu appears only on text blocks
