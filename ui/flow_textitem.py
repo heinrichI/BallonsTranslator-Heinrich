@@ -13,7 +13,7 @@ the visual boundary overlay in the exported image.
 
 from typing import List, Union, Tuple
 
-from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent
+from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent, QMenu, QAction
 from qtpy.QtCore import Qt, QRectF, QPointF, Signal
 from qtpy.QtGui import (QPainter, QPen, QColor, QPainterPath, QTextCursor)
 
@@ -180,6 +180,12 @@ class FlowTextBlkItem(TextBlkItem):
 
     def _update_flow_layout(self):
         """Push current boundary offsets to the layout engine and repaint."""
+        import logging as _logging
+        _log = _logging.getLogger('BallonTranslator')
+        _log.debug('_update_flow_layout: item_pos=(%.1f,%.1f) left=%s right=%s',
+            self.pos().x(), self.pos().y(),
+            [(round(p.x(),1), round(p.y(),1)) for p in self._left_points],
+            [(round(p.x(),1), round(p.y(),1)) for p in self._right_points])
         if isinstance(self.layout, HorizontalTextDocumentLayout):
             left_offsets, right_boundaries = self._get_line_x_offsets()
             self.layout.set_line_x_offsets(left_offsets, right_boundaries)
@@ -195,6 +201,44 @@ class FlowTextBlkItem(TextBlkItem):
         self.blk.left_points = [[p.x(), p.y()] for p in self._left_points]
         self.blk.right_points = [[p.x(), p.y()] for p in self._right_points]
 
+    # ── Override size/pos methods to prevent pos() shift ─────
+
+    def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True):
+        """For flow items: update layout max size but never shift pos()."""
+        if set_layout_maxsize and hasattr(self, 'layout') and self.layout is not None:
+            try:
+                self.layout.setMaxSize(w, h)
+            except Exception:
+                pass
+        self.setCenterTransform()
+        self.prepareGeometryChange()
+        if set_blk_size and self.blk is not None:
+            self.blk._bounding_rect = self.absBoundingRect()
+        self.update()
+
+    def on_document_enlarged(self):
+        # For flow items: do NOT shift pos() to preserve control point positions.
+        self.setCenterTransform()
+        self.prepareGeometryChange()
+        self.update()
+
+    def docSizeChanged(self):
+        # For flow items: just update transform, never shift pos().
+        self.setCenterTransform()
+        self.update()
+
+    # ── BoundingRect override ─────────────────────────────────
+
+    def boundingRect(self) -> QRectF:
+        rect = super().boundingRect()
+        all_pts = self._left_points + self._right_points
+        if all_pts:
+            xs = [p.x() for p in all_pts]
+            ys = [p.y() for p in all_pts]
+            pts_rect = QRectF(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+            rect = rect.united(pts_rect)
+        return rect
+
     # ── Hover events ──────────────────────────────────────────
 
     def hoverEnterEvent(self, event: QGraphicsSceneHoverEvent):
@@ -206,6 +250,63 @@ class FlowTextBlkItem(TextBlkItem):
         self._hover = False
         self.update()
         super().hoverLeaveEvent(event)
+
+    # ── Context menu ──────────────────────────────────────────
+
+    def showFlowContextMenu(self, scene_pos: QPointF, screen_pos):
+        """Called from Canvas.mouseReleaseEvent on right-click."""
+        if not self._left_points or not self._right_points:
+            return
+
+        # Convert scene pos to item-local Y
+        local_pos = self.mapFromScene(scene_pos)
+        click_y = local_pos.y()
+
+        menu = QMenu()
+        add_left = menu.addAction("Добавить точку к левой стороне")
+        add_right = menu.addAction("Добавить точку к правой стороне")
+        menu.addSeparator()
+
+        screen_pt = screen_pos.toPoint() if hasattr(screen_pos, 'toPoint') else screen_pos
+        action = menu.exec(screen_pt)
+        if action == add_left:
+            x = interpolate_boundary(self._left_points, click_y)
+            new_pt = QPointF(x, click_y)
+            self._left_points.append(new_pt)
+            self._left_points.sort(key=lambda p: p.y())
+            self._update_flow_layout()
+            scene = self.scene()
+            if scene is not None:
+                for item in scene.items():
+                    from .flow_shapecontrol import FlowShapeControl
+                    if isinstance(item, FlowShapeControl) and item.blk_item is self:
+                        item.rebuildHandles()
+                        break
+        elif action == add_right:
+            x = interpolate_boundary(self._right_points, click_y)
+            new_pt = QPointF(x, click_y)
+            self._right_points.append(new_pt)
+            self._right_points.sort(key=lambda p: p.y())
+            self._update_flow_layout()
+            scene = self.scene()
+            if scene is not None:
+                for item in scene.items():
+                    from .flow_shapecontrol import FlowShapeControl
+                    if isinstance(item, FlowShapeControl) and item.blk_item is self:
+                        item.rebuildHandles()
+                        break
+        # If user picked a flow action or dismissed menu — done.
+        # The separator is not clickable so action will never equal it.
+        # If action is None the user dismissed without choosing — show standard menu.
+        if action is None:
+            self._show_standard_context_menu(screen_pos)
+
+    def _show_standard_context_menu(self, screen_pos):
+        """Trigger the standard canvas context menu."""
+        scene = self.scene()
+        if scene is not None and hasattr(scene, 'context_menu_requested'):
+            screen_pt = screen_pos.toPoint() if hasattr(screen_pos, 'toPoint') else screen_pos
+            scene.context_menu_requested.emit(screen_pt, False)
 
     # ── Paint ─────────────────────────────────────────────────
 
