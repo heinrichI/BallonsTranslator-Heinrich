@@ -7,11 +7,19 @@ from ..yolov5.yolov5_utils import fuse_conv_and_bn
 from ..yolov5.common import C3, Conv
 import copy
 
+# Константы режимов работы детектора:
+# TEXTDET_MASK  - вернуть только маску сегментации
+# TEXTDET_DET   - вернуть детекцию блоков (для обучения детектора блоков)
+# TEXTDET_INFERENCE - режим инференса (комбинация маски + признаки для детекции линий)
 TEXTDET_MASK = 0
 TEXTDET_DET = 1
 TEXTDET_INFERENCE = 2
 
 class double_conv_up_c3(nn.Module):
+    """
+    Комбинированный блок: C3 + транспонированная свёртка + BN + ReLU.
+    Используется в декодерной части U-Net-подобной головы.
+    """
     def __init__(self, in_ch, mid_ch, out_ch, act=True):
         super(double_conv_up_c3, self).__init__()
         self.conv = nn.Sequential(
@@ -25,6 +33,9 @@ class double_conv_up_c3(nn.Module):
         return self.conv(x)
 
 class double_conv_c3(nn.Module):
+    """
+    Блок, используемый в нисходящей части: опциональный downsample + C3.
+    """
     def __init__(self, in_ch, out_ch, stride=1, act=True):
         super(double_conv_c3, self).__init__()
         if stride > 1 :
@@ -38,6 +49,10 @@ class double_conv_c3(nn.Module):
         return x
 
 class UnetHead(nn.Module):
+    """
+    U-Net-подобная голова для сегментации текста.
+    При forward можно выбирать режимы: вернуть только маску, или промежуточные карты признаков.
+    """
     def __init__(self, act=True) -> None:
 
         super(UnetHead, self).__init__()
@@ -53,11 +68,12 @@ class UnetHead(nn.Module):
         )
 
     def forward(self, f160, f80, f40, f20, f3, forward_mode=TEXTDET_MASK):
-        # input: 640@3
+        # вход: f3 соответствует низкоуровневым признакам (например 640@3)
         d10 = self.down_conv1(f3) # 512@10
         u20 = self.upconv0(d10)  # 256@10
         u40 = self.upconv2(torch.cat([f20, u20], dim = 1)) # 256@40
 
+        # В режиме детекции блоков возвращаем промежуточные признаки (для DBHead)
         if forward_mode == TEXTDET_DET:
             return f80, f40, u40
         else:
@@ -66,14 +82,21 @@ class UnetHead(nn.Module):
             u320 = self.upconv5(torch.cat([f160, u160], dim = 1)) # 64@320
             mask = self.upconv6(u320)
             if forward_mode == TEXTDET_MASK:
+                # вернуть только бинарную карту маски текста
                 return mask
             else:
+                # вернуть маску + промежуточные карты признаков
                 return mask, [f80, f40, u40]
             
     def init_weight(self, init_func):
+        # Инициализация весов (передаётся внешняя функция)
         self.apply(init_func)
 
 class DBHead(nn.Module):
+    """
+    Голова для детекции линий/блоков (DBNet-подобная).
+    Возвращает карты shrink/binarize и/или бинаризованные карты для обучения/инференса.
+    """
     def __init__(self, in_channels, k = 50, shrink_with_sigmoid=True, act=True):
         super().__init__()
         self.k = k
@@ -97,6 +120,7 @@ class DBHead(nn.Module):
         self.thresh = self._init_thresh(in_channels)
 
     def forward(self, f80, f40, u40, shrink_with_sigmoid=True, step_eval=False):
+        # Основной проход: декодирование признаков и получение карт порогов/бинаризации
         shrink_with_sigmoid = self.shrink_with_sigmoid
         u80 = self.upconv3(torch.cat([f40, u40], dim = 1)) # 256@80
         x = self.upconv4(torch.cat([f80, u80], dim = 1)) # 128@160
@@ -106,12 +130,14 @@ class DBHead(nn.Module):
         shrink_maps = torch.sigmoid(x)
         
         if self.training:
+            # В режиме обучения возвращаем карты shrink, threshold и бинарную карту
             binary_maps = self.step_function(shrink_maps, threshold_maps)
             if shrink_with_sigmoid:
                 return torch.cat((shrink_maps, threshold_maps, binary_maps), dim=1)
             else:
                 return torch.cat((shrink_maps, threshold_maps, binary_maps, x), dim=1)
         else:
+            # В режиме инференса можно вернуть step_function (если нужно) или concat карт
             if step_eval:
                 return self.step_function(shrink_maps, threshold_maps)
             else:
@@ -121,6 +147,7 @@ class DBHead(nn.Module):
         self.apply(init_func)
 
     def _init_thresh(self, inner_channels, serial=False, smooth=False, bias=False):
+        # Инициализация последовательности слоёв для карты порогов
         in_channels = inner_channels
         if serial:
             in_channels += 1
@@ -136,6 +163,7 @@ class DBHead(nn.Module):
         return self.thresh
 
     def _init_upsample(self, in_channels, out_channels, smooth=False, bias=False):
+        # Создаёт модуль для апсемплинга: либо через nearest+conv, либо через ConvTranspose2d
         if smooth:
             inter_out_channels = out_channels
             if out_channels == 1:
@@ -150,34 +178,49 @@ class DBHead(nn.Module):
             return nn.ConvTranspose2d(in_channels, out_channels, 2, 2)
 
     def step_function(self, x, y):
+        # Функция пороговой бинаризации, используемая в DBHead
         return torch.reciprocal(1 + torch.exp(-self.k * (x - y)))
 
 class TextDetector(nn.Module):
+    """
+    Комбинированный модуль детектора текста:
+    - backbone (YOLOv5) для извлечения признаков
+    - seg_net (U-Net) для маски текста
+    - опционально dbnet для детекции линий/блоков
+    """
     def __init__(self, weights, map_location='cpu', forward_mode=TEXTDET_MASK, act=True):
         super(TextDetector, self).__init__()
 
+        # Загружаем предобученный backbone (YOLOv5 variant)
         yolov5s_backbone = load_yolov5_ckpt(weights=weights, map_location=map_location)
         yolov5s_backbone.eval()
         out_indices = [1, 3, 5, 7, 9]
         yolov5s_backbone.out_indices = out_indices
         yolov5s_backbone.model = yolov5s_backbone.model[:max(out_indices)+1]
         self.act = act
+        # U-Net для сегментации текста
         self.seg_net = UnetHead(act=act)
         self.backbone = yolov5s_backbone
         self.dbnet = None
         self.forward_mode = forward_mode
 
     def train_mask(self):
+        # Переключаемся в режим тренировки маски (segmentation)
         self.forward_mode = TEXTDET_MASK
         self.backbone.eval()
         self.seg_net.train()
 
     def initialize_db(self, unet_weights):
+        """
+        Инициализация DBHead: используем веса для U-Net и переносим части decode-слоёв
+        для DBHead (чтобы переиспользовать параметры).
+        """
         self.dbnet = DBHead(64, act=self.act)
         self.seg_net.load_state_dict(torch.load(unet_weights, map_location='cpu')['weights'])
-        # self.dbnet.init_weight(init_weights)
+        # Переносим upconv слои в dbnet
         self.dbnet.upconv3 = copy.deepcopy(self.seg_net.upconv3)
         self.dbnet.upconv4 = copy.deepcopy(self.seg_net.upconv4)
+        # Удаляем соответствующие слои из seg_net, чтобы освободить место
         del self.seg_net.upconv3
         del self.seg_net.upconv4
         del self.seg_net.upconv5
@@ -185,6 +228,7 @@ class TextDetector(nn.Module):
         # del self.seg_net.conv_mask
     
     def train_db(self):
+        # Переключаемся на тренировку DBHead (детекция линий)
         self.forward_mode = TEXTDET_DET
         self.backbone.eval()
         self.seg_net.eval()
@@ -195,13 +239,21 @@ class TextDetector(nn.Module):
         with torch.no_grad():
             outs = self.backbone(x)
         if forward_mode == TEXTDET_MASK:
+            # вернуть маску сегментации
             return self.seg_net(*outs, forward_mode=forward_mode)
         elif forward_mode == TEXTDET_DET:
+            # вернуть карты для детекции линий (DBHead)
             with torch.no_grad():
                 outs = self.seg_net(*outs, forward_mode=forward_mode)
             return self.dbnet(*outs)
 
 def get_base_det_models(model_path, device='cpu', half=False, act='leaky'):
+    """
+    Загрузка базовых моделей из словаря state_dict:
+    - blk_det: backbone для детекции блоков
+    - text_seg: UNet-подобная голова сегментации
+    - text_det: DBHead для финальной детекции линий
+    """
     textdetector_dict = torch.load(model_path, map_location='cpu')
     blk_det = load_yolov5_ckpt(textdetector_dict['blk_det'])
     text_seg = UnetHead(act=act)
@@ -213,6 +265,12 @@ def get_base_det_models(model_path, device='cpu', half=False, act='leaky'):
     return blk_det.eval().to(device), text_seg.eval().to(device), text_det.eval().to(device)
 
 class TextDetBase(nn.Module):
+    """
+    Обёртка над полным пайплайном детекции текста:
+      - вызывает blk_det для детекции блоков,
+      - вызывает text_seg для получения маски,
+      - вызывает text_det для детекции линий/строк.
+    """
     def __init__(self, model_path, device='cpu', half=False, fuse=False, act='leaky'):
         super(TextDetBase, self).__init__()
         self.blk_det, self.text_seg, self.text_det = get_base_det_models(model_path, device, half, act=act)
@@ -220,23 +278,31 @@ class TextDetBase(nn.Module):
             self.fuse()
 
     def fuse(self):
+        """
+        Опциональная оптимизация: fuse conv + bn в конволюции для ускорения инференса.
+        """
         def _fuse(model):
             for m in model.modules():
                 if isinstance(m, (Conv)) and hasattr(m, 'bn'):
-                    m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
-                    delattr(m, 'bn')  # remove batchnorm
-                    m.forward = m.forward_fuse  # update forward
+                    m.conv = fuse_conv_and_bn(m.conv, m.bn)  # обновляем conv
+                    delattr(m, 'bn')  # удаляем batchnorm
+                    m.forward = m.forward_fuse  # обновляем forward
             return model
         self.text_seg = _fuse(self.text_seg)
         self.text_det = _fuse(self.text_det)
 
     def forward(self, features):
+        # Полный проход: блоки, маска и линии
         blks, features = self.blk_det(features, detect=True)
         mask, features = self.text_seg(*features, forward_mode=TEXTDET_INFERENCE)
         lines = self.text_det(*features, step_eval=False)
         return blks[0], mask, lines
 
 class TextDetBaseDNN:
+    """
+    Простой обёрточный класс для ONNX-модели через OpenCV DNN.
+    Возвращает blks, mask и lines_map как модель напрямую.
+    """
     def __init__(self, input_size, model_path):
         self.input_size = input_size
         self.model = cv2.dnn.readNetFromONNX(model_path)
@@ -247,5 +313,3 @@ class TextDetBaseDNN:
         self.model.setInput(blob)
         blks, mask, lines_map  = self.model.forward(self.uoln)
         return blks, mask, lines_map
-
-

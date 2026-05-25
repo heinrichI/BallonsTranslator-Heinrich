@@ -1,55 +1,52 @@
-# Technical Context
+# Technical Context — CTD & ogkalu HF detector notes
 
-## Technologies Used
-- **Python 3.10–3.12** (primary language)
-- **PyQt6/PyQt5** — cross-platform GUI framework
-- **PyTorch** — deep learning framework for all ML modules
-- **transformers** — HuggingFace library (used by ogkalu_rtdetr detector, translators)
-- **ultralytics** — YOLO/RT-DETR model loading (ysg detector)
-- **OpenCV** — image processing, mask operations
-- **NumPy** — array operations
-- **Pillow** — image conversion for HF pipeline
-- **ONNX Runtime** — alternative inference backend (ctd detector)
+## CTD (ComicTextDetector) — implementation notes
+- CTDModel provides pixel-level text segmentation and detected text blocks.
+- Model formats:
+  - ONNX (recommended for CPU): `data/models/comictextdetector.pt.onnx`
+  - Torch (recommended for GPU): `data/models/comictextdetector.pt`
+- Pipeline stages:
+  1. Optional rearrange for extreme aspect ratios: `det_rearrange_forward` produces tiled square batches so model sees near-square crops.
+  2. Backbone (YOLOv5 variant) extracts features.
+  3. UNet-like head (`UnetHead`) produces coarse text mask.
+  4. Optional DBHead produces shrink/threshold maps → lines/blocks.
+  5. Postprocessing:
+     - `postprocess_mask` converts logits to uint8 mask.
+     - `SegDetectorRepresenter` (db utils) converts line maps → line polygons.
+     - `group_output` → assemble TextBlock list.
+  6. Pixel refinement: `refine_mask(img, coarse_mask, blk_list, refine_mode)` (modules/textdetector/ctd/textmask.py) — produces per-character masks using CTD logic.
 
-## Development Setup
-- **Python interpreter**: `j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe`
-- **Запуск проекта**: `"j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe" launch.py`
-- **Виртуальное окружение**: `j:\Comic translate\BallonsTranslator\myenv\`
-- **Установка зависимостей**: `"j:\Comic translate\BallonsTranslator\myenv\Scripts\pip.exe" install -r requirements.txt`
-- **Важно**: Все команды Python должны выполняться из этого виртуального окружения
+## ogkalu/comic-text-and-bubble-detector notes
+- Uses HF `transformers.pipeline("object-detection")`. Pipeline returns list of items with keys: `score`, `label`, `box` (box formats vary).
+- Important behaviors implemented:
+  - Defensive parsing: `_safe_box_from_item` supports multiple HF box formats (dict with xmin/xmax, left/width, list normalized / px).
+  - Filter labels: skip `bubble` labels; treat `text_bubble` and `text_free` as text regions.
+  - Merge overlapping detections with IoU threshold 0.35; but skip merges producing area > 20% of page area.
+  - Per-block padding clamped to 15% of block height to avoid mask blowup.
+  - Call `refine_mask` after drawing coarse polygon masks, then apply optional dilation.
 
-## Installed Modules (as of May 2026)
+## API / key functions
+- modules/textdetector/detector_comic-text-and-bubble-detector.py:
+  - _load_model(): loads HF pipeline, handles device fallback cuda→cpu.
+  - _detect(img): returns (mask: np.uint8, blk_list: List[TextBlock])
+  - Helpers: `_validate_detection_item`, `_safe_box_from_item`, `_merge_overlapping_blocks`, `_expand_blocks`, `_clip_blocks_to_page`
 
-### Text Detectors (4)
-| ID | Class | Description |
-|----|-------|-------------|
-| `ctd` | `ComicTextDetector` | Original comictextdetector.pt (ONNX/Torch) |
-| `ysgyolo` | `YSGYoloDetector` | YOLO/RT-DETR via ultralytics |
-| `stariver_ocr` | `StariverDetector` | Stariver cloud API |
-| `ogkalu_rtdetr` | `OgkaluRTDetrDetector` | HF transformers pipeline (ogkalu model) |
+- modules/textdetector/ctd/inference.py:
+  - `TextDetector.__call__`: orchestrates detect_size preprocess, optional rearrange, forward, postprocess, `group_output`, `refine_mask` and optional keep_undetected mask.
 
-### OCR Modules (19)
-manga_ocr, paddle_ocr, mit32px, mit48px, mit48px_ctc, tr_ocr, bing_ocr, google_vision, google_lens_exp, idefics2_ocr, llm_ocr, none_ocr, one_ocr, one_ocr_mitfont, qwen2_ocr, stariver_ocr, windows_ocr, PaddleOCRVLMy, PaddleOCRVLMyColor
+## Runtime recommendations
+- Use virtualenv `j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe` for running.
+- For HF detector: GPU (cuda) recommended to speed up model load/inference; if not available, pipeline falls back to cpu.
+- Prefer detect_size ~ 1024–1280; CTD rearrange logic handles extreme aspect ratios.
 
-### Inpainters (5)
-lama_mpe, lama_large_512px, aot, patchmatch, opencv-tela
+## Scripts for debugging
+- `scripts/debug_run_detector_params.py` — run HF detector with pad/dilate/no_merge switches and save HF raw results + masks.
+- `scripts/count_debug_masks.py` — analyze mask pixel counts to detect mask blowup.
+- `scripts/debug_run_detector.py` — convenience script for single-image debug.
 
-### Translators (22)
-google, DeepL, DeepL Free, DeepLX API, ChatGPT, ChatGPT_exp, Baidu, Caiyun, Yandex, YandexFree, Papago, Youdao, Sakura, Sugoi, ezTrans, m2m100, nllb200, TransGemma, LLM_API_Translator, text-generation-webui, TranslatorsPack, None, Copy Source
-
-## Technical Constraints
-- **Windows 10** primary target (with macOS/Linux support)
-- **CUDA/MPS/XPU** GPU support via PyTorch
-- **ONNX** fallback for CPU inference (ctd detector)
-- **3-channel RGB** input required by all detectors
-- **8-bit uint8** binary masks (0 or 255)
-- Model weights stored in `data/models/`
-
-## Key Dependencies
-- `torch` + `torchvision` — core ML framework
-- `transformers` — HF model loading (ogkalu_rtdetr, translators)
-- `ultralytics==8.3.90` — YOLO/RT-DETR inference
-- `opencv-python` — image processing
-- `PyQt6` — GUI
-- `shapely` — polygon operations
-- `pillow` — image format support
+## Notes on refine_mask expectations
+- `refine_mask(img, coarse_mask, blk_list)` expects:
+  - `img`: 3-channel RGB ndarray (uint8)
+  - `coarse_mask`: uint8 mask with 0/255
+  - `blk_list`: list of TextBlock objects with `xyxy` and `lines` for region guidance
+- If `blk_list` contains very large merged rectangles, refine_mask will segment broadly (may include background). Recommended to split large blocks into lines before refine_mask.

@@ -11,9 +11,14 @@ from typing import Tuple, List
 
 import numpy as np
 import cv2
+import json
+from pathlib import Path
+from datetime import datetime
 
 from .base import register_textdetectors, TextDetectorBase, TextBlock, DEVICE_SELECTOR
 from utils.textblock import sort_regions
+from .ctd.textmask import refine_mask
+from .detector_ctd import ComicTextDetector
 
 try:
     from transformers import pipeline
@@ -81,8 +86,13 @@ def _clip_blocks_to_page(blk_list, img_w, img_h):
     return out
 
 
-def _merge_overlapping_blocks(blk_list, iou_threshold):
-    """Merge text blocks overlapping with IoU >= threshold or containment."""
+def _merge_overlapping_blocks(blk_list, iou_threshold, max_area=None):
+    """Merge text blocks overlapping with IoU >= threshold or containment.
+
+    If max_area is provided (in pixels) any candidate merge producing a merged
+    box with area > max_area will be skipped. This prevents creating huge
+    merged blocks that later cause refine_mask to expand into background.
+    """
     if not blk_list or iou_threshold <= 0:
         return blk_list
     blks = list(blk_list)
@@ -97,6 +107,10 @@ def _merge_overlapping_blocks(blk_list, iou_threshold):
                     y1 = min(a.xyxy[1], b.xyxy[1])
                     x2 = max(a.xyxy[2], b.xyxy[2])
                     y2 = max(a.xyxy[3], b.xyxy[3])
+                    merged_area = max(0, (x2 - x1)) * max(0, (y2 - y1))
+                    if max_area is not None and merged_area > int(max_area):
+                        # skip this merge to avoid producing an excessively large block
+                        continue
                     pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)
                     font_size = max(
                         getattr(a, "_detected_font_size", 12),
@@ -115,25 +129,129 @@ def _merge_overlapping_blocks(blk_list, iou_threshold):
 
 
 def _expand_blocks(blk_list, pad, w, h):
-    """Expand each block by `pad` pixels on all sides, clipped to image."""
+    """
+    Expand each block by `pad` pixels on all sides, clipped to image.
+
+    Cap per-block padding to a fraction of block height to avoid excessive
+    growth for very large merged boxes (which causes refine_mask to include
+    background art).
+    """
     if pad <= 0:
         return blk_list
     out = []
     for blk in blk_list:
         x1, y1, x2, y2 = blk.xyxy
-        x1 = max(0, x1 - pad)
-        y1 = max(0, y1 - pad)
-        x2 = min(w, x2 + pad)
-        y2 = min(h, y2 + pad)
-        if x2 <= x1 or y2 <= y1:
+        bh = max(1, int(y2 - y1))
+        # allow padding up to 15% of block height (rounded)
+        max_pad = int(round(bh * 0.15))
+        use_pad = min(pad, max_pad) if max_pad > 0 else 0
+        if use_pad <= 0:
+            out.append(blk)
+            continue
+        nx1 = max(0, x1 - use_pad)
+        ny1 = max(0, y1 - use_pad)
+        nx2 = min(w, x2 + use_pad)
+        ny2 = min(h, y2 + use_pad)
+        if nx2 <= nx1 or ny2 <= ny1:
             out.append(blk)
             continue
         new_blk = copy.copy(blk)
-        new_blk.xyxy = [x1, y1, x2, y2]
-        new_blk.lines = [[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]]
+        new_blk.xyxy = [nx1, ny1, nx2, ny2]
+        new_blk.lines = [[[nx1, ny1], [nx2, ny1], [nx2, ny2], [nx1, ny2]]]
         out.append(new_blk)
     return out
 
+
+def _validate_detection_item(item) -> bool:
+    """Quick validation for HF pipeline detection item."""
+    if not isinstance(item, dict):
+        return False
+    # must have a numeric score
+    score = item.get("score")
+    if score is None:
+        return False
+    try:
+        float(score)
+    except Exception:
+        return False
+    # box or bbox should exist in some form; detailed parsing done in _safe_box_from_item
+    if item.get("box") is None and item.get("bbox") is None and item.get("bounding_box") is None:
+        # still allow: some pipelines may omit explicit box field (rare)
+        return True
+    return True
+
+
+def _safe_box_from_item(item, img_w, img_h):
+    """
+    Robustly extract pixel xyxy coordinates from various HF pipeline box formats.
+    Returns (x1, y1, x2, y2) or None on failure.
+    Accepts:
+      - box dict with xmin/ymin/xmax/ymax or x1/y1/x2/y2 or left/top/right/bottom
+      - box dict with left/top/width/height
+      - bbox/list/tuple in [x1,y1,x2,y2] or [x,y,w,h] in pixels or normalized (0..1)
+    """
+    try:
+        box = item.get("box") or item.get("bbox") or item.get("bounding_box")
+        x1 = y1 = x2 = y2 = None
+        if isinstance(box, dict):
+            # common dict keys
+            x1 = box.get("xmin", box.get("x1", box.get("left")))
+            y1 = box.get("ymin", box.get("y1", box.get("top")))
+            x2 = box.get("xmax", box.get("x2", box.get("right")))
+            y2 = box.get("ymax", box.get("y2", box.get("bottom")))
+            if x2 is None or y2 is None:
+                # try width/height variant
+                w_box = box.get("width", box.get("w"))
+                h_box = box.get("height", box.get("h"))
+                if x1 is not None and y1 is not None and w_box is not None and h_box is not None:
+                    x2 = float(x1) + float(w_box)
+                    y2 = float(y1) + float(h_box)
+                else:
+                    return None
+            x1 = int(round(float(x1)))
+            y1 = int(round(float(y1)))
+            x2 = int(round(float(x2)))
+            y2 = int(round(float(y2)))
+        elif isinstance(box, (list, tuple)) and len(box) == 4:
+            a, b, c, d = box
+            a = float(a); b = float(b); c = float(c); d = float(d)
+            # normalized coordinates (0..1)
+            if 0.0 <= a <= 1.0 and 0.0 <= b <= 1.0 and 0.0 <= c <= 1.0 and 0.0 <= d <= 1.0:
+                # decide between [x1,y1,x2,y2] and [x,y,w,h]
+                if c > a and d > b:
+                    x1 = int(round(a * img_w)); y1 = int(round(b * img_h))
+                    x2 = int(round(c * img_w)); y2 = int(round(d * img_h))
+                else:
+                    x1 = int(round(a * img_w)); y1 = int(round(b * img_h))
+                    x2 = int(round((a + c) * img_w)); y2 = int(round((b + d) * img_h))
+            else:
+                # pixel coordinates or [x,y,w,h] in px
+                if c > a and d > b:
+                    x1 = int(round(a)); y1 = int(round(b)); x2 = int(round(c)); y2 = int(round(d))
+                else:
+                    x1 = int(round(a)); y1 = int(round(b)); x2 = int(round(a + c)); y2 = int(round(b + d))
+        else:
+            return None
+
+        # sanitize order
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+
+        # clip
+        x1 = max(0, min(int(x1), img_w - 1))
+        y1 = max(0, min(int(y1), img_h - 1))
+        x2 = max(0, min(int(x2), img_w))
+        y2 = max(0, min(int(y2), img_h))
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return x1, y1, x2, y2
+    except Exception:
+        return None
+
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Detector class
@@ -160,7 +278,7 @@ class ComicTextAndBubbleDetector(TextDetectorBase):
         },
         "box_padding": {
             "type": "line_editor",
-            "value": 3,
+            "value": 1,
             "description": "Pixels to expand boxes (reduces clipped punctuation).",
         },
         "font size multiplier": {
@@ -177,7 +295,7 @@ class ComicTextAndBubbleDetector(TextDetectorBase):
         },
         "mask dilate size": {
             "type": "line_editor",
-            "value": 2,
+            "value": 1,
         },
         "device": DEVICE_SELECTOR(),
         "description": "HF object-detection (ogkalu). pip install transformers torch",
@@ -283,6 +401,9 @@ class ComicTextAndBubbleDetector(TextDetectorBase):
             self.logger.warning("HF object-detection inference failed: %s", e)
             return np.zeros((h, w), dtype=np.uint8), []
 
+        # mask: bubble regions → mask only (inpainting area), no TextBlock.
+        # text_bubble / text_free → TextBlock + mask (only the text itself, like CTD).
+        mask = np.zeros((h, w), dtype=np.uint8)
         blk_list = []
         for item in results if results else []:
             if not isinstance(item, dict):
@@ -293,6 +414,7 @@ class ComicTextAndBubbleDetector(TextDetectorBase):
             box = item.get("box")
             if not box:
                 continue
+            label = (item.get("label") or "").strip().lower()
             x1 = int(box.get("xmin", 0))
             y1 = int(box.get("ymin", 0))
             x2 = int(box.get("xmax", 0))
@@ -307,26 +429,32 @@ class ComicTextAndBubbleDetector(TextDetectorBase):
             y2 = min(h, y2)
             if x2 <= x1 or y2 <= y1:
                 continue
-            pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)
-            blk = TextBlock(xyxy=[x1, y1, x2, y2], lines=[pts.tolist()])
-            blk._detected_font_size = max(y2 - y1, 12)
-            blk_list.append(blk)
 
-        # Merge overlapping blocks
-        blk_list = _merge_overlapping_blocks(blk_list, 0.35)
+            if label == "bubble":
+                # Bubble outline → skip entirely (no mask, no TextBlock).
+                # Only text_bubble and text_free are used, like CTD.
+                continue
+            else:
+                # text_bubble, text_free → TextBlock + mask
+                pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)
+                blk = TextBlock(xyxy=[x1, y1, x2, y2], lines=[pts.tolist()])
+                blk._detected_font_size = max(y2 - y1, 12)
+                blk_list.append(blk)
 
-        # Box padding
+        # Keep HF detections as-is (do not merge) to preserve block granularity for CTD
+        # blk_list = _merge_overlapping_blocks(blk_list, 0.35, max_area)
+
+        # Box padding for text blocks
         if pad_val > 0:
             blk_list = _expand_blocks(blk_list, pad_val, w, h)
 
         # Sort by reading order
         blk_list = sort_regions(blk_list)
 
-        # Clip to page
+        # Clip text blocks to page
         blk_list = _clip_blocks_to_page(blk_list, w, h)
 
-        # Build mask
-        mask = np.zeros((h, w), dtype=np.uint8)
+        # Draw rectangular mask as rough prediction guide for refine_mask
         for blk in blk_list:
             drawn = False
             if getattr(blk, "lines", None) and len(blk.lines) > 0:
@@ -344,6 +472,49 @@ class ComicTextAndBubbleDetector(TextDetectorBase):
                 x1, y1, x2, y2 = blk.xyxy
                 pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)
                 cv2.fillPoly(mask, [pts], 255)
+
+        # Use CTD model to obtain a binary mask of text areas (replace refine_mask flow).
+        # keep a copy of the coarse HF mask for debugging
+        coarse_mask = mask.copy()
+        try:
+            ctd = ComicTextDetector()
+            ctd._load_model()
+            ctd_mask, ctd_blk_list = ctd._detect(img, None)
+            # if CTD returned a valid mask, use it; otherwise fall back to coarse mask
+            if isinstance(ctd_mask, np.ndarray) and ctd_mask.dtype == np.uint8:
+                mask = ctd_mask
+            else:
+                mask = coarse_mask
+        except Exception as e:
+            self.logger.warning("CTD detection failed: %s", e)
+            mask = coarse_mask
+
+        # Optional debug dump: save HF results, pre/post masks and block boxes
+        try:
+            dbg_path = (self.params.get("debug_dump_path") or {}).get("value")
+            if dbg_path:
+                dbg_dir = Path(dbg_path)
+                dbg_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                # save HF raw results if available
+                try:
+                    raw_fp = dbg_dir / f"hf_results_{ts}.json"
+                    with raw_fp.open("w", encoding="utf-8") as f:
+                        json.dump(results if 'results' in locals() else {}, f, default=str, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    self.logger.debug("Failed to write hf results: %s", e)
+                # save HF coarse mask and CTD mask
+                try:
+                    cv2.imwrite(str(dbg_dir / f"mask_hf_coarse_{ts}.png"), coarse_mask)
+                except Exception:
+                    pass
+                try:
+                    cv2.imwrite(str(dbg_dir / f"mask_ctd_{ts}.png"), mask)
+                except Exception:
+                    pass
+        except Exception:
+            # never crash detection due to debugging IO
+            pass
 
         # Font size post-processing
         fnt_rsz = 1.0

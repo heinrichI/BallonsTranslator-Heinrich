@@ -5,17 +5,31 @@ from typing import Tuple, List
 from .base import register_textdetectors, TextDetectorBase, TextBlock, DEFAULT_DEVICE, DEVICE_SELECTOR, ProjImgTrans
 from .ctd import CTDModel
 
+# Пути к весам CTD (ONNX для CPU, Torch для GPU)
 CTD_ONNX_PATH = 'data/models/comictextdetector.pt.onnx'
 CTD_TORCH_PATH = 'data/models/comictextdetector.pt'
 # CTD_TORCH_PATH = r'j:/Comic translate/comic-text-detector/data/comictextdetector_finetuned.pt'
 
 def load_ctd_model(model_path, device, detect_size=1024) -> CTDModel:
+    """
+    Загрузить модель CTDModel.
+    Аргументы:
+      - model_path: путь к файлу модели (ONNX или Torch)
+      - device: 'cpu' или идентификатор GPU
+      - detect_size: размер входа для детекции (приблизительный размер изображения)
+    Возвращает:
+      - инстанс CTDModel, готовый к инференсу
+    """
     model = CTDModel(model_path, detect_size=detect_size, device=device)
     
     return model
 
 @register_textdetectors('ctd')
 class ComicTextDetector(TextDetectorBase):
+    """
+    Обёртка для ComicTextDetector (CTD).
+    Использует CTDModel для предсказания пиксельных масок текста и списка TextBlock.
+    """
 
     params = {
         'detect_size': {
@@ -30,9 +44,11 @@ class ComicTextDetector(TextDetectorBase):
         },
         'device': DEVICE_SELECTOR(),
         'description': 'ComicTextDetector',
+        # множитель размера шрифта (после детекции можно скорректировать вычисленный размер)
         'font size multiplier': 1.,
         'font size max': -1,
         'font size min': -1,
+        # размер дилатации маски (модифицирует итоговую бинарную маску)
         'mask dilate size': 2
     }
     _load_model_keys = {'model'}
@@ -47,28 +63,40 @@ class ComicTextDetector(TextDetectorBase):
     detect_size = 1024
     def __init__(self, **params) -> None:
         super().__init__(**params)
+        # Поле model содержит экземпляр CTDModel после загрузки
         self.model: CTDModel = None
 
     @property
     def device(self):
+        # Возвращает значение параметра device (строка)
         return self.params['device']['value']
     
     @property
     def detect_size(self):
+        # Размер детекции, берётся из params
         return int(self.params['detect_size']['value'])
 
     def _load_model(self):
+        """
+        Загружает модель CTD для инференса.
+        Использует Torch-версию, если устройство не CPU, иначе ONNX.
+        """
         if self.device != 'cpu':
             self.model = load_ctd_model(CTD_TORCH_PATH, self.device, self.detect_size)
         else:
             self.model = load_ctd_model(CTD_ONNX_PATH, self.device, self.detect_size)
 
     def _detect(self, img: np.ndarray, proj: ProjImgTrans) -> Tuple[np.ndarray, List[TextBlock]]:
-        # import debugpy
-        # debugpy.debug_this_thread()
-        # debugpy.breakpoint()
+        """
+        Выполняет детекцию текста на изображении.
+        Возвращает кортеж (mask, blk_list):
+          - mask: бинарная маска областей текста (uint8, 0/255)
+          - blk_list: список TextBlock с полями xyxy и _detected_font_size
+        """
+        # CTDModel возвращает кортеж (_, mask, blk_list)
         _, mask, blk_list = self.model(img)
         
+        # Применяем настройки размера шрифта (пост-обработка)
         fnt_rsz = self.get_param_value('font size multiplier')
         fnt_max = self.get_param_value('font size max')
         fnt_min = self.get_param_value('font size min')
@@ -81,6 +109,7 @@ class ComicTextDetector(TextDetectorBase):
             blk.font_size = sz
             blk._detected_font_size = sz
 
+        # Применяем дилатацию к маске, если задано в параметрах
         ksize = self.get_param_value('mask dilate size')
         if ksize > 0:
             element = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ksize + 1, 2 * ksize + 1),(ksize, ksize))
@@ -89,13 +118,19 @@ class ComicTextDetector(TextDetectorBase):
         return mask, blk_list
 
     def updateParam(self, param_key: str, param_content):
+        """
+        Обработчик смены параметров.
+        Если поменялось устройство, перезагружаем веса соответствующего типа.
+        """
         super().updateParam(param_key, param_content)
         device = self.device
         if self.model is not None:
             if self.model.device != device:
+                # Обновляем устройство модели и перезагружаем веса соответствующей версии
                 self.model.device = device
                 if device != 'cpu':
                     self.model.load_model(CTD_TORCH_PATH)
                 else:
                     self.model.load_model(CTD_ONNX_PATH)
+            # Обновляем detect_size в экземпляре модели
             self.model.detect_size = self.detect_size

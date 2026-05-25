@@ -1,37 +1,42 @@
 # Active Context
 
 ## Current Work Focus
-Implementing the `comic-text-and-bubble-detector` detector module for the ogkalu/comic-text-and-bubble-detector HuggingFace model.
+Integrating and hardening the ogkalu/comic-text-and-bubble-detector HF object-detection detector and improving CTD-based pixel-level text segmentation pipeline.
 
 ## Recent Changes
-- Created `modules/textdetector/detector_comic-text-and-bubble-detector.py` — new HF object-detection detector module
-- Registered as `comic-text-and-bubble-detector` via `@register_textdetectors`
-- Uses `transformers.pipeline("object-detection")` for inference
-- Detects labels: `bubble`, `text_bubble`, `text_free` (all kept as text regions)
-- Verified auto-registration succeeds (registry shows: comic-text-and-bubble-detector, ctd, stariver_ocr, ysgyolo)
-- Fixed `_detect` returning None (was missing `return mask, blk_list`)
-- Removed old `detector_ogkalu.py` file; renamed to `detector_comic-text-and-bubble-detector.py`
+- Implemented `modules/textdetector/detector_comic-text-and-bubble-detector.py` improvements:
+  - Defensive parsing helpers: `_validate_detection_item(item)` and `_safe_box_from_item(item, img_w, img_h)`.
+  - Safe box expansion: `_expand_blocks` now caps per-block padding to 15% of block height.
+  - Merge protection: `_merge_overlapping_blocks` accepts `max_area` and skips merges that would exceed 20% of page area.
+  - Default parameter adjustments: `"box_padding"` default reduced to 1, `"mask dilate size"` default reduced to 1.
+  - Debug dump support added (hf_results_{ts}.json, mask_pre_refine_{ts}.png, mask_post_refine_{ts}.png).
+- Added helper/debug scripts:
+  - `scripts/debug_run_detector_params.py` — run detector with pad/dilate/no_merge options and save dumps.
+  - `scripts/count_debug_masks.py` — compute nonzero pixels for mask_*.png files.
+  - `scripts/debug_run_detector.py` — single-image debug runner.
+- CTD-related files commented in Russian for clarity:
+  - `modules/textdetector/detector_ctd.py` — russian comments added.
+  - `modules/textdetector/ctd/basemodel.py` — russian comments added.
+  - `modules/textdetector/ctd/inference.py` — russian comments added.
+- Small unit helper added: `tests/smoke_detector_hf_helpers.py` (sanity for box parsing).
 
 ## Next Steps
-1. Test the new detector with actual comic pages (launch the app, select "comic-text-and-bubble-detector", run detection)
-2. Fine-tune default confidence threshold and other params based on test results
-3. If issues arise: adjust post-processing (merge IoU threshold, box padding, etc.)
+- Finalize splitting large merged blocks into text-lines before calling `refine_mask` (to get per-character masks instead of block masks).
+- Run manual UI verification across multiple comic pages.
+- Consider lowering defaults to pad=0 / dilate=0 in release or expose clearly in UI.
+- Update docs (doc/modules or CHANGELOG) describing new detector behavior and required HF model.
 
 ## Active Decisions and Considerations
-- Using `pipeline("object-detection")` rather than direct model+processor loading for simplicity
-- All three model labels (bubble, text_bubble, text_free) are treated as text regions
-- IoU overlap merging at 0.35 helps deduplicate overlapping bubble+text_bubble detections
-- Box padding of 3px reduces clipped punctuation without excessive expansion
-- The model auto-downloads from HuggingFace on first use (~170MB)
+- Use HF `pipeline("object-detection")` for ogkalu model; skip detections labeled `bubble`.
+- Treat `text_bubble` and `text_free` as text regions.
+- Apply CTD.pixel-level `refine_mask(img, mask, blk_list)` after drawing coarse polygon masks.
+- Avoid producing huge merged boxes — cap merge by page-area threshold (0.2).
+- Limit per-block padding to a fraction of block height (0.15) to avoid background inclusion.
 
-## Important Patterns and Preferences
-- Use virtual environment: `j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe`
-- Launch command: `& "j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe" launch.py`
-- All Python commands must use myenv, not global Python
-- In PowerShell use `& "путь\python.exe" args` (символ `&` и кавычки обязательны)
-
-## Learnings and Project Insights
-- Detector auto-registration works via naming convention: file named `detector_<name>.py` in `modules/textdetector/`
-- The `ogkalu/comic-text-and-bubble-detector` uses RT-DETRv2 architecture with 42.9M params
-- The model is also available in ONNX format, but transformers pipeline is preferred
-- Registration key must match the name in config, otherwise KeyError occurs at module switch
+## How to run (examples)
+- Launch app (recommended venv):
+  & "j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe" launch.py
+- Debug detector on single image:
+  & "j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe" scripts/debug_run_detector_params.py "path\to\img.jpg" debug_dump 0 0
+- Count debug masks:
+  & "j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe" scripts/count_debug_masks.py

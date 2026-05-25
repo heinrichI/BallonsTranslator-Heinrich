@@ -1,139 +1,134 @@
 # Implementation Plan
 
-Add support for the **ogkalu/comic-text-and-bubble-detector** (RT-DETRv2) HuggingFace model as a new text detector module in BallonsTranslator, following the existing `detector_<name>.py` registration pattern.
+[Overview]
+Integrate and verify the existing ogkalu/comic-text-and-bubble-detector usage so object detections (text_bubble and text_free) produce TextBlocks and CTD.pixel-level segmentation (refine_mask) is applied to produce per-character masks; bubble detections are skipped.
 
-The model detects three object classes: `bubble`, `text_bubble`, and `text_free` (SFX/captions). All three are treated as text regions — each detection produces a `TextBlock` and paints its area onto the binary mask. The implementation uses `transformers.pipeline("object-detection")` which auto-downloads and caches model weights from HuggingFace, and exposes user-adjustable parameters (confidence threshold, device selection, font size controls, mask dilate size, box padding) through the same UI pattern as all other detectors. Post-processing includes box padding, IoU-based overlap merging, clipping to page bounds, and reading-order sorting.
+This change ensures accurate per-character masks for inpainting and OCR downstream while reusing the existing HF pipeline implementation in modules/textdetector/detector_comic-text-and-bubble-detector.py. The approach preserves current registration and UI parameters, validates device/model selection, and adds verification and test steps so the detector behaves consistently with other detectors (CTD + HF pipeline integration).
 
-## [Types]
+[Types]
+No new Python types required.
 
-No new Python types or data structures are needed. The detector reuses existing types:
-- `TextBlock` from `utils.textblock`
-- `ProjImgTrans` from `utils.proj_imgtrans`
-- `np.ndarray` for images and masks
+Re-used types and constraints:
+- TextBlock (utils/textblock.TextBlock): fields used: xyxy: List[int|float] (x1,y1,x2,y2), lines: List[List[List[int]]] (polygons), font_size (float), _detected_font_size (int/float), det_model (str)
+  - Validation: xyxy must be clipped to image bounds; lines must contain polygons with integer coordinates; font_size > 0.
+- Mask: numpy.ndarray, dtype=uint8, shape=(H,W), values {0,255}
+- HF pipeline results: List[Dict] with keys:
+  - score: float in [0,1]
+  - label: str in {"bubble","text_bubble","text_free"} (case-insensitive)
+  - box: dict with xmin,ymin,xmax,ymax (numbers)
+- ProjImgTrans (utils.proj_imgtrans.ProjImgTrans) optional context passed into detect()
 
-The `pipeline()` returns results as `List[Dict]` with keys: `score`, `label` (string), `box` (dict with `xmin`, `ymin`, `xmax`, `ymax`).
+[Files]
+Single sentence: Modify the existing HF detector module and ensure tests and documentation are updated.
 
-Labels from the ogkalu model:
-- `bubble` — speech bubble region → treated as text
-- `text_bubble` — individual text inside bubble → treated as text  
-- `text_free` — sound effects/captions outside bubbles → treated as text
+Detailed breakdown:
+- Existing file to modify:
+  - modules/textdetector/detector_comic-text-and-bubble-detector.py
+    - Purpose: HF object-detection -> parse detections -> create TextBlocks -> draw rough masks -> call CTD.refine_mask for pixel-level refinement -> return (mask, blk_list)
+    - Specific modifications (if any required by verification):
+      - Ensure explicit skip for label "bubble" (confirmed)
+      - Confirm call refine_mask(img, mask, blk_list) is present and receives correct arguments (img as RGB ndarray, mask as uint8, blk_list list[TextBlock]).
+      - Verify parameter names and UI keys: "model_id", "confidence threshold", "box_padding", "font size multiplier", "font size max", "font size min", "mask dilate size", "device"
+      - Add defensive checks: handle missing/irregular box dicts, non-dict pipeline outputs, and torch/device fallback logic already present.
+      - Add inline docstrings/comments explaining the decision to skip "bubble" detections and call CTD.refine_mask.
+- New files to create:
+  - None required for core change.
+- Files to delete/move:
+  - None.
+- Configuration updates:
+  - README or doc/modules/ note (optional) to document that ogkalu detector calls CTD.refine_mask; add short entry in doc/modules/ or CHANGELOG if desired.
 
-All three labels are kept. Each detection produces one `TextBlock`.
+[Functions]
+Single sentence: Keep existing functions; add or adjust small helper validation and logging.
 
-## [Files]
+Detailed breakdown:
+- New helper functions (inside detector_comic-text-and-bubble-detector.py if needed):
+  - _validate_detection_item(item) -> bool
+    - Purpose: robustly validate HF pipeline item dict shape before reading label/box/score.
+    - Implementation: ensure dict, contains numeric score, label str, box dict with xmin/ymin/xmax/ymax.
+  - (Optional) _safe_box_from_item(item, w, h) -> Tuple[int,int,int,int] — clamps and returns integers (x1,y1,x2,y2).
+- Existing functions (verify and adjust as needed):
+  - _iou_xyxy(a, b) — keep as implemented for overlap merging.
+  - _merge_overlapping_blocks(blk_list, iou_threshold) — keep.
+  - _clip_blocks_to_page(blk_list, img_w, img_h) — keep.
+  - _expand_blocks(blk_list, pad, w, h) — keep.
+  - ComicTextAndBubbleDetector._load_model(self) — verify pipeline creation and device mapping; keep.
+  - ComicTextAndBubbleDetector._detect(self, img, proj) -> Tuple[np.ndarray, List[TextBlock]]
+    - Ensure flow:
+      1. Normalize input to 3-channel RGB (already present).
+      2. Read conf_thr & pad_val from params (already present).
+      3. Run HF pipeline and filter results by score >= conf_thr.
+      4. Skip detections with label == "bubble".
+      5. For text_bubble/text_free create TextBlock with xyxy and polygon lines.
+      6. Merge, pad, sort, clip.
+      7. Draw rough mask (rect/polygon) into mask uint8.
+      8. Call refine_mask(img, mask, blk_list) from modules/textdetector/ctd/textmask.py
+      9. Dilate mask per param, return mask, blk_list.
+    - Required change: none if file already matches; else align to the above flow.
+- Removed functions: None.
 
-One new file must be created:
+[Classes]
+Single sentence: Modify existing ComicTextAndBubbleDetector only where defensive validation or logging is needed.
 
-| File | Action |
-|------|--------|
-| `modules/textdetector/detector_ogkalu.py` | **CREATE** — new detector module (~220 lines) |
+Detailed breakdown:
+- Modified class:
+  - ComicTextAndBubbleDetector (modules/textdetector/detector_comic-text-and-bubble-detector.py)
+    - Key methods to verify/adjust:
+      - __init__: ensure self.pipe, self._model_id, self._device initial state (already present).
+      - _load_model: ensure torch/cuda fallback logic present and informative logging used.
+      - _detect: confirm call refine_mask(img, mask, blk_list) and that blk._detected_font_size/font_size adjustments are applied after refine_mask as appropriate.
+      - updateParam: reset self.pipe on model/device changes (already present).
+    - Inheritance: TextDetectorBase
+- New classes: None.
+- Removed classes: None.
 
-No existing files need modification (auto-registration via file naming convention).
+[Dependencies]
+Single sentence: No new packages; transformers, torch, and pillow are required and already referenced.
 
-### New file: `modules/textdetector/detector_ogkalu.py`
+Details:
+- Required packages (verify presence in requirements.txt):
+  - transformers >= 4.38
+  - torch
+  - pillow
+- Model files:
+  - ogkalu/comic-text-and-bubble-detector will be downloaded by transformers; ensure network/caching policies noted in docs.
+- Integration requirements:
+  - CTD refine_mask uses utils.imgproc_utils helpers; ensure these imports remain available.
 
-**Imports**: `numpy`, `cv2`, `copy`, `os.path`, `typing`, existing project helpers (`TextDetectorBase`, `TextBlock`, `DEVICE_SELECTOR`, `register_textdetectors`, `sort_regions`), plus conditional import of `transformers.pipeline`, `torch`, `PIL.Image`.
+[Testing]
+Single sentence: Manual UI testing plus a small scripted validation of detection -> refinement flow.
 
-**Class**: `OgkaluRTDetrDetector(TextDetectorBase)`
-- Registration: `@register_textdetectors('ogkalu_rtdetr')`
-- `params` dict (UI-configurable):
-  - `'model_id'`: `{'type': 'line_editor', 'value': 'ogkalu/comic-text-and-bubble-detector'}` — allows user to switch to another HF model
-  - `'confidence threshold'`: `{'type': 'line_editor', 'value': 0.3}` — min detection score
-  - `'box_padding'`: `{'type': 'line_editor', 'value': 3}` — pixels to expand each box (reduce clipped punctuation)
-  - `'font size multiplier'`: `{'type': 'line_editor', 'value': 1.0}`
-  - `'font size max'`: `{'type': 'line_editor', 'value': -1}`
-  - `'font size min'`: `{'type': 'line_editor', 'value': -1}`
-  - `'mask dilate size'`: `{'type': 'line_editor', 'value': 2}`
-  - `'device'`: `DEVICE_SELECTOR()`
-  - `'description'`: info string
-- `_load_model_keys = {'pipe'}`
-- `_load_model()`:
-  1. Read `model_id` and `device` from params
-  2. Resolve local path vs HF hub id
-  3. Create `pipeline("object-detection", model=model_ref, device=0 if device=='cuda' else -1)`
-  4. Store as `self.pipe`
-- `_detect(img, proj) -> (mask, blk_list)`:
-  1. Convert 4-channel to 3-channel if needed
-  2. Record original h, w
-  3. Run `self.pipe(PILImage.fromarray(img))` → list of detection dicts
-  4. Filter by confidence threshold
-  5. For each detection:
-     - Extract `xmin, ymin, xmax, ymax` from `box` dict
-     - Clip to image bounds
-     - Apply box padding (pixels)
-     - Create `TextBlock` with `xyxy` and `lines` as 4-corner polygon
-     - Set `_detected_font_size = max(y2 - y1, 12)`
-  6. Merge overlapping blocks via IoU threshold (0.35 default)
-  7. Apply font size multiplier/max/min
-  8. Build mask by `cv2.fillPoly` for each block
-  9. Apply mask dilate
-  10. Sort by reading order via `sort_regions()`
-  11. Clip blocks to page bounds
-  12. Return `mask, blk_list`
-- `updateParam(param_key, param_content)`: reset `self.pipe = None` on model_id or device change
+Test plan:
+- Manual UI:
+  1. Launch app via virtualenv: & "j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe" launch.py
+  2. Settings → Text Detection → select "comic-text-and-bubble-detector"
+  3. Load diverse comic page images (vertical/horizontal, different font sizes).
+  4. Run detection and confirm:
+     - text_bubble and text_free produce TextBlocks (visible in UI)
+     - bubble detections are skipped
+     - mask highlights per-character regions (not just rectangles)
+     - OCR accuracy improves on refined masks
+- Scripted smoke test (python script):
+  - Small script to call module API:
+    from modules.textdetector.detector_comic-text-and-bubble-detector import ComicTextAndBubbleDetector
+    det = ComicTextAndBubbleDetector()
+    mask, blks = det.detect(img)  # with sample numpy array
+    assert isinstance(mask, np.ndarray) and mask.dtype == np.uint8
+    assert all(isinstance(b, TextBlock) for b in blks)
+- Edge case tests:
+  - HF pipeline returns malformed entries (graceful skip, log warning).
+  - Empty results -> return empty blk_list and zero mask.
+  - Large boxes clipped correctly.
+  - Device not available (cuda requested but unavailable) -> fallback to cpu.
 
-**Helper functions** (module-level):
-- `_iou_xyxy(a, b)`: IoU for two [x1,y1,x2,y2] boxes
-- `_merge_overlapping_blocks(blk_list, iou_threshold)`: merge blocks with IoU ≥ threshold or containment
-- `_clip_blocks_to_page(blk_list, img_w, img_h)`: clamp all coordinates to image bounds
-- `_expand_blocks(blk_list, pad, w, h)`: pad each block outward
+[Implementation Order]
+Single sentence: Verify and, if necessary, adjust the existing detector module, document behavior, then create a tracking task to implement and validate.
 
-## [Functions]
-
-### New functions in `detector_ogkalu.py`
-
-| Function | Signature | Purpose |
-|----------|-----------|---------|
-| `_iou_xyxy(a, b)` | `(List[float], List[float]) -> float` | IoU for two xyxy boxes |
-| `_merge_overlapping_blocks(blk_list, iou_threshold)` | `(List[TextBlock], float) -> List[TextBlock]` | Merge blocks with high overlap |
-| `_clip_blocks_to_page(blk_list, img_w, img_h)` | `(List[TextBlock], int, int) -> List[TextBlock]` | Clamp blocks to image bounds |
-| `_expand_blocks(blk_list, pad, w, h)` | `(List[TextBlock], int, int, int) -> List[TextBlock]` | Pad each block outward |
-| `OgkaluRTDetrDetector._load_model(self)` | `-> None` | Load HF pipeline |
-| `OgkaluRTDetrDetector._detect(self, img, proj)` | `(np.ndarray, ProjImgTrans) -> Tuple[np.ndarray, List[TextBlock]]` | Run inference, parse outputs |
-| `OgkaluRTDetrDetector.updateParam(self, param_key, param_content)` | `(str, any) -> None` | Reset pipe on param change |
-
-### Modified functions
-
-None.
-
-### Removed functions
-
-None.
-
-## [Classes]
-
-### New class: `OgkaluRTDetrDetector(TextDetectorBase)`
-
-- **File**: `modules/textdetector/detector_ogkalu.py`
-- **Registration key**: `'ogkalu_rtdetr'`
-- **Key attributes**:
-  - `params`: dict with all UI-visible parameters
-  - `pipe`: `transformers.pipeline` instance (object-detection)
-  - `_load_model_keys = {'pipe'}`
-- **Key methods**:
-  - `_load_model()` — creates HF pipeline
-  - `_detect(img, proj)` — main inference pipeline
-  - `updateParam()` — handles model_id/device changes
-
-## [Dependencies]
-
-No new dependencies. `transformers` (≥4.38), `torch`, `Pillow` are already in `requirements.txt`.
-
-The model `ogkalu/comic-text-and-bubble-detector` (~43M params, ~170MB) is downloaded automatically by `transformers` on first use and cached.
-
-## [Testing]
-
-Manual testing via the BallonsTranslator UI:
-1. Launch app, go to Settings → Text Detection
-2. Select "ogkalu_rtdetr" from the detector dropdown
-3. Load a comic page image
-4. Run text detection pipeline
-5. Verify that `bubble`, `text_bubble`, and `text_free` regions are detected as TextBlocks
-6. Verify the mask covers all detected areas
-7. Verify font size estimation, sorting, and ordering is reasonable
-
-## [Implementation Order]
-
-1. Create `modules/textdetector/detector_ogkalu.py` with the complete detector class
-2. Verify auto-registration by launching the app and checking the detector dropdown
-3. Test on sample comic pages to validate detection quality and mask generation
+Numbered steps:
+1. Confirm code in modules/textdetector/detector_comic-text-and-bubble-detector.py already follows the required flow (HF inference → skip "bubble" → create TextBlocks → merge/pad/sort/clip → draw coarse mask → call refine_mask(img, mask, blk_list) → dilate → return mask, blk_list). If not, apply minimal adjustments.
+2. Add _validate_detection_item and/or _safe_box_from_item helpers if HF outputs need hardening; add small unit tests for these helpers.
+3. Ensure refine_mask call uses image in RGB, mask uint8, and blk_list list[TextBlock]; move font-size post-processing to after refine_mask if needed.
+4. Run smoke tests and manual UI test to confirm detection and mask quality.
+5. Update docs (doc/modules or README) noting that this detector invokes CTD.refine_mask and that "bubble" detections are skipped.
+6. If tests reveal parameter tuning needed, adjust default params ("confidence threshold" 0.3, "box_padding" 3, "mask dilate size" 2).
+7. Merge changes and close the implementation task.
