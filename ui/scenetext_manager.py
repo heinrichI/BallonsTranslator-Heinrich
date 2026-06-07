@@ -25,7 +25,7 @@ from utils.text_layout import layout_text
 
 from utils.logger import logger as LOGGER
 
-from utils.spell_check_engine import SpellCheckEngine
+from utils.spell_check_engine import get_spellcheck_engine
 
 LAYOUT_MIN_FONT_PT = 8.0
 LAYOUT_BEST_FONT_SIZE_ITERATION = 30
@@ -366,7 +366,7 @@ class SceneTextManager(QObject):
 
         self.prev_blkitem: TextBlkItem = None
 
-        self.SpellCheckEngine = SpellCheckEngine()
+        self.SpellCheckEngine = get_spellcheck_engine()
         self.textpanel.formatpanel.word_panel.word_selected.connect(self.on_spell_word_clicked)
         self.textpanel.formatpanel.word_panel.wordDeleted.connect(self.onWordDeleted)
 
@@ -582,6 +582,14 @@ class SceneTextManager(QObject):
         updates the word panel UI. This is a targeted update and is much
         more efficient than rebuilding all scene items.
         """
+        # Skip running spellcheck if the panel is hidden or spellcheck disabled
+        try:
+            if not getattr(self, "textpanel", None) or not self.textpanel.isVisible() or not pcfg.enable_spellcheck:
+                return
+        except Exception:
+            # If any error occurs checking visibility or config, be conservative and skip
+            return
+
         words = []
         # Iterate through the data model (the single source of truth)
         # using enumerate to get the index, which your original code used.

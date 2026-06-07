@@ -477,6 +477,13 @@ class ConfigPanel(Widget):
         self.intermediate_imgformat_combobox, intermediate_imsave_sublock = generalConfigPanel.addCombobox(['PNG', 'JXL'], self.tr('Intermediate image format'))
         self.intermediate_imgformat_combobox.activated.connect(self.on_intermediate_imgformat_changed)
 
+        # Spellcheck settings (General -> after Save)
+        generalConfigPanel.addTextLabel(self.tr('Spellcheck'))
+        self.spellcheck_enable_checker, _ = generalConfigPanel.addCheckBox(self.tr('Enable SpellCheck'))
+        self.spellcheck_enable_checker.stateChanged.connect(self.on_spellcheck_enabled_changed)
+        self.spellcheck_lang_combobox, _ = generalConfigPanel.addCombobox(['en', 'fr', 'it', 'de'], self.tr('Spellcheck language'))
+        self.spellcheck_lang_combobox.activated.connect(self.on_spellcheck_language_changed)
+
         generalConfigPanel.addTextLabel(label_saladict)
 
         sublock = ConfigSubBlock(ConfigTextLabel(self.tr("<a href=\"https://github.com/dmMaze/BallonsTranslator/tree/master/doc/saladict.md\">Installation guide</a>"), CONFIG_FONTSIZE_CONTENT - 2), vertical_layout=False)
@@ -574,6 +581,50 @@ class ConfigPanel(Widget):
         url = self.searchurl_combobox.currentText()
         pcfg.search_url = url
 
+    def on_spellcheck_enabled_changed(self):
+        """
+        Toggle global spellcheck enable/disable.
+        """
+        try:
+            pcfg.enable_spellcheck = self.spellcheck_enable_checker.isChecked()
+            # persist immediately
+            from utils.config import save_config
+            save_config()
+        except Exception:
+            pass
+
+    def on_spellcheck_language_changed(self):
+        """
+        Change global spellcheck language.
+        """
+        try:
+            sel = self.spellcheck_lang_combobox.currentText()
+            if sel in ['en', 'fr', 'it', 'de']:
+                pcfg.spellcheck_language = sel
+                from utils.config import save_config
+                save_config()
+                # attempt to notify running engine if any (best-effort)
+                try:
+                    from utils.spell_check_engine import reload_spellcheck_language
+                    try:
+                        reload_spellcheck_language(sel)
+                    except Exception as e:
+                        try:
+                            from utils.logger import logger as LOGGER
+                            LOGGER.error(f"Failed to reload spellcheck language '{sel}': {e}")
+                        except Exception:
+                            pass
+                        from qtpy.QtWidgets import QMessageBox
+                        QMessageBox.warning(self, self.tr("Spellcheck"), self.tr("Failed to apply selected language. See log for details."))
+                except Exception:
+                    try:
+                        from utils.logger import logger as LOGGER
+                        LOGGER.debug("reload_spellcheck_language not available; skipping runtime reload.")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def on_fontcolor_flag_changed(self):
         pcfg.let_fntcolor_flag = self.let_fntcolor_combox.currentIndex()
 
@@ -648,5 +699,13 @@ class ConfigPanel(Widget):
         self.load_model_checker.setChecked(pcfg.module.load_model_on_demand)
         self.empty_runcache_checker.setChecked(pcfg.module.empty_runcache)
         self.let_show_only_custom_fonts.setChecked(pcfg.let_show_only_custom_fonts_flag)
+
+        # initialize spellcheck widgets
+        try:
+            self.spellcheck_enable_checker.setChecked(pcfg.enable_spellcheck)
+            # combobox stores codes 'en','fr','it','de'
+            self.spellcheck_lang_combobox.setCurrentText(pcfg.spellcheck_language)
+        except Exception:
+            pass
 
         self.blockSignals(False)

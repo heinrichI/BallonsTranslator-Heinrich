@@ -145,6 +145,9 @@ class ProgramConfig(Config):
     expand_teffect_panel: bool = True
     text_advanced_format_panel: bool = True
     expand_tadvanced_panel: bool = True
+    # Spellcheck settings
+    spellcheck_language: str = 'en'
+    enable_spellcheck: bool = True
 
     vocab_list_config: bool = True
     vocab_list_expand_state: bool = True

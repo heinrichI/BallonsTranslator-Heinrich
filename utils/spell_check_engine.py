@@ -1,7 +1,7 @@
 from ui.SpellCheckDialog import SpellCheckDialog
 from spylls.hunspell.dictionary import Dictionary
 from utils.logger import logger as LOGGER
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
 import os
 import json
 from utils.download_util import download_and_check_files
@@ -54,40 +54,70 @@ de_flist = [
         'files': 'data/spellcheck/de/index.dic'
     },
 ]
+SUPPORTED_LANGS = ['en','fr','it','de']
+_ENGINE: Optional['SpellCheckEngine'] = None
+
+def get_spellcheck_engine(lang: Union[str, None] = None):
+    """
+    Return a singleton SpellCheckEngine. If an engine doesn't exist, create one.
+    If lang is provided and differs from current engine language, reload it.
+    """
+    global _ENGINE
+    if _ENGINE is None:
+        _ENGINE = SpellCheckEngine(lang)
+    else:
+        if lang is not None and getattr(_ENGINE, "lang", None) != lang:
+            _ENGINE.reload_language(lang)
+    return _ENGINE
+
+def reload_spellcheck_language(lang: str):
+    """
+    Force reload/create the module-level SpellCheckEngine with the given language.
+    """
+    global _ENGINE
+    if _ENGINE is None:
+        _ENGINE = SpellCheckEngine(lang)
+    else:
+        _ENGINE.reload_language(lang)
+    return _ENGINE
 
 class SpellCheckEngine:
-    def __init__(self, lang = 'en') -> None:
-    # def __init__(self, local_no: int, start: int, end: int) -> None:
-        # self.local_no = local_no
-        # self.start = start
-        # self.end = end
+    def __init__(self, lang: Union[str, None] = None) -> None:
+        # If lang not provided, read default from program config
+        try:
+            from utils.config import pcfg as _pcfg  # local import to avoid cycles
+            cfg_lang = _pcfg.spellcheck_language
+        except Exception:
+            cfg_lang = 'en'
+
         self.logger = LOGGER
+        self.lang = lang if lang is not None else cfg_lang
 
-        # download https://github.com/wooorm/dictionaries/tree/main/dictionaries/it
-
-        if lang == 'en':
+        # download and load dictionary for selected language
+        if self.lang == 'en':
             for files_download_kwargs in en_flist:
                 download_and_check_files(**files_download_kwargs)
             self.dictionary = Dictionary.from_files('data/spellcheck/en/index')
-        elif lang == 'fr':
+        elif self.lang == 'fr':
             for files_download_kwargs in fr_flist:
                 download_and_check_files(**files_download_kwargs)
             self.dictionary = Dictionary.from_files('data/spellcheck/fr/index')
-        elif lang == 'it':
+        elif self.lang == 'it':
             for files_download_kwargs in it_flist:
                 download_and_check_files(**files_download_kwargs)
             self.dictionary = Dictionary.from_files('data/spellcheck/it/index')
-        elif lang == 'de':
+        elif self.lang == 'de':
             for files_download_kwargs in de_flist:
                 download_and_check_files(**files_download_kwargs)
             self.dictionary = Dictionary.from_files('data/spellcheck/de/index')
-        
-        # import pathlib
-        # path = pathlib.Path(__file__).parent  / 'en_US'
-        # dictionary = Dictionary.from_files(str(path))
+        else:
+            # fallback to English
+            for files_download_kwargs in en_flist:
+                download_and_check_files(**files_download_kwargs)
+            self.dictionary = Dictionary.from_files('data/spellcheck/en/index')
 
-        # Define the path for saving/loading data
-        self.data_file = f"SpellCheckEngine_{lang}.json"
+        # Define the path for saving/loading data (one per language)
+        self.data_file = f"SpellCheckEngine_{self.lang}.json"
         self._load_data()
         # replace_words is a list of tuples like this:
         # self.replace_words = [('wrng', 'wrong'), ('teh', 'the')]
@@ -140,7 +170,6 @@ class SpellCheckEngine:
     def DoSuggest(self, word: str):
         return self.dictionary.suggest(word)
 
-
     # def UnknownWords(self, text: str):
     #     """
     #     Generator that iterates over unknown words in the provided text.
@@ -157,7 +186,7 @@ class SpellCheckEngine:
     #     for wrong, correct in self.replace_words:
     #         self.fixed_text = self.fixed_text.replace(wrong, correct)
 
-    #     split_chars = set(' -.?,!;:\"“”()[]{}|<>/+¿¡…—–♪♫„«»‹›؛،؟\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u200B\u200E\u200F\u2028\u2029\u202A\u202B\u202C\u202D\u202E\u202F\u3000\uFEFF')
+    #     split_chars = set(' -.?,!;:\"“”()[]{}|<>/+¿¡…—–♪♫„«»‹›؛،؟')
     #     self.stop = False
     #     for word in self.fixed_text.split():
     #         if (self.stop):
@@ -218,89 +247,44 @@ class SpellCheckEngine:
         self.skipped_words.append(word)
         self._save_data()
 
-    # def GetUnknownWordsViaDictionary(self, text: str) -> list:
-    #     split_chars = set(' -.?,!;:\"“”()[]{}|<>/+¿¡…—–♪♫„«»‹›؛،؟\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u200B\u200E\u200F\u2028\u2029\u202A\u202B\u202C\u202D\u202E\u202F\u3000\uFEFF')
-    #     unknown_words = []
-    #     for word in text.split():
-    #         word = word.strip(''.join(split_chars))
-    #         if not self.is_number(word):
-    #             # if len(word) == 1 or not self.dictionary.lookup(word):
-    #             if not self.dictionary.lookup(word):
-    #                 unknown_words.append(word)
-    #     return unknown_words
+    def reload_language(self, lang: str):
+        """
+        Reload dictionary and data for a different language at runtime.
+        """
+        self.logger.info(f"Reloading SpellCheckEngine language -> {lang}")
+        self.lang = lang
+        if self.lang == 'en':
+            for files_download_kwargs in en_flist:
+                download_and_check_files(**files_download_kwargs)
+            self.dictionary = Dictionary.from_files('data/spellcheck/en/index')
+        elif self.lang == 'fr':
+            for files_download_kwargs in fr_flist:
+                download_and_check_files(**files_download_kwargs)
+            self.dictionary = Dictionary.from_files('data/spellcheck/fr/index')
+        elif self.lang == 'it':
+            for files_download_kwargs in it_flist:
+                download_and_check_files(**files_download_kwargs)
+            self.dictionary = Dictionary.from_files('data/spellcheck/it/index')
+        elif self.lang == 'de':
+            for files_download_kwargs in de_flist:
+                download_and_check_files(**files_download_kwargs)
+            self.dictionary = Dictionary.from_files('data/spellcheck/de/index')
+        else:
+            for files_download_kwargs in en_flist:
+                download_and_check_files(**files_download_kwargs)
+            self.dictionary = Dictionary.from_files('data/spellcheck/en/index')
 
-    # def CountUnknownWordsViaDictionary(self, text: str) -> int:
-    #     split_chars = set(' -.?,!;:\"“”()[]{}|<>/+¿¡…—–♪♫„«»‹›؛،؟\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u200B\u200E\u200F\u2028\u2029\u202A\u202B\u202C\u202D\u202E\u202F\u3000\uFEFF')
-    #     for word in text.split():
-    #         word = word.strip(''.join(split_chars))
-    #         if not self.is_word_known_or_number2(word):
-    #             # dictionary.lookup(word)
-    #             # print(dictionary.lookup('spylls'))
-    #             # False
-    #             # for suggestion in dictionary.suggest('spylls'):
-    #                 # print(suggestion)
-    #             correct = len(word) > 1 and dictionary.lookup(word)
-    #             # if not correct:
-    #             #     correct = len(word) > 2 and hunspell.spell(word.strip('\''))
+        # update data file and reload data
+        self.data_file = f"SpellCheckEngine_{self.lang}.json"
+        self._load_data()
 
-    #             # if not correct and len(word) == 1 and three_letter_iso_language_name == 'eng' and word in ['I', 'A', 'a']:
-    #             #     correct = True
-
-    #             if correct:
-    #                 number_of_correct_words += 1
-    #             else:
-    #                 words_not_found += 1
-    #         elif len(word) > 3:
-    #             number_of_correct_words += 1
-
-    # def CountUnknownWordsViaDictionary(pattern: re.Pattern, text: str) -> Tuple[int, Dict]:
-    # def count_unknown_words_via_dictionary(line, hunspell, three_letter_iso_language_name, word_skip_list, name_list, name_list_uppercase, name_list_obj, spell_check_word_lists):
-    #     """
-    #     Count the number of unknown words in a line using a dictionary.
-
-    #     Args:
-    #         line (str): The line to check.
-    #         hunspell: A hunspell object.
-    #         three_letter_iso_language_name (str): The three letter ISO language name.
-    #         word_skip_list (set): A set of words to skip.
-    #         name_list (set): A set of names.
-    #         name_list_uppercase (set): A set of uppercase names.
-    #         name_list_obj: An object with an is_in_names_multi_word_list method.
-    #         spell_check_word_lists: An object with a has_user_word method.
-
-    #     Returns:
-    #         int: The number of unknown words.
-    #     """
-    #     number_of_correct_words = 0
-    #     if not hunspell:
-    #         return 0
-
-    #     min_length = 2
-    #     if True:  # Replace with your configuration
-    #         min_length = 1
-
-    #     words_not_found = 0
-    #     split_chars = set(' -.?,!;:\"“”()[]{}|<>/+¿¡…—–♪♫„«»‹›؛،؟\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u200B\u200E\u200F\u2028\u2029\u202A\u202B\u202C\u202D\u202E\u202F\u3000\uFEFF')
-    #     words = remove_open_close_tags(line, 'i').split()
-    #     for word in words:
-    #         word = word.strip(''.join(split_chars))
-    #         if len(word) >= min_length:
-    #             if not is_word_known_or_number(word, line, word_skip_list, name_list, name_list_uppercase, name_list_obj, spell_check_word_lists):
-    #                 correct = len(word) > 1 and hunspell.spell(word)
-    #                 if not correct:
-    #                     correct = len(word) > 2 and hunspell.spell(word.strip('\''))
-
-    #                 if not correct and len(word) == 1 and three_letter_iso_language_name == 'eng' and word in ['I', 'A', 'a']:
-    #                     correct = True
-
-    #                 if correct:
-    #                     number_of_correct_words += 1
-    #                 else:
-    #                     words_not_found += 1
-    #             elif len(word) > 3:
-    #                 number_of_correct_words += 1
-
-    #     return words_not_found, number_of_correct_words
+    def should_run(self) -> bool:
+        try:
+            from utils.config import pcfg
+            return bool(pcfg.enable_spellcheck)
+        except Exception:
+            # if config not available, default to enabled
+            return True
 
     def is_number(self, word):
         """
@@ -326,7 +310,7 @@ class SpellCheckEngine:
     # def is_word_known_or_number(word, line, word_skip_list, name_list, name_list_uppercase, name_list_obj, spell_check_word_lists):
     #     """
     #     Check if a word is known or a number.
-
+    #
     #     Args:
     #         word (str): The word to check.
     #         line (str): The line the word is from.
@@ -335,132 +319,35 @@ class SpellCheckEngine:
     #         name_list_uppercase (set): A set of uppercase names.
     #         name_list_obj: An object with an is_in_names_multi_word_list method.
     #         spell_check_word_lists: An object with a has_user_word method.
-
+    #
     #     Returns:
     #         bool: True if the word is known or a number, False otherwise.
     #     """
     #     if word.strip('\'').replace('$', '').replace('£', '').replace('¥', '').replace('¢', '').replace('.', '', 1).isdigit():
     #         return True
-
+    #
     #     if word in word_skip_list:
     #         return True
-
+    #
     #     if word.strip('\'') in name_list:
     #         return True
-
+    #
     #     if word.strip('\'') in name_list_uppercase:
     #         return True
-
+    #
     #     if spell_check_word_lists and spell_check_word_lists.has_user_word(word.lower()):
     #         return True
-
+    #
     #     if spell_check_word_lists and spell_check_word_lists.has_user_word(word.strip('\'').lower()):
     #         return True
-
+    #
     #     if len(word) > 2 and word in name_list_uppercase:
     #         return True
-
+    #
     #     if len(word) > 2 and word in name_list_obj.name_list_with_apostrophe:
     #         return True
-
+    #
     #     if name_list_obj and name_list_obj.is_in_names_multi_word_list(line, word):
     #         return True
-
-    #     return False
-
-
-    # def remove_open_close_tags(source, *tags):
-    #     """
-    #     Remove all of the specified opening and closing tags from the source HTML string.
-
-    #     Args:
-    #         source (str): The source string to search for specified HTML tags.
-    #         tags (str): The HTML tags to remove.
-
-    #     Returns:
-    #         str: A new string without the specified opening and closing tags.
-    #     """
-    #     if not source or '<' not in source:
-    #         return source
-
-    #     pattern = r'<\s*\/?(\w+)[^>]*>'
-    #     return re.sub(pattern, lambda m: '' if m.group(1).lower() in [tag.lower() for tag in tags] else m.group(0), source)
-
-    # REGEX_ALONE_IAS_L = re.compile(r"\bl\b", re.IGNORECASE)
-    # REGEX_LOWERCASE_L = re.compile(r"[A-ZÆØÅÄÖÉÈÀÙÂÊÎÔÛËÏ]l[A-ZÆØÅÄÖÉÈÀÙÂÊÎÔÛËÏ]", re.IGNORECASE)
-    # REGEX_UPPERCASE_I = re.compile(r"[a-zæøåöääöéèàùâêîôûëï]I\.", re.IGNORECASE)
-    # REGEX_NUMBER1 = re.compile(r"(?<=\d) 1(?!/\d)", re.IGNORECASE)
-
-    # def count_unknown_words_via_dictionary(line, out_numberOfCorrectWords):
-    #     out_numberOfCorrectWords = 0
-    #     if _hunspell is None:
-    #         return 0
-
-    #     minLength = 2
-    #     if Configuration.Settings.Tools.CheckOneLetterWords:
-    #         minLength = 1
-
-    #     wordsNotFound = 0
-    #     words = HtmlUtil.remove_open_close_tags(line, HtmlUtil.TagItalic).split(" \r\n\t")
-    #     for i in range(len(words)):
-    #         word = words[i].strip(SpellCheckWordLists.SplitChars)
-    #         if len(word) >= minLength:
-    #             if not is_word_known_or_number(word, line):
-    #                 correct = len(word) > 1 and _hunspell.spell(word)
-    #                 if not correct:
-    #                     correct = len(word) > 2 and _hunspell.spell(word.replace("'", ""))
-    #                 if not correct and len(word) == 1 and _threeLetterIsoLanguageName == "eng" and (word == "I" or word == "A" or word == "a"):
-    #                     correct = True
-    #                 if correct:
-    #                     out_numberOfCorrectWords += 1
-    #                 else:
-    #                     wordsNotFound += 1
-    #             elif len(word) > 3:
-    #                 out_numberOfCorrectWords += 1
-
-    #     return wordsNotFound
-
-    # def remove_open_close_tags(source, tags):
-    #     if not source or '<' not in source:
-    #         return source
-
-    #     # This pattern matches these tag formats:
-    #     # <tag*>
-    #     # < tag*>
-    #     # </tag*>
-    #     # < /tag*>
-    #     # </ tag*>
-    #     # < / tag*>
-    #     return re.sub(r'<(\w+)>.*?</\1>', '', source, flags=re.IGNORECASE)
-
-    # ... (rest of the code)
-
-    # def is_word_known_or_number(word, line):
-    #     if re.match(r'^\d+(?:\.\d+)?$', word):
-    #         return True
-
-    #     if word in _wordSkipList:
-    #         return True
-
-    #     if word.strip("'") in _nameList:
-    #         return True
-
-    #     if word.strip("'").upper() in _nameListUppercase:
-    #         return True
-
-    #     if _spellCheckWordLists is not None and word.lower() in _spellCheckWordLists.user_words:
-    #         return True
-
-    #     if _spellCheckWordLists is not None and word.strip("'").lower() in _spellCheckWordLists.user_words:
-    #         return True
-
-    #     if len(word) > 2 and word.upper() in _nameListUppercase:
-    #         return True
-
-    #     if len(word) > 2 and word in _nameListWithApostrophe:
-    #         return True
-
-    #     if _nameListObj is not None and _nameListObj.is_in_names_multi_word_list(line, word):
-    #         return True
-
+    #
     #     return False
