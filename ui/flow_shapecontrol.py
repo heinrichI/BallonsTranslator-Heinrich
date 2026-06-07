@@ -400,6 +400,23 @@ class FlowShapeControl(QGraphicsItem):
             return self.blk_item.absBoundingRect(qrect=True)
         return QRectF()
 
+    def handleContextMenu(self, scene_pos: QPointF, screen_pos) -> bool:
+        """
+        Handle right-click on flow handles or FlowTextBlkItem.
+        Returns True if a flow-specific item handled the event, False to fall
+        through to the standard canvas context menu.
+        """
+        from .flow_textitem import FlowTextBlkItem
+
+        for item in self.scene().items(scene_pos):
+            if isinstance(item, FlowControlHandle):
+                item.showHandleContextMenu(screen_pos)
+                return True
+            if isinstance(item, FlowTextBlkItem):
+                item.showFlowContextMenu(scene_pos, screen_pos)
+                return True
+        return False
+
     def show(self):
         super().show()
         if self.need_rescale:

@@ -14,7 +14,7 @@ from qtpy.QtGui import QUndoStack, QUndoCommand
 from .misc import ndarray2pixmap, QKEY, QNUMERIC_KEYS, ARROWKEY2DIRECTION
 from .textitem import TextBlkItem, TextBlock
 from .texteditshapecontrol import TextBlkShapeControl
-from .flow_shapecontrol import FlowShapeControl, FlowControlHandle
+from .flow_shapecontrol import FlowShapeControl
 from .flow_textitem import FlowTextBlkItem
 from .custom_widget import ScrollBar, FadeLabel
 from .image_edit import ImageEditMode, DrawingLayer, StrokeImgItem
@@ -693,18 +693,8 @@ class Canvas(QGraphicsScene):
             if self.stroke_img_item is not None:
                 self.finish_erasing.emit(self.stroke_img_item)
             if self.textEditMode() and not textblk_created:
-                # Check if a flow handle or FlowTextBlkItem was right-clicked
-                _flow_handled = False
-                for _item in self.items(event.scenePos()):
-                    if isinstance(_item, FlowControlHandle):
-                        _item.showHandleContextMenu(event.screenPos())
-                        _flow_handled = True
-                        break
-                    if isinstance(_item, FlowTextBlkItem):
-                        _item.showFlowContextMenu(event.scenePos(), event.screenPos())
-                        _flow_handled = True
-                        break
-                if not _flow_handled:
+                # Delegate flow handle/item right-click to FlowShapeControl
+                if not self.txtblkShapeControl.handleContextMenu(event.scenePos(), event.screenPos()):
                     self.context_menu_requested.emit(event.screenPos(), False)
         if btn == Qt.MouseButton.LeftButton:
             if self.stroke_img_item is not None:
