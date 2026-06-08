@@ -1,0 +1,53 @@
+# FlowTextBlkItem — Изогнутые текстовые блоки
+
+## Описание
+Добавление поддержки изогнутых/трапециевидных текстовых блоков с перетаскиваемыми контрольными точками границ.
+
+## Ветка
+`FlowTextBlkItem-Cline-claude2`
+
+## Новые файлы
+
+### ui/flow_textitem.py (339 строк)
+- `FlowTextBlkItem(TextBlkItem)` — изогнутые текстовые блоки
+  - 3+3 контрольные точки границ (левая/правая сторона)
+  - `interpolate_boundary()` — линейная интерполяция между точками
+  - `build_quad_path()` — квадратичный Bezier через 3 точки
+  - `_init_points_from_rect()`, `_get_line_x_offsets()`, `_update_flow_layout()`
+  - `save_flow_points()` — сериализация в TextBlock
+  - Переопределения `set_size/on_document_enlarged/docSizeChanged` — pos() не сдвигается
+  - `boundingRect()` — включает все контрольные точки
+  - Hover-отрисовка границ, контекстное меню для добавления точек
+
+### ui/flow_shapecontrol.py (466 строк)
+- `FlowShapeControl(QGraphicsItem)` — замена TextBlkShapeControl для FlowTextBlkItem
+  - Public API совместим с TextBlkShapeControl
+  - `handleContextMenu()` — инкапсуляция правого клика
+  - `FlowControlHandle` — 6 перетаскиваемых кругов (3 слева + 3 справа)
+  - `FlowResizeHandle` — 2 ромбовидных хендла для высоты
+  - `_NullPixmapItem` — заглушка previewPixmap
+
+## Изменённые файлы
+
+### ui/canvas.py (5 мест)
+- import FlowShapeControl (вместо TextBlkShapeControl)
+- init, scale, render (draw_boundaries=False), делегирование правого клика
+
+### ui/scene_textlayout.py (3 места)
+- `_line_left_offsets`, `_line_right_offsets` — per-line смещения
+- `set_line_x_offsets()` — установка и relayout
+- `layoutBlock()` — динамическая ширина строк
+
+## Не тронуты (duck-typing / hasattr)
+scenetext_manager.py, textedit_commands.py, texteditshapecontrol.py, textitem.py, utils/textblock.py
+
+## Ключевые особенности
+1. 6 контрольных точек (3 слева + 3 справа)
+2. Quadratic Bezier через все 3 точки
+3. Per-line интерполяция для layout
+4. Перетаскиваемые хендлы с обновлением в реальном времени
+5. Resize сверху/снизу
+6. Добавление/удаление точек через контекстное меню
+7. Hover-подсветка границ
+8. draw_boundaries=False для экспорта
+9. Сериализация в TextBlock

@@ -1,0 +1,73 @@
+================================================================================
+CHANGELOG: FlowTextBlkItem — Изогнутые текстовые блоки
+================================================================================
+
+Ветка: FlowTextBlkItem-Cline-claude2
+Описание: Добавление поддержки изогнутых/трапециевидных текстовых блоков
+с перетаскиваемыми контрольными точками границ.
+
+НОВЫЕ ФАЙЛЫ:
+────────────────────────────────────────────────────────────────────────────────
+
+ui/flow_textitem.py (339 строк)
+  - FlowTextBlkItem(TextBlkItem) — класс для изогнутых текстовых блоков
+    * 3+3 контрольные точки границ (левая/правая сторона) в item-local координатах
+    * interpolate_boundary(points, y) — линейная интерполяция между точками границы
+    * build_quad_path(points) — квадратичный Bezier path через 3 точки
+    * _init_points_from_rect() — инициализация 3+3 точек из прямоугольника
+    * _get_line_x_offsets() — per-line смещения для layout
+    * _update_flow_layout() — отправка смещений в HorizontalTextDocumentLayout
+    * save_flow_points() — сериализация точек в TextBlock.left_points/right_points
+    * Переопределения set_size/on_document_enlarged/docSizeChanged — pos() не сдвигается
+    * boundingRect() — включает все контрольные точки
+    * hoverEnterEvent/hoverLeaveEvent — для отрисовки границ при наведении
+    * showFlowContextMenu() — контекстное меню "Добавить точку к левой/правой стороне"
+    * paint() — рисует границы (кривые + верхнюю/нижнюю линии) при hover/under_ctrl
+
+ui/flow_shapecontrol.py (466 строк)
+  - FlowShapeControl(QGraphicsItem) — замена TextBlkShapeControl для FlowTextBlkItem
+    * Public API совместим с TextBlkShapeControl
+    * setBlkItem/rebuildHandles/updateHandlePositions/updateScale
+    * startEditing/endEditing/hideControls/showControls
+    * handleContextMenu(scene_pos, screen_pos) -> bool — инкапсуляция правого клика
+      (возвращает True если flow-элемент обработал событие)
+  - FlowControlHandle(QGraphicsEllipseItem) — 6 перетаскиваемых кругов
+    (3 слева белые, 3 справа синие) для контрольных точек
+  - FlowResizeHandle(QGraphicsItem) — 2 ромбовидных хендла (оранжевые)
+    для изменения высоты блока сверху и снизу
+  - _NullPixmapItem(QGraphicsItem) — заглушка previewPixmap
+
+ИЗМЕНЁННЫЕ ФАЙЛЫ:
+────────────────────────────────────────────────────────────────────────────────
+
+ui/canvas.py (изменения в 5 местах)
+  - import FlowShapeControl (вместо TextBlkShapeControl)
+  - self.txtblkShapeControl = FlowShapeControl(self.gv) — замена инициализации
+  - scaleImage() — вызов txtblkShapeControl.updateScale()
+  - render_result_img() — draw_boundaries=False на FlowTextBlkItem
+  - mouseReleaseEvent() — делегирование правого клика в handleContextMenu()
+
+ui/scene_textlayout.py (изменения в HorizontalTextDocumentLayout, 3 места)
+  - _line_left_offsets, _line_right_offsets — словари per-line смещений
+  - set_line_x_offsets(left_offsets, right_offsets) — установка и relayout
+  - layoutBlock() — динамическая ширина строк через _line_left_offsets/_line_right_offsets
+
+НЕ ТРОГАЛИСЬ (используют duck-typing / hasattr):
+  - ui/scenetext_manager.py
+  - ui/textedit_commands.py
+  - ui/texteditshapecontrol.py
+  - ui/textitem.py
+  - utils/textblock.py
+
+КЛЮЧЕВЫЕ ОСОБЕННОСТИ:
+────────────────────────────────────────────────────────────────────────────────
+
+1. 6 контрольных точек (3 слева + 3 справа) для изогнутых границ
+2. Quadratic Bezier — кривая проходит через ВСЕ 3 точки (не только крайние)
+3. Per-line интерполяция — каждая строка текста подстраивается под границы
+4. Перетаскивание хендлов — обновление layout'а в реальном времени
+5. Resize сверху/снизу — сдвиг всей верхней/нижней границы
+6. Добавление/удаление точек через контекстное меню
+7. Hover-подсветка границ (только при наведении или выборе)
+8. draw_boundaries=False — подавление границ в экспортированном изображении
+9. Сериализация в TextBlock.left_points/right_points
