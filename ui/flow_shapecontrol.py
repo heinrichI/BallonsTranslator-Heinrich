@@ -1,9 +1,9 @@
 """
 FlowShapeControl + FlowControlHandle — replace TextBlkShapeControl.
 
-6 draggable circular handles (3 left + 3 right) that modify the flow
-boundary points of a FlowTextBlkItem.  Handles are only visible on hover
-or when the item is under control.
+DEFAULT_POINTS_PER_SIDE*2 draggable circular handles (left + right) that
+modify the flow boundary points of a FlowTextBlkItem.  Handles are only
+visible on hover or when the item is under control.
 
 2 diamond handles (top/bottom) for resizing the block height.
 """
@@ -13,6 +13,8 @@ import logging
 from qtpy.QtWidgets import QGraphicsItem, QGraphicsEllipseItem, QGraphicsSceneMouseEvent, QWidget, QStyleOptionGraphicsItem, QLabel, QMenu
 from qtpy.QtCore import Qt, QRectF, QPointF, QSizeF
 from qtpy.QtGui import QPainter, QPen, QColor, QBrush, QPolygonF
+
+from .flow_textitem import DEFAULT_POINTS_PER_SIDE, MIN_POINTS_PER_SIDE
 
 logger = logging.getLogger('BallonTranslator')
 
@@ -93,7 +95,7 @@ class FlowControlHandle(QGraphicsEllipseItem):
         if blk_item is None:
             return
         pts = blk_item._left_points if self.side == 'left' else blk_item._right_points
-        can_delete = len(pts) > 2
+        can_delete = len(pts) > MIN_POINTS_PER_SIDE
         menu = QMenu()
         del_action = menu.addAction("Удалить точку")
         del_action.setEnabled(can_delete)
@@ -205,11 +207,11 @@ class FlowShapeControl(QGraphicsItem):
         self.current_scale: float = 1.0
         self.need_rescale: bool = False
 
-        # 6 handles: left[0,1,2] then right[0,1,2]
+        # DEFAULT_POINTS_PER_SIDE left handles then DEFAULT_POINTS_PER_SIDE right handles
         self.handles: list[FlowControlHandle] = []
-        for idx in range(3):
+        for idx in range(DEFAULT_POINTS_PER_SIDE):
             self.handles.append(FlowControlHandle(self, 'left', idx))
-        for idx in range(3):
+        for idx in range(DEFAULT_POINTS_PER_SIDE):
             self.handles.append(FlowControlHandle(self, 'right', idx))
 
         # 2 resize handles: top and bottom

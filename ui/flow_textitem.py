@@ -1,9 +1,11 @@
 """
 FlowTextBlkItem — drop-in replacement for TextBlkItem that supports
-curved/trapezoidal text boundaries defined by 3 control points per side.
+curved/trapezoidal text boundaries defined by DEFAULT_POINTS_PER_SIDE
+control points per side.
 
-The left and right boundary each have 3 QPointF control points (top, middle,
-bottom) in item-local coordinates.  Per-line x-offsets are fed into
+The left and right boundary each have DEFAULT_POINTS_PER_SIDE QPointF
+control points (evenly distributed by y) in item-local coordinates.
+Per-line x-offsets are fed into
 HorizontalTextDocumentLayout.set_line_x_offsets() so the text reflows
 automatically when handles are dragged.
 
@@ -23,13 +25,19 @@ from .textitem import TextBlkItem
 from .scene_textlayout import HorizontalTextDocumentLayout
 
 
+# ── Constants ────────────────────────────────────────────────
+
+DEFAULT_POINTS_PER_SIDE: int = 3  # количество точек при инициализации из прямоугольника
+MIN_POINTS_PER_SIDE: int = 3      # минимальное количество точек для кривой Безье и удаления
+
+
 # ─────────────────────────────────────────────────────────────
 # Helper functions
 # ─────────────────────────────────────────────────────────────
 
 def interpolate_boundary(points: List[QPointF], y: float) -> float:
     """
-    Linear interpolation between 3 sorted-by-y control points.
+    Linear interpolation between MIN_POINTS_PER_SIDE sorted-by-y control points.
     Returns x at height y.
     """
     if len(points) < 2:
@@ -58,11 +66,11 @@ def interpolate_boundary(points: List[QPointF], y: float) -> float:
 
 def build_quad_path(points: List[QPointF]) -> QPainterPath:
     """
-    Build a quadratic Bezier path that passes THROUGH all 3 control points.
-    The curve passes through pts[0], pts[1] (middle), and pts[2].
-    To achieve this, we compute the true Bezier control point C such that
-    B(0.5) = pts[1]:
-        C = 2 * pts[1] - 0.5 * (pts[0] + pts[2])
+    Build a quadratic Bezier path that passes THROUGH all points.
+    For >= MIN_POINTS_PER_SIDE points, the curve passes through pts[0],
+    pts[1] (middle), and pts[-1]. To achieve this, we compute the true
+    Bezier control point C such that B(0.5) = pts[1]:
+        C = 2 * pts[1] - 0.5 * (pts[0] + pts[-1])
     """
     path = QPainterPath()
     if len(points) < 2:
@@ -73,7 +81,7 @@ def build_quad_path(points: List[QPointF]) -> QPainterPath:
     if len(pts) == 2:
         path.moveTo(pts[0])
         path.lineTo(pts[1])
-    elif len(pts) >= 3:
+    elif len(pts) >= MIN_POINTS_PER_SIDE:
         # Compute control point so curve passes through pts[1] at t=0.5
         ctrl = QPointF(
             2 * pts[1].x() - 0.5 * (pts[0].x() + pts[2].x()),
@@ -91,7 +99,7 @@ def build_quad_path(points: List[QPointF]) -> QPainterPath:
 class FlowTextBlkItem(TextBlkItem):
     """
     Extends TextBlkItem with:
-    - 3 left + 3 right boundary control points (item-local coords)
+    - DEFAULT_POINTS_PER_SIDE left + right boundary control points (item-local coords)
     - Per-line x-offset layout via HorizontalTextDocumentLayout
     - Hover-only visual boundary overlay (suppressed when draw_boundaries=False)
     """
@@ -116,7 +124,7 @@ class FlowTextBlkItem(TextBlkItem):
     # ── Control point initialisation ──────────────────────────
 
     def _init_points_from_rect(self, rect: QRectF):
-        """Initialise 3+3 boundary points from a plain rectangle."""
+        """Initialise DEFAULT_POINTS_PER_SIDE boundary points per side from a plain rectangle."""
         if rect is None or rect.width() < 1 or rect.height() < 1:
             return
         # Convert to item-local coordinates
@@ -125,18 +133,14 @@ class FlowTextBlkItem(TextBlkItem):
         x1 = rect.x() + rect.width() - pos.x()
         y0 = rect.y() - pos.y()
         y1 = rect.y() + rect.height() - pos.y()
-        ym = (y0 + y1) / 2
 
-        self._left_points = [
-            QPointF(x0, y0),
-            QPointF(x0, ym),
-            QPointF(x0, y1),
-        ]
-        self._right_points = [
-            QPointF(x1, y0),
-            QPointF(x1, ym),
-            QPointF(x1, y1),
-        ]
+        self._left_points = []
+        self._right_points = []
+        for i in range(DEFAULT_POINTS_PER_SIDE):
+            t = i / (DEFAULT_POINTS_PER_SIDE - 1) if DEFAULT_POINTS_PER_SIDE > 1 else 0.0
+            y = y0 + t * (y1 - y0)
+            self._left_points.append(QPointF(x0, y))
+            self._right_points.append(QPointF(x1, y))
 
     # ── Layout helpers ────────────────────────────────────────
 
