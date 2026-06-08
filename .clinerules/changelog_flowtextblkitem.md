@@ -38,6 +38,16 @@
 - `set_line_x_offsets()` — установка и relayout
 - `layoutBlock()` — динамическая ширина строк
 
+## Исправления
+
+### 2026-06-08 — commit 8e01f1b5 — контекстное меню: стандартные пункты пропадали
+- **Проблема**: При добавлении пунктов "Добавить точку к левой/правой стороне" в контекстное меню FlowTextBlkItem, стандартные пункты (Copy, Paste, Delete и др.) переставали отображаться.
+- **Причина**: PyQt6 требует, чтобы QAction имел parent при вставке через `insertAction`. В showFlowContextMenu() action'ы создавались без parent'а.
+- **Исправление**:
+  * flow_textitem.py — добавлен `parent=menu` для всех action'ов
+  * canvas.py — убрана прямая проверка isinstance(FlowTextBlkItem), теперь handleContextMenu() сам определяет тип и маршрутизирует
+- **Статус**: Исправлено
+
 ## Не тронуты (duck-typing / hasattr)
 scenetext_manager.py, textedit_commands.py, texteditshapecontrol.py, textitem.py, utils/textblock.py
 

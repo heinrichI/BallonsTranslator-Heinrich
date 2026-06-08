@@ -1,6 +1,9 @@
+import logging
 import numpy as np
 from typing import List, Union
 import os
+
+logger = logging.getLogger(__name__)
 
 from qtpy.QtWidgets import QApplication, QSlider, QMenu, QGraphicsScene, QGraphicsSceneDragDropEvent , QGraphicsView, QGraphicsSceneDragDropEvent, QGraphicsRectItem, QGraphicsItem, QScrollBar, QGraphicsPixmapItem, QGraphicsSceneMouseEvent, QGraphicsSceneContextMenuEvent, QRubberBand
 from qtpy.QtCore import Qt, QDateTime, QRectF, QPointF, QPoint, Signal, QSizeF, QEvent
@@ -693,9 +696,23 @@ class Canvas(QGraphicsScene):
             if self.stroke_img_item is not None:
                 self.finish_erasing.emit(self.stroke_img_item)
             if self.textEditMode() and not textblk_created:
-                # Delegate flow handle/item right-click to FlowShapeControl
-                if not self.txtblkShapeControl.handleContextMenu(event.scenePos(), event.screenPos()):
-                    self.context_menu_requested.emit(event.screenPos(), False)
+                scene_pos = event.scenePos()
+                screen_pos = event.screenPos()
+
+                logger.debug(
+                    "RIGHT-CLICK: textEditMode=%s, textblk_created=%s, blk_item=%s, blk_item_type=%s",
+                    self.textEditMode(), textblk_created,
+                    self.txtblkShapeControl.blk_item,
+                    type(self.txtblkShapeControl.blk_item).__name__ if self.txtblkShapeControl.blk_item else "None"
+                )
+
+                # Delegate to FlowShapeControl.handleContextMenu which checks:
+                # 1. Click on FlowControlHandle → "Удалить точку"
+                # 2. Click on FlowTextBlkItem → "Добавить точку к левой/правой стороне" + standard menu
+                # 3. Otherwise → return False → fall through to standard context menu
+                handled = self.txtblkShapeControl.handleContextMenu(scene_pos, screen_pos)
+                if not handled:
+                    self.context_menu_requested.emit(screen_pos, False)
         if btn == Qt.MouseButton.LeftButton:
             if self.stroke_img_item is not None:
                 self.finish_painting.emit(self.stroke_img_item)

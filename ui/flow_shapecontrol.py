@@ -410,13 +410,32 @@ class FlowShapeControl(QGraphicsItem):
         """
         from .flow_textitem import FlowTextBlkItem
 
-        for item in self.scene().items(scene_pos):
-            if isinstance(item, FlowControlHandle):
-                item.showHandleContextMenu(screen_pos)
-                return True
-            if isinstance(item, FlowTextBlkItem):
-                item.showFlowContextMenu(scene_pos, screen_pos)
-                return True
+        logger.debug("handleContextMenu called — scene_pos=(%.1f, %.1f)", scene_pos.x(), scene_pos.y())
+
+        # First check if we clicked on a control handle or a FlowTextBlkItem
+        # via scene lookup (handles are high z-order, blk items may be lower).
+        if self.scene() is not None:
+            items_at_pos = self.scene().items(scene_pos)
+            logger.debug("  items at pos: %d", len(items_at_pos))
+            for item in items_at_pos:
+                logger.debug("    - %s (type=%s)", item, type(item).__name__)
+                if isinstance(item, FlowControlHandle):
+                    logger.debug("  -> FlowControlHandle found, showing it")
+                    item.showHandleContextMenu(screen_pos)
+                    return True
+                if isinstance(item, FlowTextBlkItem):
+                    logger.debug("  -> FlowTextBlkItem found via scene.items()")
+                    item.showFlowContextMenu(scene_pos, screen_pos)
+                    return True
+
+        # Fallback: if blk_item is set and is a FlowTextBlkItem that was not
+        # found via scene.items() (e.g. because it's below other items), use it.
+        if isinstance(self.blk_item, FlowTextBlkItem):
+            logger.debug("  -> Fallback: using self.blk_item (FlowTextBlkItem)")
+            self.blk_item.showFlowContextMenu(scene_pos, screen_pos)
+            return True
+
+        logger.debug("  -> Returning False (no flow item handled)")
         return False
 
     def show(self):

@@ -13,7 +13,10 @@ draw_boundaries flag:  set to False before render_result_img() to suppress
 the visual boundary overlay in the exported image.
 """
 
+import logging
 from typing import List, Union, Tuple
+
+logger = logging.getLogger('BallonTranslator')
 
 from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent, QMenu, QAction
 from qtpy.QtCore import Qt, QRectF, QPointF, Signal
@@ -255,62 +258,96 @@ class FlowTextBlkItem(TextBlkItem):
         self.update()
         super().hoverLeaveEvent(event)
 
-    # ── Context menu ──────────────────────────────────────────
+    # ── Context menu helpers ──────────────────────────────────
 
-    def showFlowContextMenu(self, scene_pos: QPointF, screen_pos):
-        """Called from Canvas.mouseReleaseEvent on right-click."""
+    def add_point_left(self, click_y: float):
+        """Add a control point on the left boundary at the given local Y."""
+        if not self._left_points:
+            return
+        x = interpolate_boundary(self._left_points, click_y)
+        new_pt = QPointF(x, click_y)
+        self._left_points.append(new_pt)
+        self._left_points.sort(key=lambda p: p.y())
+        self._after_add_point()
+
+    def add_point_right(self, click_y: float):
+        """Add a control point on the right boundary at the given local Y."""
+        if not self._right_points:
+            return
+        x = interpolate_boundary(self._right_points, click_y)
+        new_pt = QPointF(x, click_y)
+        self._right_points.append(new_pt)
+        self._right_points.sort(key=lambda p: p.y())
+        self._after_add_point()
+
+    def _after_add_point(self):
+        """Refresh layout and rebuild shape handles after adding a point."""
+        self._update_flow_layout()
+        scene = self.scene()
+        if scene is not None:
+            for item in scene.items():
+                from .flow_shapecontrol import FlowShapeControl
+                if isinstance(item, FlowShapeControl) and item.blk_item is self:
+                    item.rebuildHandles()
+                    break
+
+    def injectFlowMenuItems(self, menu: QMenu, scene_pos: QPointF):
+        """
+        Insert flow-specific actions at the top of an existing QMenu.
+        Called by FlowShapeControl.handleContextMenu() to build the
+        combined context menu.
+        """
         if not self._left_points or not self._right_points:
             return
 
-        # Convert scene pos to item-local Y
         local_pos = self.mapFromScene(scene_pos)
         click_y = local_pos.y()
 
-        menu = QMenu()
-        add_left = menu.addAction("Добавить точку к левой стороне")
-        add_right = menu.addAction("Добавить точку к правой стороне")
-        menu.addSeparator()
+        # Build the two flow actions with lambda closures for click_y
+        add_left = QAction("Добавить точку к левой стороне", menu)
+        add_right = QAction("Добавить точку к правой стороне", menu)
+        add_left.triggered.connect(lambda checked, y=click_y: self.add_point_left(y))
+        add_right.triggered.connect(lambda checked, y=click_y: self.add_point_right(y))
 
-        screen_pt = screen_pos.toPoint() if hasattr(screen_pos, 'toPoint') else screen_pos
-        action = menu.exec(screen_pt)
-        if action == add_left:
-            x = interpolate_boundary(self._left_points, click_y)
-            new_pt = QPointF(x, click_y)
-            self._left_points.append(new_pt)
-            self._left_points.sort(key=lambda p: p.y())
-            self._update_flow_layout()
-            scene = self.scene()
-            if scene is not None:
-                for item in scene.items():
-                    from .flow_shapecontrol import FlowShapeControl
-                    if isinstance(item, FlowShapeControl) and item.blk_item is self:
-                        item.rebuildHandles()
-                        break
-        elif action == add_right:
-            x = interpolate_boundary(self._right_points, click_y)
-            new_pt = QPointF(x, click_y)
-            self._right_points.append(new_pt)
-            self._right_points.sort(key=lambda p: p.y())
-            self._update_flow_layout()
-            scene = self.scene()
-            if scene is not None:
-                for item in scene.items():
-                    from .flow_shapecontrol import FlowShapeControl
-                    if isinstance(item, FlowShapeControl) and item.blk_item is self:
-                        item.rebuildHandles()
-                        break
-        # If user picked a flow action or dismissed menu — done.
-        # The separator is not clickable so action will never equal it.
-        # If action is None the user dismissed without choosing — show standard menu.
-        if action is None:
-            self._show_standard_context_menu(screen_pos)
+        # Insert at top: we want [add_left, add_right, sep, original_actions...]
+        # insertAction(before, action) inserts action BEFORE before.
+        # So we add in reverse order.
+        first_action = menu.actions()[0] if menu.actions() else None
 
-    def _show_standard_context_menu(self, screen_pos):
-        """Trigger the standard canvas context menu."""
+        # Step 1: insert separator before first_action
+        sep = QAction(menu)
+        sep.setSeparator(True)
+        if first_action is not None:
+            menu.insertAction(first_action, sep)
+            # Step 2: insert add_right before sep
+            menu.insertAction(sep, add_right)
+            # Step 3: insert add_left before add_right
+            menu.insertAction(add_right, add_left)
+        else:
+            # Menu is empty — just add actions
+            menu.addAction(add_left)
+            menu.addAction(add_right)
+            menu.addSeparator()
+
+    def showFlowContextMenu(self, scene_pos: QPointF, screen_pos):
+        """
+        Legacy entry point for the combined context menu.
+        Builds the standard canvas menu, injects flow items, and shows it.
+        """
+        logger.debug("showFlowContextMenu called — scene_pos=(%.1f, %.1f)", scene_pos.x(), scene_pos.y())
         scene = self.scene()
-        if scene is not None and hasattr(scene, 'context_menu_requested'):
+        if scene is not None and hasattr(scene, 'build_context_menu') and hasattr(scene, 'exec_context_menu'):
+            std_menu, actions = scene.build_context_menu()
+            logger.debug("  std_menu built, actions=%d. Now injecting flow items.", len(actions) if actions else 0)
+            self.injectFlowMenuItems(std_menu, scene_pos)
             screen_pt = screen_pos.toPoint() if hasattr(screen_pos, 'toPoint') else screen_pos
-            scene.context_menu_requested.emit(screen_pt, False)
+            scene.exec_context_menu(std_menu, actions, screen_pt)
+            logger.debug("  Context menu executed.")
+        else:
+            logger.debug("  scene=%s, has build_context_menu=%s, has exec_context_menu=%s",
+                         scene,
+                         hasattr(scene, 'build_context_menu') if scene else False,
+                         hasattr(scene, 'exec_context_menu') if scene else False)
 
     # ── Paint ─────────────────────────────────────────────────
 
