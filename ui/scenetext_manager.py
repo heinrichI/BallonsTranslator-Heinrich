@@ -459,6 +459,8 @@ class SceneTextManager(QObject):
         It should only be called safely from the event loop, not directly from
         a signal handler of a widget it is about to destroy.
         """
+        LOGGER.debug("=== updateSceneTextitems START ===")
+        LOGGER.debug("  block count in proj: %d", len(self.imgtrans_proj.current_block_list()))
         self.hovering_transwidget = None
         self.txtblkShapeControl.setBlkItem(None)
         self.clearSceneTextitems()
@@ -478,20 +480,32 @@ class SceneTextManager(QObject):
         # import debugpy
         # debugpy.debug_this_thread()
         # debugpy.breakpoint()
+        LOGGER.debug("=== addTextBlock ===")
+        LOGGER.debug("  blk type=%s, idx will be %d",
+                     type(blk).__name__ if blk else "None",
+                     len(self.textblk_item_list))
         if isinstance(blk, TextBlkItem):
             blk_item = blk
             blk_item.idx = len(self.textblk_item_list)
+            LOGGER.debug("  existing TextBlkItem, pos=%s", blk_item.pos())
         else:
             translation = ''
             if self.auto_textlayout_flag and not blk.vertical:
                 translation = blk.translation
                 blk.translation = ''
+            LOGGER.debug("  creating FlowTextBlkItem with blk.xyxy=%s", blk.xyxy if blk else "None")
             blk_item = FlowTextBlkItem(blk, len(self.textblk_item_list), show_rect=self.canvas.textblock_mode)
             if translation:
                 blk.translation = translation
                 rst = self.layout_textblk(blk_item, text=translation)
                 if rst is None:
                     blk_item.setPlainText(translation)
+        LOGGER.debug("  after creation: blk_item.pos=%s", blk_item.pos())
+        if hasattr(blk_item, '_left_points'):
+            LOGGER.debug("  left_points=%s",
+                         [(p.x(), p.y()) for p in blk_item._left_points])
+            LOGGER.debug("  right_points=%s",
+                         [(p.x(), p.y()) for p in blk_item._right_points])
         self.addTextBlkItem(blk_item)
         # LOGGER.info(f"addTextBlock {blk_item.toPlainText()}")
 

@@ -48,6 +48,14 @@
   * canvas.py — убрана прямая проверка isinstance(FlowTextBlkItem), теперь handleContextMenu() сам определяет тип и маршрутизирует
 - **Статус**: Исправлено
 
+### 2026-06-10 — handle'ы в левом верхнем углу после нового распознавания
+- **Проблема**: При клике на текстовый блок после пересоздания сцены (новое распознавание) handle'ы управления отображались в левом верхнем углу страницы, а не на позиции блока.
+- **Причина**: `FlowShapeControl` — дочерний элемент `baseLayer`, у которого может быть `scale != 1.0` (zoom-уровень). `updateHandlePositions()` вызывал `blk_item.mapToScene(pt)`, возвращавший координаты в scene-пространстве, уже включающие масштаб baseLayer. Затем `handle.setPos(scene_pos)` устанавливал позицию handle в родительских координатах `FlowShapeControl`, который сам находится под `baseLayer`. Происходило **двойное масштабирование**: scene-координаты (уже scaled) применялись как родительские координаты (которые baseLayer снова умножает на scale).
+- **Исправление**:
+  * `flow_shapecontrol.py` — в `updateHandlePositions()` добавлен расчёт `inv_scale = 1.0 / topLevelItem().scale()`. Позиция handle теперь устанавливается как `parent_pos = scene_pos * inv_scale`, что компенсирует двойное масштабирование.
+  * Аналогично исправлены `top_handle` и `bottom_handle`.
+- **Статус**: Исправлено
+
 ## Не тронуты (duck-typing / hasattr)
 scenetext_manager.py, textedit_commands.py, texteditshapecontrol.py, textitem.py, utils/textblock.py
 

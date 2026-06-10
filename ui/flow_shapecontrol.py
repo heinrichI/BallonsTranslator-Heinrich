@@ -244,9 +244,18 @@ class FlowShapeControl(QGraphicsItem):
     # ── Public API (compatible with TextBlkShapeControl) ──────
 
     def setBlkItem(self, blk_item):
+        logger.debug("=== setBlkItem called ===")
+        logger.debug("  new blk_item=%s (type=%s)", blk_item, type(blk_item).__name__ if blk_item else "None")
+        if blk_item is not None:
+            logger.debug("  new blk_item pos=%s boundingRect=%s",
+                         blk_item.pos(), blk_item.boundingRect())
         if self.blk_item == blk_item and self.isVisible():
+            logger.debug("  same blk_item, already visible — skipping")
             return
         if self.blk_item is not None:
+            logger.debug("  old blk_item=%s type=%s pos=%s",
+                         self.blk_item, type(self.blk_item).__name__,
+                         self.blk_item.pos())
             self.blk_item.under_ctrl = False
             if hasattr(self.blk_item, 'isEditing') and self.blk_item.isEditing():
                 self.blk_item.endEdit()
@@ -273,6 +282,13 @@ class FlowShapeControl(QGraphicsItem):
     def rebuildHandles(self):
         """Recreate FlowControlHandle children to match current point counts."""
         blk_item = self.blk_item
+        logger.debug("=== rebuildHandles ===")
+        logger.debug("  old handle count=%d", len(self.handles))
+        if blk_item is not None and hasattr(blk_item, '_left_points'):
+            logger.debug("  left_points count=%d, right_points count=%d",
+                         len(blk_item._left_points), len(blk_item._right_points))
+            logger.debug("  left_points=%s", _fmt_pts(blk_item._left_points))
+            logger.debug("  right_points=%s", _fmt_pts(blk_item._right_points))
         for h in self.handles:
             h.setParentItem(None)
             if h.scene():
@@ -299,14 +315,52 @@ class FlowShapeControl(QGraphicsItem):
         """Sync handle positions from item's boundary points."""
         blk_item = self.blk_item
         if blk_item is None:
+            logger.debug("updateHandlePositions: blk_item is None — skipping")
             return
         if not hasattr(blk_item, '_left_points') or not blk_item._left_points:
+            logger.debug("updateHandlePositions: no _left_points — skipping")
             return
+
+        logger.debug("=== updateHandlePositions ===")
+        logger.debug("  FlowShapeControl pos before=%s", super().pos())
+        logger.debug("  blk_item=%s pos=%s boundingRect=%s",
+                     blk_item, blk_item.pos(), blk_item.boundingRect())
+        logger.debug("  blk_item scenePos=%s", blk_item.mapToScene(QPointF(0, 0)))
+        logger.debug("  left_points=%s", _fmt_pts(blk_item._left_points))
+        logger.debug("  right_points=%s", _fmt_pts(blk_item._right_points))
+
         super().setPos(QPointF(0, 0))
+        logger.debug("  FlowShapeControl pos after reset=%s", super().pos())
+
+        # Account for baseLayer scale: FlowShapeControl is child of baseLayer,
+        # which may have a scale != 1.0.  handle.setPos() sets position in
+        # parent (FlowShapeControl) coordinates, but scene_pos is in scene
+        # coordinates that already include baseLayer's scale transform.
+        # Dividing by baseLayer's scale cancels the double-scaling.
+        s = 1.0
+        tl = self.topLevelItem()
+        if tl is not None:
+            try:
+                s = tl.scale()
+                if s == 0.0:
+                    s = 1.0
+            except Exception:
+                s = 1.0
+        inv_scale = 1.0 / s
+
         all_points = blk_item._left_points + blk_item._right_points
+        logger.debug("  total handle count=%d, total points=%d, baseLayer scale=%.4f, inv=%.4f",
+                     len(self.handles), len(all_points), s, inv_scale)
         for handle, pt in zip(self.handles, all_points):
             scene_pos = blk_item.mapToScene(pt)
-            handle.setPos(scene_pos)
+            # Cancel double scaling from baseLayer transform
+            parent_pos = QPointF(scene_pos.x() * inv_scale, scene_pos.y() * inv_scale)
+            logger.debug("    handle side=%s idx=%d: local=(%.1f,%.1f) -> scene=(%.1f,%.1f) -> parent=(%.1f,%.1f)",
+                         handle.side, handle.point_idx,
+                         pt.x(), pt.y(),
+                         scene_pos.x(), scene_pos.y(),
+                         parent_pos.x(), parent_pos.y())
+            handle.setPos(parent_pos)
             logger.debug(
                 'updateHandlePositions: side=%s idx=%d | item_local=(%.1f,%.1f) -> scene=(%.1f,%.1f)',
                 handle.side, handle.point_idx,
@@ -314,15 +368,21 @@ class FlowShapeControl(QGraphicsItem):
                 scene_pos.x(), scene_pos.y(),
             )
 
-        # Top handle: midpoint of top-left and top-right
+        # Top handle: midpoint of top-left and top-right (with scale compensation)
         tl = blk_item.mapToScene(blk_item._left_points[0])
         tr = blk_item.mapToScene(blk_item._right_points[0])
-        self.top_handle.setPos(QPointF((tl.x() + tr.x()) / 2, (tl.y() + tr.y()) / 2))
+        self.top_handle.setPos(QPointF(
+            (tl.x() + tr.x()) / 2 * inv_scale,
+            (tl.y() + tr.y()) / 2 * inv_scale,
+        ))
 
-        # Bottom handle: midpoint of bottom-left and bottom-right
+        # Bottom handle: midpoint of bottom-left and bottom-right (with scale compensation)
         bl = blk_item.mapToScene(blk_item._left_points[-1])
         br = blk_item.mapToScene(blk_item._right_points[-1])
-        self.bottom_handle.setPos(QPointF((bl.x() + br.x()) / 2, (bl.y() + br.y()) / 2))
+        self.bottom_handle.setPos(QPointF(
+            (bl.x() + br.x()) / 2 * inv_scale,
+            (bl.y() + br.y()) / 2 * inv_scale,
+        ))
 
     def updateBoundingRect(self):
         """Compat shim — just refresh handle positions."""
@@ -439,6 +499,13 @@ class FlowShapeControl(QGraphicsItem):
         return False
 
     def show(self):
+        logger.debug("=== FlowShapeControl.show ===")
+        logger.debug("  blk_item=%s", self.blk_item)
+        if self.blk_item is not None:
+            logger.debug("  blk_item pos=%s has _left_points=%s count=%d",
+                         self.blk_item.pos(),
+                         hasattr(self.blk_item, '_left_points'),
+                         len(getattr(self.blk_item, '_left_points', [])))
         super().show()
         if self.need_rescale:
             self.updateScale(self.current_scale)
@@ -447,6 +514,7 @@ class FlowShapeControl(QGraphicsItem):
                    hasattr(self.blk_item, '_left_points') and \
                    bool(self.blk_item._left_points) and \
                    not getattr(self.blk_item, '_editing', False)
+        logger.debug("  has_flow=%s, handle count=%d", has_flow, len(self.handles))
         for h in self.handles:
             h.setVisible(has_flow)
         for h in self._resize_handles:

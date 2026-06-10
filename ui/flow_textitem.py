@@ -116,26 +116,47 @@ class FlowTextBlkItem(TextBlkItem):
         super().__init__(blk, idx, set_format, show_rect, *args, **kwargs)
         self.setAcceptHoverEvents(True)
 
+        logging.debug("=== FlowTextBlkItem.__init__ ===")
+        logging.debug("  idx=%d pos=%s", idx, self.pos())
+        logging.debug("  blk=%s", blk)
+
         # Initialize flow points from the block if already set
         if blk is not None:
+            logging.debug("  blk has left_points=%s right_points=%s",
+                          bool(blk.left_points), bool(blk.right_points))
             if blk.left_points and blk.right_points:
                 self._left_points = [QPointF(p[0], p[1]) for p in blk.left_points]
                 self._right_points = [QPointF(p[0], p[1]) for p in blk.right_points]
+                logging.debug("  restored from blk: left=%s right=%s",
+                              [(p.x(), p.y()) for p in self._left_points],
+                              [(p.x(), p.y()) for p in self._right_points])
             else:
-                self._init_points_from_rect(self.absBoundingRect(qrect=True))
+                abr = self.absBoundingRect(qrect=True)
+                logging.debug("  calling _init_points_from_rect with absBoundingRect=%s", abr)
+                self._init_points_from_rect(abr)
+        logging.debug("  after init: left=%s right=%s",
+                      [(p.x(), p.y()) for p in self._left_points],
+                      [(p.x(), p.y()) for p in self._right_points])
 
     # ── Control point initialisation ──────────────────────────
 
     def _init_points_from_rect(self, rect: QRectF):
         """Initialise DEFAULT_POINTS_PER_SIDE boundary points per side from a plain rectangle."""
+        logging.debug("=== _init_points_from_rect ===")
+        logging.debug("  rect=%s (x=%.1f y=%.1f w=%.1f h=%.1f)",
+                      rect, rect.x() if rect else 0, rect.y() if rect else 0,
+                      rect.width() if rect else 0, rect.height() if rect else 0)
         if rect is None or rect.width() < 1 or rect.height() < 1:
+            logging.debug("  rect too small, returning")
             return
-        # Convert to item-local coordinates
         pos = self.pos()
+        logging.debug("  self.pos()=%s", pos)
+        # Convert to item-local coordinates
         x0 = rect.x() - pos.x()
         x1 = rect.x() + rect.width() - pos.x()
         y0 = rect.y() - pos.y()
         y1 = rect.y() + rect.height() - pos.y()
+        logging.debug("  local: x0=%.1f x1=%.1f y0=%.1f y1=%.1f", x0, x1, y0, y1)
 
         self._left_points = []
         self._right_points = []
@@ -144,6 +165,9 @@ class FlowTextBlkItem(TextBlkItem):
             y = y0 + t * (y1 - y0)
             self._left_points.append(QPointF(x0, y))
             self._right_points.append(QPointF(x1, y))
+        logging.debug("  final left=%s right=%s",
+                      [(p.x(), p.y()) for p in self._left_points],
+                      [(p.x(), p.y()) for p in self._right_points])
 
     # ── Layout helpers ────────────────────────────────────────
 
