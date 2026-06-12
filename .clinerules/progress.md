@@ -16,6 +16,9 @@
 - **_display_rect guard clause**: prevents zero-width/height crash when control points form a degenerate rectangle (regression fix)
 - **Font auto-grow**: iterative font increase when text fills <70% of block height, up to ~90% fill (Feature)
 - **Border suppress**: red dashed border suppressed when active flow handles visible (Bug 3 fixed)
+- **NameError fix**: TEXTRECT_SELECTED_COLOR/SHOW_COLOR imported in flow_textitem.py (Bug 5)
+- **Global font size guard**: _auto_grow_enabled flag disables grow when global font size active (Bug 6)
+- **16 unit tests**: tests/ui/test_flow_textitem.py covering init, boundary, shrink, grow, symmetry, paint
 
 ## What's Left to Build
 - [x] Initial FlowTextBlkItem implementation with control points
@@ -49,3 +52,6 @@ All known issues (vertical mode alignment, text clipping, _display_rect regressi
 9. Changed `_auto_shrink_font()` to reset layout constraints after setRelFontSize (Bug 4 fix)
 10. Added `_auto_grow_font()` — symmetric counterpart to _auto_shrink_font (Feature)
 11. Added `_draw_accessories()` override — suppress border when under_ctrl (Bug 3 fix)
+12. Added `_auto_grow_enabled` flag — disabled when global font size setting active (Bug 6)
+13. Imported TEXTRECT_SHOW_COLOR/TEXTRECT_SELECTED_COLOR — fix NameError in _draw_accessories (Bug 5)
+14. Added 16 pytest unit tests in tests/ui/test_flow_textitem.py

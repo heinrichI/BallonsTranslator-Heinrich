@@ -108,6 +108,34 @@ ui/scene_textlayout.py (изменения в HorizontalTextDocumentLayout, 3 м
     Использует те же меры с reset available_height после setRelFontSize.
   - **Статус**: Исправлено
 
+2026-06-12 — Bug 5: NameError — TEXTRECT_SELECTED_COLOR not defined
+  - **Проблема**: При вызове `_draw_accessories()` падало с NameError.
+  - **Причина**: `_draw_accessories()` использует константы `TEXTRECT_SELECTED_COLOR`
+    и `TEXTRECT_SHOW_COLOR`, определённые в `textitem.py`, но они не были
+    импортированы в `flow_textitem.py`.
+  - **Исправление**: Добавлен `from .textitem import TEXTRECT_SHOW_COLOR, TEXTRECT_SELECTED_COLOR`
+  - **Статус**: Исправлено
+
+2026-06-12 — Bug 6: Global font size отключает auto-grow
+  - **Проблема**: Когда в настройках Typesettings/FontSize стоит "global setting",
+    auto-grow всё равно увеличивал шрифт, игнорируя глобальный размер.
+  - **Причина**: Не было механизма отключения auto-grow при использовании глобального шрифта.
+  - **Исправление**: Добавлен флаг `_auto_grow_enabled`. В `_update_flow_layout()` grow
+    вызывается только если `self._auto_grow_enabled == True`. Флаг выставляется снаружи
+    (в `scenetext_manager.py`) когда `pcfg.let_fntsize_flag != 0`.
+  - **Статус**: Исправлено
+
+2026-06-12 — Тесты: `tests/ui/test_flow_textitem.py`
+  - Добавлены 16 юнит-тестов для FlowTextBlkItem:
+    * 3 теста на инициализацию (создание точек, текст, вертикальный режим)
+    * 3 теста на boundary layout (сужение/расширение блока → изменение числа строк)
+    * 3 теста на auto-shrink (уменьшение шрифта при overflow, текст влезает в блок)
+    * 3 теста на auto-grow (увеличение при пустом месте, не растёт когда заполнено, флаг)
+    * 2 теста на симметрию shrink+grow (fill ratio 50-105%)
+    * 2 теста на paint (не падает с NameError)
+  - Запуск: `$env:PYTHONPATH = "путь_к_проекту"; python -m pytest tests/ui/test_flow_textitem.py -v`
+  - **Статус**: 16/16 passed
+
 АНАЛИЗ: ПОЧЕМУ АВТОРАЗМЕР ЧИНИЛСЯ ТАК ДОЛГО
 ────────────────────────────────────────────────────────────────────────────────
 

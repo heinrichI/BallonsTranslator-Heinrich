@@ -26,6 +26,7 @@ from utils.textblock import TextBlock
 from utils.fontformat import FontFormat
 from .textitem import TextBlkItem
 from .scene_textlayout import HorizontalTextDocumentLayout
+from .textitem import TEXTRECT_SHOW_COLOR, TEXTRECT_SELECTED_COLOR
 
 
 # ── Constants ────────────────────────────────────────────────
@@ -115,6 +116,7 @@ class FlowTextBlkItem(TextBlkItem):
         self._hover: bool = False
         self.draw_boundaries: bool = True
         self._updating_flow: bool = False  # guard flag to prevent _display_rect changes during flow updates
+        self._auto_grow_enabled: bool = True  # set to False when global font size is used
 
         super().__init__(blk, idx, set_format, show_rect, *args, **kwargs)
         self.setAcceptHoverEvents(True)
@@ -456,7 +458,8 @@ class FlowTextBlkItem(TextBlkItem):
                 # set_boundary_functions calls reLayout() internally — no second pass needed.
                 # First shrink if text overflows, then grow if there's room.
                 font_changed = self._auto_shrink_font()
-                font_changed = self._auto_grow_font() or font_changed
+                if self._auto_grow_enabled:
+                    font_changed = self._auto_grow_font() or font_changed
                 if font_changed:
                     # Notify the text panel so it refreshes the font-size display.
                     try:

@@ -9,6 +9,9 @@ FlowTextBlkItem is feature-complete. All known issues fixed: vertical mode, text
 - **Bug 3 — red dashed border changes size with top rhombus**: Added `_draw_accessories()` override that suppresses border when `under_ctrl=True`. Flow boundary curves already indicate text area.
 - **Bug 4 — auto-shrink didn't work**: Fixed by resetting `layout.available_height` and `layout.max_height` to target values after `setRelFontSize()`, then forcing `layout.reLayout()` before reading `shrink_height`. Root cause: `SceneTextLayout.reLayout()` expands `available_height` on overflow.
 - **Feature — auto-grow font to fill block**: Added `_auto_grow_font()` — called after `_auto_shrink_font()` in `_update_flow_layout()`. If text fills <70% of block height, font is iteratively increased to ~90% fill.
+- **Bug 5 — NameError in _draw_accessories**: Added `from .textitem import TEXTRECT_SHOW_COLOR, TEXTRECT_SELECTED_COLOR` to fix crash on paint.
+- **Bug 6 — global font size disables grow**: Added `_auto_grow_enabled` flag, checked in `_update_flow_layout()`. Set False when global font size is used.
+- **Tests — 16 unit tests**: `tests/ui/test_flow_textitem.py` — init, boundary layout, auto-shrink, auto-grow, symmetry, paint (16/16 passed).
 - **bug 8e01f1b5**: QAction parent fix for context menu (previous)
 - **bug — handle positioning**: inv_scale compensation for baseLayer transform (previous)
 
