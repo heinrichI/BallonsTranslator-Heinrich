@@ -353,6 +353,24 @@ class VerticalTextDocumentLayout(SceneTextLayout):
 
         self.per_char_records = []
 
+        # Independent left margin for flow text blocks.
+        # When > 0, used instead of docMargin for the LEFT boundary check
+        # (docMargin still controls TOP boundary). This allows independent
+        # control of left and top edges in vertical mode.
+        self._vertical_left_margin = -1.0
+
+    def set_vertical_left_margin(self, value: float):
+        """Set independent left margin for vertical text layout.
+        When set (>0), this value is used as the left boundary instead of docMargin.
+        This allows the left edge to be controlled independently from the top edge."""
+        self._vertical_left_margin = value
+
+    def _get_left_margin(self):
+        """Get the effective left margin: _vertical_left_margin if set, else docMargin."""
+        if self._vertical_left_margin > 0:
+            return self._vertical_left_margin
+        return self.document().documentMargin()
+
     @property
     def align_right(self):
         return False
@@ -375,8 +393,9 @@ class VerticalTextDocumentLayout(SceneTextLayout):
 
         enlarged = False
         x_shift = 0
-        if self.layout_left < doc_margin:
-            x_shift  = doc_margin - self.layout_left
+        left_margin = self._get_left_margin()
+        if self.layout_left < left_margin:
+            x_shift  = left_margin - self.layout_left
             self.max_width += x_shift
             self.available_width = self.max_width - 2*doc_margin
             enlarged = True
@@ -861,7 +880,8 @@ class VerticalTextDocumentLayout(SceneTextLayout):
         tl.endLayout()
             
         self.layout_left = x_offset - self.draw_shifted
-        self.shrink_width = max(self.max_width - self.layout_left - doc_margin + 0.01, self.shrink_width)
+        left_margin = self._get_left_margin()
+        self.shrink_width = max(self.max_width - self.layout_left - left_margin + 0.01, self.shrink_width)
         self.shrink_height = max(shrink_height + 0.01 - doc_margin, self.shrink_height)
         self.x_offset_lst.append(x_offset)
         self.y_offset_lst.append(blk_char_yoffset)
@@ -885,11 +905,22 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         self.need_ideal_height = True
         self._line_left_offsets: dict = {}   # line_idx -> left x offset
         self._line_right_offsets: dict = {}  # line_idx -> right x boundary
+        # Callable(y) -> x for flow-text boundary lookup (takes priority over dicts)
+        self._left_boundary_fn = None
+        self._right_boundary_fn = None
 
     def set_line_x_offsets(self, left_offsets: dict, right_offsets: dict = None):
         """Store per-line left offsets and right boundaries, trigger relayout."""
         self._line_left_offsets = left_offsets if left_offsets is not None else {}
         self._line_right_offsets = right_offsets if right_offsets is not None else {}
+        self.reLayout()
+
+    def set_boundary_functions(self, left_fn=None, right_fn=None):
+        """Set callable y->x boundary functions for flow layout. Triggers reLayout.
+        These take priority over the per-line-index dicts and are immune to
+        line-count changes between passes."""
+        self._left_boundary_fn = left_fn
+        self._right_boundary_fn = right_fn
         self.reLayout()
 
     def reLayout(self):
@@ -992,16 +1023,31 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             line = tl.createLine()
             if not line.isValid():
                 break
-            # Calculate dynamic line width based on right boundary
+            # Calculate dynamic line width based on boundary functions
             line_y = y_offset
-            line_width = self.available_width
-            
-            # Apply right boundary offset if available for this line
-            if line_idx in self._line_right_offsets:
+
+            # Determine left x position
+            if self._left_boundary_fn is not None:
+                x_pos = self._left_boundary_fn(line_y)
+            else:
+                x_pos = doc_margin + self._line_left_offsets.get(line_idx, 0)
+
+            # Determine right boundary and line width
+            if self._right_boundary_fn is not None:
+                right_x = self._right_boundary_fn(line_y)
+                if right_x > x_pos:
+                    line_width = max(right_x - x_pos, 10)
+                else:
+                    line_width = 10
+            elif line_idx in self._line_right_offsets:
                 right_x = self._line_right_offsets[line_idx]
-                if right_x > doc_margin:
-                    line_width = max(right_x - doc_margin, 10)
-            
+                if right_x > x_pos:
+                    line_width = max(right_x - x_pos, 10)
+                else:
+                    line_width = 10
+            else:
+                line_width = max(self.available_width - (x_pos - doc_margin), 10)
+
             line.setLineWidth(line_width)
             nchar = line.textLength()
 
@@ -1027,7 +1073,6 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             if idea_height == -1:
                 idea_height = block_height
                 
-            x_pos = doc_margin + self._line_left_offsets.get(line_idx, 0)
             line.setPosition(QPointF(x_pos, y_offset + dy))
             tw = line.naturalTextWidth()
             shrink_width = max(tw, shrink_width)

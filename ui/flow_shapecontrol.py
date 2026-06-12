@@ -107,6 +107,87 @@ class FlowControlHandle(QGraphicsEllipseItem):
             self.ctrl.rebuildHandles()
 
 
+class FlowHResizeHandle(QGraphicsItem):
+    """Diamond-shaped handle for left/right boundary resizing (used in vertical mode)."""
+
+    def __init__(self, parent: 'FlowShapeControl', edge: str):
+        super().__init__(parent)
+        self.ctrl: FlowShapeControl = parent
+        self.edge = edge  # 'left' or 'right'
+        self._size = RESIZE_HANDLE_SIZE
+        self._dragging = False
+        self._last_scene_x = 0.0
+
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+
+    def setSize(self, s: float):
+        self._size = s
+        self.prepareGeometryChange()
+
+    def boundingRect(self) -> QRectF:
+        s = self._size
+        return QRectF(-s, -s, s * 2, s * 2)
+
+    def paint(self, painter: QPainter, option, widget=None):
+        s = self._size * 0.8
+        diamond = QPolygonF([
+            QPointF(0, -s),
+            QPointF(s, 0),
+            QPointF(0, s),
+            QPointF(-s, 0),
+        ])
+        painter.setBrush(QBrush(QColor(100, 200, 255, 220)))
+        painter.setPen(QPen(QColor(0, 100, 180), 1.5))
+        painter.drawPolygon(diamond)
+
+    def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._last_scene_x = event.scenePos().x()
+        event.accept()
+
+    def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
+        if not self._dragging:
+            return
+        blk_item = self.ctrl.blk_item
+        if blk_item is None:
+            return
+
+        scene_x = event.scenePos().x()
+        dx_scene = scene_x - self._last_scene_x
+        self._last_scene_x = scene_x
+
+        p0 = blk_item.mapFromScene(QPointF(0, 0))
+        p1 = blk_item.mapFromScene(QPointF(dx_scene, 0))
+        dx_local = p1.x() - p0.x()
+
+        left_pts = blk_item._left_points
+        right_pts = blk_item._right_points
+
+        if self.edge == 'left':
+            # Move all left boundary points horizontally
+            for i in range(len(left_pts)):
+                left_pts[i] = QPointF(left_pts[i].x() + dx_local, left_pts[i].y())
+        else:  # right
+            # Move all right boundary points horizontally
+            for i in range(len(right_pts)):
+                right_pts[i] = QPointF(right_pts[i].x() + dx_local, right_pts[i].y())
+
+        # _update_flow_layout() now handles both Horizontal and Vertical layouts
+        blk_item._update_flow_layout()
+        self.ctrl.updateHandlePositions()
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        self._dragging = False
+        event.accept()
+
+
 class FlowResizeHandle(QGraphicsItem):
     """Diamond-shaped handle for top/bottom boundary resizing."""
 
@@ -181,6 +262,7 @@ class FlowResizeHandle(QGraphicsItem):
             left_pts[mid] = QPointF(left_pts[mid].x(), left_pts[mid].y() + dy_local * 0.5)
             right_pts[mid] = QPointF(right_pts[mid].x(), right_pts[mid].y() + dy_local * 0.5)
 
+        # _update_flow_layout() now handles both Horizontal and Vertical layouts
         blk_item._update_flow_layout()
         self.ctrl.updateHandlePositions()
         event.accept()
@@ -214,14 +296,21 @@ class FlowShapeControl(QGraphicsItem):
         for idx in range(DEFAULT_POINTS_PER_SIDE):
             self.handles.append(FlowControlHandle(self, 'right', idx))
 
-        # 2 resize handles: top and bottom
+        # 2 resize handles: top and bottom (shown in horizontal mode)
         self.top_handle = FlowResizeHandle(self, 'top')
         self.bottom_handle = FlowResizeHandle(self, 'bottom')
         self._resize_handles = [self.top_handle, self.bottom_handle]
 
+        # 2 horizontal resize handles: left and right (shown in vertical mode)
+        self.left_handle = FlowHResizeHandle(self, 'left')
+        self.right_handle = FlowHResizeHandle(self, 'right')
+        self._h_resize_handles = [self.left_handle, self.right_handle]
+
         for h in self.handles:
             h.setVisible(False)
         for h in self._resize_handles:
+            h.setVisible(False)
+        for h in self._h_resize_handles:
             h.setVisible(False)
 
         # Compatibility stubs expected by canvas / textedit_commands
@@ -243,6 +332,23 @@ class FlowShapeControl(QGraphicsItem):
 
     # ── Public API (compatible with TextBlkShapeControl) ──────
 
+    def _is_vertical(self) -> bool:
+        """Check if the associated blk_item is in vertical text mode."""
+        if self.blk_item is None:
+            return False
+        ffmt = getattr(self.blk_item, 'fontformat', None)
+        return ffmt is not None and bool(ffmt.vertical)
+
+    def _flow_handles_visible(self) -> bool:
+        """Return True when flow handles should be visible (not vertical, not editing)."""
+        if self.blk_item is None:
+            return False
+        if self._is_vertical():
+            return False
+        if getattr(self.blk_item, '_editing', False):
+            return False
+        return hasattr(self.blk_item, '_left_points') and bool(self.blk_item._left_points)
+
     def setBlkItem(self, blk_item):
         logger.debug("=== setBlkItem called ===")
         logger.debug("  new blk_item=%s (type=%s)", blk_item, type(blk_item).__name__ if blk_item else "None")
@@ -250,7 +356,23 @@ class FlowShapeControl(QGraphicsItem):
             logger.debug("  new blk_item pos=%s boundingRect=%s",
                          blk_item.pos(), blk_item.boundingRect())
         if self.blk_item == blk_item and self.isVisible():
-            logger.debug("  same blk_item, already visible — skipping")
+            # Same item — just refresh handle positions and visibility
+            # (state may have changed e.g. vertical/horizontal toggle)
+            logger.debug("  same blk_item — refreshing handles")
+            flow_visible = self._flow_handles_visible()
+            if flow_visible:
+                self.rebuildHandles()
+            else:
+                for h in self.handles:
+                    h.setVisible(False)
+            has_points = hasattr(blk_item, '_left_points') and bool(blk_item._left_points)
+            for h in self._resize_handles:
+                h.setVisible(has_points)
+            for h in self._h_resize_handles:
+                h.setVisible(has_points)
+            if has_points:
+                self.updateHandlePositions()
+            self.show()
             return
         if self.blk_item is not None:
             logger.debug("  old blk_item=%s type=%s pos=%s",
@@ -267,16 +389,18 @@ class FlowShapeControl(QGraphicsItem):
             return
         blk_item.under_ctrl = True
         blk_item.update()
-        has_flow = hasattr(blk_item, '_left_points') and bool(blk_item._left_points)
-        if has_flow:
+        flow_visible = self._flow_handles_visible()
+        if flow_visible:
             self.rebuildHandles()
-            for h in self._resize_handles:
-                h.setVisible(True)
         else:
             for h in self.handles:
                 h.setVisible(False)
-            for h in self._resize_handles:
-                h.setVisible(False)
+        # Resize handles: all 4 handles visible in both modes
+        has_points = hasattr(blk_item, '_left_points') and bool(blk_item._left_points)
+        for h in self._resize_handles:
+            h.setVisible(has_points)
+        for h in self._h_resize_handles:
+            h.setVisible(has_points)
         self.show()
 
     def rebuildHandles(self):
@@ -332,57 +456,50 @@ class FlowShapeControl(QGraphicsItem):
         super().setPos(QPointF(0, 0))
         logger.debug("  FlowShapeControl pos after reset=%s", super().pos())
 
-        # Account for baseLayer scale: FlowShapeControl is child of baseLayer,
-        # which may have a scale != 1.0.  handle.setPos() sets position in
-        # parent (FlowShapeControl) coordinates, but scene_pos is in scene
-        # coordinates that already include baseLayer's scale transform.
-        # Dividing by baseLayer's scale cancels the double-scaling.
-        s = 1.0
-        tl = self.topLevelItem()
-        if tl is not None:
-            try:
-                s = tl.scale()
-                if s == 0.0:
-                    s = 1.0
-            except Exception:
-                s = 1.0
-        inv_scale = 1.0 / s
+        # Convert blk_item-local coordinates to parent (baseLayer) coordinates
+        # using mapToItem which handles ALL parent transforms (scale, offset, rotation).
+        # FlowShapeControl and blk_item are both children of baseLayer, so
+        # mapToItem(parentItem(), pt) gives us the correct position for child items.
+        parent_item = self.parentItem()
 
         all_points = blk_item._left_points + blk_item._right_points
-        logger.debug("  total handle count=%d, total points=%d, baseLayer scale=%.4f, inv=%.4f",
-                     len(self.handles), len(all_points), s, inv_scale)
+        logger.debug("  total handle count=%d, total points=%d",
+                     len(self.handles), len(all_points))
         for handle, pt in zip(self.handles, all_points):
-            scene_pos = blk_item.mapToScene(pt)
-            # Cancel double scaling from baseLayer transform
-            parent_pos = QPointF(scene_pos.x() * inv_scale, scene_pos.y() * inv_scale)
-            logger.debug("    handle side=%s idx=%d: local=(%.1f,%.1f) -> scene=(%.1f,%.1f) -> parent=(%.1f,%.1f)",
+            parent_pos = blk_item.mapToItem(parent_item, pt)
+            logger.debug("    handle side=%s idx=%d: local=(%.1f,%.1f) -> parent=(%.1f,%.1f)",
                          handle.side, handle.point_idx,
                          pt.x(), pt.y(),
-                         scene_pos.x(), scene_pos.y(),
                          parent_pos.x(), parent_pos.y())
             handle.setPos(parent_pos)
-            logger.debug(
-                'updateHandlePositions: side=%s idx=%d | item_local=(%.1f,%.1f) -> scene=(%.1f,%.1f)',
-                handle.side, handle.point_idx,
-                pt.x(), pt.y(),
-                scene_pos.x(), scene_pos.y(),
-            )
 
-        # Top handle: midpoint of top-left and top-right (with scale compensation)
-        tl = blk_item.mapToScene(blk_item._left_points[0])
-        tr = blk_item.mapToScene(blk_item._right_points[0])
+        # Top handle: midpoint of top-left and top-right
+        tl = blk_item.mapToItem(parent_item, blk_item._left_points[0])
+        tr = blk_item.mapToItem(parent_item, blk_item._right_points[0])
         self.top_handle.setPos(QPointF(
-            (tl.x() + tr.x()) / 2 * inv_scale,
-            (tl.y() + tr.y()) / 2 * inv_scale,
+            (tl.x() + tr.x()) / 2,
+            (tl.y() + tr.y()) / 2,
         ))
 
-        # Bottom handle: midpoint of bottom-left and bottom-right (with scale compensation)
-        bl = blk_item.mapToScene(blk_item._left_points[-1])
-        br = blk_item.mapToScene(blk_item._right_points[-1])
+        # Bottom handle: midpoint of bottom-left and bottom-right
+        bl = blk_item.mapToItem(parent_item, blk_item._left_points[-1])
+        br = blk_item.mapToItem(parent_item, blk_item._right_points[-1])
         self.bottom_handle.setPos(QPointF(
-            (bl.x() + br.x()) / 2 * inv_scale,
-            (bl.y() + br.y()) / 2 * inv_scale,
+            (bl.x() + br.x()) / 2,
+            (bl.y() + br.y()) / 2,
         ))
+
+        # Left handle: midpoint of all left points (vertical center, left edge)
+        left_pts_parent = [blk_item.mapToItem(parent_item, p) for p in blk_item._left_points]
+        lx = sum(p.x() for p in left_pts_parent) / len(left_pts_parent)
+        ly = sum(p.y() for p in left_pts_parent) / len(left_pts_parent)
+        self.left_handle.setPos(QPointF(lx, ly))
+
+        # Right handle: midpoint of all right points (vertical center, right edge)
+        right_pts_parent = [blk_item.mapToItem(parent_item, p) for p in blk_item._right_points]
+        rx = sum(p.x() for p in right_pts_parent) / len(right_pts_parent)
+        ry = sum(p.y() for p in right_pts_parent) / len(right_pts_parent)
+        self.right_handle.setPos(QPointF(rx, ry))
 
     def updateBoundingRect(self):
         """Compat shim — just refresh handle positions."""
@@ -404,6 +521,8 @@ class FlowShapeControl(QGraphicsItem):
         s = RESIZE_HANDLE_SIZE / scale
         for h in self._resize_handles:
             h.setSize(s)
+        for h in self._h_resize_handles:
+            h.setSize(s)
 
     def startEditing(self):
         """Hide flow handles when entering text edit mode."""
@@ -411,29 +530,40 @@ class FlowShapeControl(QGraphicsItem):
             h.setVisible(False)
         for h in self._resize_handles:
             h.setVisible(False)
+        for h in self._h_resize_handles:
+            h.setVisible(False)
 
     def endEditing(self):
         """Show flow handles again when exiting text edit mode."""
-        has_flow = self.blk_item is not None and \
-                   hasattr(self.blk_item, '_left_points') and \
-                   bool(self.blk_item._left_points)
-        visible = has_flow and not self.blk_item.isEditing()
+        visible = self._flow_handles_visible() and not self.blk_item.isEditing()
+        has_points = self.blk_item is not None and \
+                     hasattr(self.blk_item, '_left_points') and \
+                     bool(self.blk_item._left_points)
         for h in self.handles:
             h.setVisible(visible)
         for h in self._resize_handles:
-            h.setVisible(visible)
+            h.setVisible(has_points)
+        for h in self._h_resize_handles:
+            h.setVisible(has_points)
 
     def hideControls(self):
         for h in self.handles:
             h.hide()
         for h in self._resize_handles:
             h.hide()
+        for h in self._h_resize_handles:
+            h.hide()
 
     def showControls(self):
+        has_points = self.blk_item is not None and \
+                     hasattr(self.blk_item, '_left_points') and \
+                     bool(self.blk_item._left_points)
         for h in self.handles:
-            h.show()
+            h.setVisible(not self._is_vertical())
         for h in self._resize_handles:
-            h.show()
+            h.setVisible(has_points)
+        for h in self._h_resize_handles:
+            h.setVisible(has_points)
 
     def setAngle(self, angle: float):
         pass
@@ -510,15 +640,19 @@ class FlowShapeControl(QGraphicsItem):
         if self.need_rescale:
             self.updateScale(self.current_scale)
             self.need_rescale = False
-        has_flow = self.blk_item is not None and \
-                   hasattr(self.blk_item, '_left_points') and \
-                   bool(self.blk_item._left_points) and \
-                   not getattr(self.blk_item, '_editing', False)
-        logger.debug("  has_flow=%s, handle count=%d", has_flow, len(self.handles))
+        flow_visible = self._flow_handles_visible()
+        has_points = self.blk_item is not None and \
+                     hasattr(self.blk_item, '_left_points') and \
+                     bool(self.blk_item._left_points)
+        logger.debug("  flow_visible=%s, handle count=%d", flow_visible, len(self.handles))
         for h in self.handles:
-            h.setVisible(has_flow)
+            h.setVisible(flow_visible)
         for h in self._resize_handles:
-            h.setVisible(has_flow)
+            h.setVisible(has_points)
+        for h in self._h_resize_handles:
+            h.setVisible(has_points)
+        if has_points:
+            self.updateHandlePositions()
         self.setZValue(1)
 
     def hide(self):
@@ -526,6 +660,8 @@ class FlowShapeControl(QGraphicsItem):
         for h in self.handles:
             h.setVisible(False)
         for h in self._resize_handles:
+            h.setVisible(False)
+        for h in self._h_resize_handles:
             h.setVisible(False)
 
     def ctrlblockPressed(self):

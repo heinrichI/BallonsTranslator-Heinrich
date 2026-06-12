@@ -56,6 +56,28 @@
   * Аналогично исправлены `top_handle` и `bottom_handle`.
 - **Статус**: Исправлено
 
+### 2026-06-10 — Bug 1: Вертикальный режим — текст сдвигается к правому краю
+- **Проблема**: В вертикальном режиме весь текст FlowTextBlkItem отображается у правого края красного bounding box, игнорируя flow-точки.
+- **Причина**: `_get_line_x_offsets()` возвращает пустые словари для `VerticalTextDocumentLayout`. Layout использует `block_ideal_width` (макс. ширина символа) между doc margins, что сдвигает весь текст к правому краю.
+- **Исправление**: `setVertical()` в `FlowTextBlkItem` теперь сбрасывает flow-точки в прямоугольник из `absBoundingRect()` перед вызовом `super().setVertical()`. При переключении обратно на горизонтальный режим — тоже сбрасывает.
+- **Изменённые файлы**:
+  * `ui/flow_textitem.py` — новый override `setVertical(vertical)`
+  * `ui/flow_shapecontrol.py` — `_is_vertical()`, `_flow_handles_visible()` скрывают flow-handles в вертикальном режиме
+- **Статус**: Исправлено
+
+### 2026-06-10 — Bug 2: Текст обрезается вместо уменьшения шрифта
+- **Проблема**: Если bounding box слишком мал, текст обрезается за его пределами, вместо того чтобы шрифт уменьшился.
+- **Причина**: В `HorizontalTextDocumentLayout.reLayout()` нет механизма уменьшения шрифта при превышении `available_height`.
+- **Исправление**: Добавлен `_auto_shrink_font()` в `FlowTextBlkItem`, вызываемый из `_update_flow_layout()`. Алгоритм: после layout, если `shrink_height > available_height`, итеративно уменьшает шрифт на `FONT_SHRINK_FACTOR` (0.9) с запасом 5%, пока текст не поместится или не достигнет `MIN_FONT_SIZE_PT` (5pt). Максимум 20 итераций.
+- **Изменённые файлы**:
+  * `ui/flow_textitem.py` — новые константы `MIN_FONT_SIZE_PT`, `FONT_SHRINK_FACTOR`, метод `_auto_shrink_font()`
+- **Статус**: Исправлено
+
+## Ключевые особенности (дополнение)
+10. `_auto_shrink_font()` — итеративное уменьшение шрифта при переполнении
+11. `setVertical()` — сброс flow-точек в прямоугольник при смене ориентации
+12. `_is_vertical()` / `_flow_handles_visible()` — скрытие flow-handles в вертикальном режиме
+
 ## Не тронуты (duck-typing / hasattr)
 scenetext_manager.py, textedit_commands.py, texteditshapecontrol.py, textitem.py, utils/textblock.py
 

@@ -32,6 +32,8 @@ from .scene_textlayout import HorizontalTextDocumentLayout
 
 DEFAULT_POINTS_PER_SIDE: int = 3  # количество точек при инициализации из прямоугольника
 MIN_POINTS_PER_SIDE: int = 3      # минимальное количество точек для кривой Безье и удаления
+MIN_FONT_SIZE_PT: float = 5.0     # минимальный размер шрифта для auto-shrink
+FONT_SHRINK_FACTOR: float = 0.9   # мультипликативный коэффициент за итерацию auto-shrink
 
 
 # ─────────────────────────────────────────────────────────────
@@ -112,6 +114,7 @@ class FlowTextBlkItem(TextBlkItem):
         self._right_points: List[QPointF] = []
         self._hover: bool = False
         self.draw_boundaries: bool = True
+        self._updating_flow: bool = False  # guard flag to prevent _display_rect changes during flow updates
 
         super().__init__(blk, idx, set_format, show_rect, *args, **kwargs)
         self.setAcceptHoverEvents(True)
@@ -131,22 +134,47 @@ class FlowTextBlkItem(TextBlkItem):
                               [(p.x(), p.y()) for p in self._left_points],
                               [(p.x(), p.y()) for p in self._right_points])
             else:
-                abr = self.absBoundingRect(qrect=True)
-                logging.debug("  calling _init_points_from_rect with absBoundingRect=%s", abr)
+                # Use _display_rect (properly sized by setRect) to avoid
+                # absBoundingRect returning near-zero during early init.
+                dr = self._display_rect
+                pos = self.pos()
+                abr = QRectF(pos.x(), pos.y(), dr.width(), dr.height())
+                logging.debug("  calling _init_points_from_rect with displayRect-based=%s", abr)
                 self._init_points_from_rect(abr)
         logging.debug("  after init: left=%s right=%s",
                       [(p.x(), p.y()) for p in self._left_points],
                       [(p.x(), p.y()) for p in self._right_points])
 
+    # ── Text change override ──────────────────────────────────
+
+    def setPlainText(self, text: str = ''):
+        """Override to ensure flow layout boundaries are applied after text changes.
+        Does NOT call _auto_shrink_font here — that is deferred to set_size()
+        where layout dimensions are known and layout_textblk binary search works."""
+        super().setPlainText(text)
+        if self._left_points and self._right_points:
+            # Only reapply boundary functions (no auto-shrink since layout size unknown yet).
+            if isinstance(self.layout, HorizontalTextDocumentLayout):
+                lp = self._left_points[:]
+                rp = self._right_points[:]
+                self.layout.set_boundary_functions(
+                    left_fn=lambda y, _lp=lp: interpolate_boundary(_lp, y),
+                    right_fn=lambda y, _rp=rp: interpolate_boundary(_rp, y),
+                )
+                self.repaint_background()
+                self.update()
+
     # ── Control point initialisation ──────────────────────────
 
     def _init_points_from_rect(self, rect: QRectF):
-        """Initialise DEFAULT_POINTS_PER_SIDE boundary points per side from a plain rectangle."""
+        """Initialise DEFAULT_POINTS_PER_SIDE boundary points per side from a plain rectangle.
+        rect is in scene coordinates (includes pos offset).  Skips if rect is too small
+        (degenerate or not yet fully initialised)."""
         logging.debug("=== _init_points_from_rect ===")
         logging.debug("  rect=%s (x=%.1f y=%.1f w=%.1f h=%.1f)",
                       rect, rect.x() if rect else 0, rect.y() if rect else 0,
                       rect.width() if rect else 0, rect.height() if rect else 0)
-        if rect is None or rect.width() < 1 or rect.height() < 1:
+        if rect is None or rect.width() < 10 or rect.height() < 10:
             logging.debug("  rect too small, returning")
             return
         pos = self.pos()
@@ -209,19 +237,305 @@ class FlowTextBlkItem(TextBlkItem):
 
         return left_offsets, right_boundaries
 
+    def _auto_shrink_font(self) -> bool:
+        """
+        Iteratively reduce font size until text fits in available space
+        or reaches MIN_FONT_SIZE_PT.  Returns True if shrink was applied.
+        Only works for HorizontalTextDocumentLayout — vertical layout
+        uses different height metrics that this algorithm doesn't handle.
+
+        Uses the control-points y-range as the target height, NOT
+        layout.available_height, because the layout may have already
+        expanded its max height to accommodate overflowing text.
+
+        CRITICAL: Before each shrink iteration, we reset layout.available_height
+        and layout.max_height back to target values. This is necessary because
+        reLayout() in SceneTextLayout expands available_height when text overflows
+        (line: self.available_height = new_height). Without resetting, subsequent
+        shrink iterations would use the expanded height as the constraint, making
+        shrink_height always appear to fit and the loop would exit after one
+        iteration without actually achieving the target.
+        """
+        layout = self.layout
+        if layout is None:
+            return False
+        # Only shrink in horizontal mode — vertical layout has different metrics
+        if not isinstance(layout, HorizontalTextDocumentLayout):
+            return False
+
+        min_font = layout.max_font_size()
+        if min_font <= MIN_FONT_SIZE_PT:
+            return False
+
+        # Compute target height from control points (not from layout.available_height
+        # which may have grown after the layout expanded to fit overflowing text).
+        if self._left_points and self._right_points:
+            all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
+            target_height = max(all_ys) - min(all_ys)
+        else:
+            target_height = layout.available_height
+        if target_height < 10:
+            return False
+
+        text_extent = layout.shrink_height
+        if text_extent <= target_height:
+            return False
+
+        applied = False
+        doc_margin = self.document().documentMargin()
+        for _ in range(20):
+            # CRITICAL: setRelFontSize() calls reLayoutEverything() which calls
+            # reLayout() which EXPANDS available_height when text overflows
+            # (line: self.available_height = new_height). After the first shrink,
+            # the expanded constraint makes shrink_height always <= available_height.
+            #
+            # Fix: after setRelFontSize, reset constraints and force a fresh
+            # reLayout to compute shrink_height with the CORRECT target constraint.
+            # This is done at the end of the loop so it takes effect before the
+            # next iteration's shrink_height read.
+            if applied:
+                set_rel_font_called = True
+                layout.available_height = target_height
+                layout.max_height = target_height + doc_margin * 2
+                layout.reLayout()
+            else:
+                set_rel_font_called = False
+
+            text_extent = layout.shrink_height
+            if text_extent <= target_height:
+                break
+
+            # compute shrink factor: 5% safety margin, cap at 0.9
+            factor = min(FONT_SHRINK_FACTOR, (target_height / text_extent) * 0.95)
+            if factor >= 1.0:
+                break
+
+            self.setRelFontSize(factor)
+            applied = True
+
+            # check min size after shrink
+            new_min = layout.max_font_size()
+            if new_min <= MIN_FONT_SIZE_PT:
+                break
+
+        if applied:
+            # Sync fontformat.size so the font-size panel reflects the new size.
+            # Read the actual size from the first text fragment in the document.
+            try:
+                block = self.document().firstBlock()
+                it = block.begin()
+                if not it.atEnd():
+                    actual_size = it.fragment().charFormat().fontPointSize()
+                    if actual_size > 0:
+                        if self.fontformat is not None:
+                            self.fontformat.size = actual_size
+                        if self.blk is not None and self.blk.fontformat is not None:
+                            self.blk.fontformat.size = actual_size
+            except Exception:
+                pass
+
+        return applied
+
+    def _auto_grow_font(self) -> bool:
+        """
+        Iteratively increase font size until text fills the available space
+        or reaches a reasonable maximum.  Inverse of _auto_shrink_font.
+
+        If shrink_height is significantly less than target_height (text is
+        too small for the box), increase font size until text fills ~90%
+        of the available height.
+
+        Called AFTER _auto_shrink_font() in _update_flow_layout() so that
+        overflow is handled first, then growth is applied if there's room.
+        """
+        layout = self.layout
+        if layout is None:
+            return False
+        if not isinstance(layout, HorizontalTextDocumentLayout):
+            return False
+
+        # Target height from control points
+        if self._left_points and self._right_points:
+            all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
+            target_height = max(all_ys) - min(all_ys)
+        else:
+            target_height = layout.available_height
+        if target_height < 10:
+            return False
+
+        text_extent = layout.shrink_height
+        # Only grow if text fills less than 70% of available height
+        if text_extent >= target_height * 0.70:
+            return False
+
+        applied = False
+        doc_margin = self.document().documentMargin()
+        for _ in range(20):
+            # Reset constraints before each iteration (same as shrink)
+            layout.available_height = target_height
+            layout.max_height = target_height + doc_margin * 2
+            layout.reLayout()
+
+            text_extent = layout.shrink_height
+            # Stop when text fills >= 90% of target
+            if text_extent >= target_height * 0.90:
+                break
+
+            # Compute grow factor: aim for 90% fill, cap at 1.08 per iteration
+            factor = min(1.08, (target_height * 0.90) / max(text_extent, 1))
+
+            self.setRelFontSize(factor)
+            applied = True
+
+        if applied:
+            # Sync fontformat.size so the font-size panel reflects the new size.
+            try:
+                block = self.document().firstBlock()
+                it = block.begin()
+                if not it.atEnd():
+                    actual_size = it.fragment().charFormat().fontPointSize()
+                    if actual_size > 0:
+                        if self.fontformat is not None:
+                            self.fontformat.size = actual_size
+                        if self.blk is not None and self.blk.fontformat is not None:
+                            self.blk.fontformat.size = actual_size
+            except Exception:
+                pass
+
+        return applied
+
     def _update_flow_layout(self):
-        """Push current boundary offsets to the layout engine and repaint."""
-        import logging as _logging
-        _log = _logging.getLogger('BallonTranslator')
-        _log.debug('_update_flow_layout: item_pos=(%.1f,%.1f) left=%s right=%s',
-            self.pos().x(), self.pos().y(),
-            [(round(p.x(),1), round(p.y(),1)) for p in self._left_points],
-            [(round(p.x(),1), round(p.y(),1)) for p in self._right_points])
-        if isinstance(self.layout, HorizontalTextDocumentLayout):
-            left_offsets, right_boundaries = self._get_line_x_offsets()
-            self.layout.set_line_x_offsets(left_offsets, right_boundaries)
-        self.repaint_background()
-        self.update()
+        """Push current boundary functions to the layout engine and repaint."""
+        from .scene_textlayout import VerticalTextDocumentLayout
+
+        # Guard: prevent _display_rect changes from docSizeChanged during flow updates
+        was_updating = self._updating_flow
+        self._updating_flow = True
+        try:
+            if isinstance(self.layout, HorizontalTextDocumentLayout):
+                # Compute the y-range of control points and update layout geometry
+                # so text actually moves when top/bottom resize handles are dragged.
+                if self._left_points and self._right_points:
+                    all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
+                    min_y = min(all_ys)
+                    max_y = max(all_ys)
+                    target_height = max_y - min_y
+
+                    # Compute target width from control points x-range.
+                    all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
+                    min_x = min(all_xs)
+                    max_x = max(all_xs)
+                    target_width = max_x - min_x
+
+                    # Set documentMargin = min_y so text STARTS at the new top edge.
+                    # This is the ONLY way to make text move vertically with the handles.
+                    self.document().setDocumentMargin(min_y)
+
+                    # Compensate max_width so available_width stays correct:
+                    # available_width = max_width - 2*doc_margin => max_width = target_width + 2*min_y
+                    # available_height = max_height - 2*doc_margin => max_height = target_height + 2*min_y
+                    self.layout.setMaxSize(target_width + 2 * min_y, target_height + 2 * min_y)
+                else:
+                    self._updating_flow = was_updating
+                    return
+
+                # Use callable y->x boundary functions instead of per-line-index dicts.
+                # This avoids the line-index mismatch bug: layoutBlock resets line_idx
+                # per block, but the old dict-based approach used a global counter.
+                # With functions, layoutBlock looks up the boundary at the ACTUAL
+                # y-position of each line as it is being laid out — so wrapping
+                # (which changes line count) is handled correctly in one pass.
+                # NO y_offset needed — since doc_margin = min_y, layout y starts at min_y,
+                # which is exactly where control points start.
+                lp = self._left_points[:]   # snapshot to avoid closure over mutable list
+                rp = self._right_points[:]
+                self.layout.set_boundary_functions(
+                    left_fn=lambda y, _lp=lp: interpolate_boundary(_lp, y),
+                    right_fn=lambda y, _rp=rp: interpolate_boundary(_rp, y),
+                )
+                # set_boundary_functions calls reLayout() internally — no second pass needed.
+                # First shrink if text overflows, then grow if there's room.
+                font_changed = self._auto_shrink_font()
+                font_changed = self._auto_grow_font() or font_changed
+                if font_changed:
+                    # Notify the text panel so it refreshes the font-size display.
+                    try:
+                        self.reshaped.emit(self)
+                    except Exception:
+                        pass
+
+            elif isinstance(self.layout, VerticalTextDocumentLayout):
+                # Vertical mode with INDEPENDENT left and top margins.
+                # In VerticalTextDocumentLayout.layoutBlock():
+                #   - Text starts at y = docMargin (top), flows downward
+                #   - Text starts at x = max_width - docMargin (right), flows leftward
+                #   - Text wraps leftward until x reaches _vertical_left_margin (left boundary)
+                #
+                # We use:
+                #   docMargin = min_y          → controls TOP edge of text
+                #   max_width = max_x + min_y  → so text_right = max_width - docMargin = max_x (RIGHT fixed!)
+                #   max_height = max_y + min_y → so available_height = max_y - min_y
+                #   vertical_left_margin = min_x + min_y → controls LEFT edge independently
+                #
+                # Result:
+                #   - Top handle (min_y) → changes text_top + available_height ✓
+                #   - Bottom handle (max_y) → changes available_height ✓
+                #   - Right handle (max_x) → changes text_right ✓
+                #   - Left handle (min_x) → changes available_width (wrapping) but NOT text_right ✓
+                if self._left_points and self._right_points:
+                    all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
+                    all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
+                    min_x, max_x = min(all_xs), max(all_xs)
+                    min_y, max_y = min(all_ys), max(all_ys)
+                    effective_w = max_x - min_x
+                    effective_h = max_y - min_y
+
+                    if effective_w > 10 and effective_h > 10:
+                        self.document().setDocumentMargin(min_y)
+                        # max_width - docMargin = max_x => max_width = max_x + min_y
+                        # available_height = max_y - min_y => max_height = max_y + min_y
+                        self.layout.setMaxSize(max_x + min_y, max_y + min_y)
+                        # Left boundary: vertical_left_margin = min_x + min_y
+                        # Effective text width = (max_x + min_y - min_y) - (min_x + min_y) = max_x - min_x - min_y
+                        # But we want effective text width = max_x - min_x
+                        # So we need: max_width - docMargin - vertical_left_margin = max_x - min_x
+                        # => max_x + min_y - min_y - vertical_left_margin = max_x - min_x
+                        # => vertical_left_margin = min_x
+                        self.layout.set_vertical_left_margin(min_x)
+                        # Fix available_width to account for independent left margin
+                        self.layout.available_width = effective_w
+                        self.layout.reLayout()
+
+            self.repaint_background()
+            self.update()
+        finally:
+            self._updating_flow = was_updating
+
+    # ── Vertical mode override ────────────────────────────────
+
+    def setVertical(self, vertical: bool):
+        """
+        Override TextBlkItem.setVertical() to reset flow control points
+        to a rectangle when switching between vertical/horizontal modes.
+
+        In vertical mode, flow boundaries are not supported — the text
+        renders in a plain rectangular box.  When switching back to
+        horizontal, flow points are re-initialized from the current rect.
+        """
+        # 1. Switch layout engine first (Vertical/HorizontalTextDocumentLayout)
+        super().setVertical(vertical)
+        # 2. Save the current bounding rect AFTER layout switch.
+        #    Use _display_rect + pos() instead of absBoundingRect() because
+        #    absBoundingRect() relies on boundingRect() which can return near-zero
+        #    during early init (before text is laid out).
+        dr = self._display_rect
+        p = self.pos()
+        if dr is not None and dr.isValid() and dr.width() > 0 and dr.height() > 0:
+            rect = QRectF(p.x(), p.y(), dr.width(), dr.height())
+            self._init_points_from_rect(rect)
+        # 3. Update layout for both modes — vertical mode now also needs layout sync
+        self._update_flow_layout()
+        self.save_flow_points()
 
     # ── Serialisation ─────────────────────────────────────────
 
@@ -245,16 +559,26 @@ class FlowTextBlkItem(TextBlkItem):
         self.prepareGeometryChange()
         if set_blk_size and self.blk is not None:
             self.blk._bounding_rect = self.absBoundingRect()
+        # After layout size is set, reapply flow boundaries + auto-shrink font.
+        # This is where _auto_shrink_font gets correct layout dimensions.
+        if self._left_points and self._right_points:
+            self._update_flow_layout()
         self.update()
 
     def on_document_enlarged(self):
         # For flow items: do NOT shift pos() to preserve control point positions.
+        # Guard: skip prepareGeometryChange() during flow updates to prevent
+        # the red dashed border from resizing when dragging the top resize handle.
+        if self._updating_flow:
+            return
         self.setCenterTransform()
         self.prepareGeometryChange()
         self.update()
 
     def docSizeChanged(self):
-        # For flow items: just update transform, never shift pos().
+        # For flow items: guard against _display_rect changes during flow updates.
+        if self._updating_flow:
+            return
         self.setCenterTransform()
         self.update()
 
@@ -374,6 +698,33 @@ class FlowTextBlkItem(TextBlkItem):
                          hasattr(scene, 'exec_context_menu') if scene else False)
 
     # ── Paint ─────────────────────────────────────────────────
+
+    def _draw_accessories(self, painter: QPainter):
+        """Override to suppress the red dashed border when flow handles are visible
+        (under_ctrl). The flow boundary curves already indicate the text area,
+        and the dashed _display_rect border would expand when the top resize
+        handle moves control points above _display_rect.
+
+        Still draws background_pixmap (text stroke/shadow) even when under_ctrl."""
+        br = self.boundingRect()
+        painter.save()
+
+        if self.background_pixmap is not None:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawPixmap(br.toRect(), self.background_pixmap)
+
+        # Only draw the dashed border when NOT under control (flow handles visible)
+        if not self.under_ctrl:
+            draw_rect = self.draw_rect and not self.under_ctrl
+            if self.isSelected() and not self.is_editting():
+                pen = QPen(TEXTRECT_SELECTED_COLOR, 3.5 / self.get_scale(), Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+                painter.drawRect(self.unpadRect(br))
+            elif draw_rect:
+                pen = QPen(TEXTRECT_SHOW_COLOR, 3 / self.get_scale(), Qt.PenStyle.SolidLine)
+                painter.setPen(pen)
+                painter.drawRect(self.unpadRect(br))
+        painter.restore()
 
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget) -> None:
         # Draw text via parent
