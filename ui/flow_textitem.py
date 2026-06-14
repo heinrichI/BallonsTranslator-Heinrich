@@ -18,6 +18,7 @@ import re
 from typing import List, Union, Tuple
 
 logger = logging.getLogger('BallonTranslator')
+LOGGER = logger  # alias used in _auto_shrink_font, _auto_grow_font
 
 from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent, QMenu, QAction
 from qtpy.QtCore import Qt, QRectF, QPointF, Signal
@@ -373,22 +374,35 @@ class FlowTextBlkItem(TextBlkItem):
             return False
 
         text_extent = layout.shrink_height
+        LOGGER.info("=== _auto_shrink_font ===")
+        LOGGER.info("  target_height=%.1f text_extent(shrink_height)=%.1f",
+                    target_height, text_extent)
+        LOGGER.info("  layout.available_height=%.1f layout.max_height=%.1f",
+                    layout.available_height, layout.max_height)
 
         # Check conditions for shrinking:
         # 1. Height overflow (text_extent > target_height) — standard shrink
-        # 2. Overflow + forced char breaks (layout._has_overflow_char_break) —
-        #    Only shrink when there are character-level breaks AND the text
-        #    overflows vertically. If text fits but has char breaks (narrow
-        #    block), let it wrap to more lines — font size is fine.
-        if text_extent <= target_height:
+        # 2. Character-level breaks (layout._has_char_level_breaks) —
+        #    Even if text fits vertically, if the layout engine had to break
+        #    words at character boundaries (after hyphenation failed to provide
+        #    good break points), the font is too wide and needs shrinking.
+        char_level_breaks = getattr(layout, '_has_char_level_breaks', False)
+        LOGGER.info("  _has_char_level_breaks=%s", char_level_breaks)
+        if text_extent <= target_height and not char_level_breaks:
+            LOGGER.info("  => text_extent <= target_height and NO char-level breaks, NO SHRINK (return False)")
             return False
+        if text_extent <= target_height and char_level_breaks:
+            LOGGER.info("  => text_extent <= target_height BUT char-level breaks present — WILL SHRINK")
 
         # If text overflows AND has character-level breaks, always shrink.
         # If text overflows WITHOUT char breaks (just height overflow), also shrink.
         applied = False
         doc_margin = self.document().documentMargin()
-        for _ in range(20):
+        for iteration in range(1, 21):
+            LOGGER.info("  --- shrink iteration %d ---", iteration)
             if applied:
+                LOGGER.info("  resetting available_height=%.1f max_height=%.1f",
+                            target_height, target_height + doc_margin * 2)
                 layout.available_height = target_height
                 layout.max_height = target_height + doc_margin * 2
                 layout.reLayout()
@@ -396,23 +410,37 @@ class FlowTextBlkItem(TextBlkItem):
                 pass  # first iteration, no reset needed
 
             text_extent = layout.shrink_height
+            LOGGER.info("  after layout: text_extent=%.1f target_height=%.1f",
+                        text_extent, target_height)
+            LOGGER.info("  layout.available_height=%.1f layout.max_height=%.1f",
+                        layout.available_height, layout.max_height)
 
             # Stop shrinking when text fits vertically
             if text_extent <= target_height:
+                LOGGER.info("  => text_extent <= target_height, STOP")
                 break
 
             # compute shrink factor: 5% safety margin, cap at 0.9
             factor = min(FONT_SHRINK_FACTOR, (target_height / text_extent) * 0.95) if text_extent > 0 else FONT_SHRINK_FACTOR
+            LOGGER.info("  factor=%.4f (FONT_SHRINK_FACTOR=%.2f target/text_extent=%.4f)",
+                        factor, FONT_SHRINK_FACTOR, target_height / text_extent if text_extent > 0 else 0)
             if factor >= 1.0:
+                LOGGER.info("  => factor >= 1.0, STOP (no shrink needed)")
                 break
 
+            current_font = layout.max_font_size()
+            LOGGER.info("  calling setRelFontSize(factor=%.4f), current_font=%.1fpt", factor, current_font)
             self.setRelFontSize(factor)
             applied = True
 
             # check min size after shrink
             new_min = layout.max_font_size()
+            LOGGER.info("  after setRelFontSize: new_min=%.1fpt", new_min)
             if new_min <= MIN_FONT_SIZE_PT:
+                LOGGER.info("  => new_min <= MIN_FONT_SIZE_PT (%.1f), STOP", MIN_FONT_SIZE_PT)
                 break
+
+        LOGGER.info("=== _auto_shrink_font DONE, applied=%s ===", applied)
 
         if applied:
             # Sync fontformat.size so the font-size panel reflects the new size.

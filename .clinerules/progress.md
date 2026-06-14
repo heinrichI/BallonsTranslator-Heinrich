@@ -18,7 +18,9 @@
 - **Border suppress**: red dashed border suppressed when active flow handles visible (Bug 3 fixed)
 - **NameError fix**: TEXTRECT_SELECTED_COLOR/SHOW_COLOR imported in flow_textitem.py (Bug 5)
 - **Global font size guard**: _auto_grow_enabled flag disables grow when global font size active (Bug 6)
-- **16 unit tests**: tests/ui/test_flow_textitem.py covering init, boundary, shrink, grow, symmetry, paint
+- **Hyphenation**: long words split by syllables via pyphen (Cyrillic ru_RU + Latin en_US) with soft hyphens
+- **Char-level break detection**: _has_char_level_breaks flag triggers font shrink when words break at character boundaries, even without vertical overflow
+- **25 unit tests**: tests/ui/test_flow_textitem.py covering init, boundary, shrink, grow, symmetry, paint, hyphenation
 
 ## What's Left to Build
 - [x] Initial FlowTextBlkItem implementation with control points
@@ -30,12 +32,15 @@
 - [x] Font auto-grow to fill block (_auto_grow_font in _update_flow_layout)
 - [x] _display_rect guard against zero width/height
 - [x] Red dashed border not changing size with top rhombus (_draw_accessories override)
+- [x] Hyphenation via pyphen (Cyrillic + Latin) with soft hyphens
+- [x] Char-level break detection (_has_char_level_breaks flag)
+- [x] Trigger font shrink on char-level breaks even without vertical overflow
 - [ ] Production testing — verify context menu works correctly on all item types
 - [ ] Potential edge case: very small blocks where control points overlap
 - [ ] Potential edge case: re-initializing points from degenerate rectangles
 
 ## Current Status
-All known issues (vertical mode alignment, text clipping, _display_rect regression, border resize, auto-grow) are fixed. FlowTextBlkItem is feature-complete and ready for testing.
+All known issues (vertical mode alignment, text clipping, _display_rect regression, border resize, auto-grow) are fixed. Hyphenation + char-level break detection added. FlowTextBlkItem is feature-complete and ready for testing.
 
 ## Known Issues
 - None currently open.
@@ -55,3 +60,8 @@ All known issues (vertical mode alignment, text clipping, _display_rect regressi
 12. Added `_auto_grow_enabled` flag — disabled when global font size setting active (Bug 6)
 13. Imported TEXTRECT_SHOW_COLOR/TEXTRECT_SELECTED_COLOR — fix NameError in _draw_accessories (Bug 5)
 14. Added 16 pytest unit tests in tests/ui/test_flow_textitem.py
+15. Added `_hyphenate_text()` using pyphen (ru_RU + en_US) with soft hyphens — words split by syllables before passing to layout engine
+16. Added `_has_char_level_breaks` flag to `HorizontalTextDocumentLayout` — set when layout breaks a word at a character boundary (not soft-hyphen/space)
+17. Updated `_auto_shrink_font()` to trigger on char-level breaks even without vertical overflow — two-stage strategy: hyphenation first, then shrink if needed
+18. Expanded test suite to 25 tests — added 9 hyphenation tests
+19. Overrode `setHtml()` and `setPlainTextAndKeepUndoStack()` to apply hyphenation before passing text to layout

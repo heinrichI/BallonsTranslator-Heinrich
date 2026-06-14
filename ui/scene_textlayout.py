@@ -1,4 +1,7 @@
 import re
+import logging
+
+LOGGER = logging.getLogger('BallonTranslator')
 
 from qtpy.QtCore import Qt, QRectF, QPointF, Signal, QSizeF, QSize
 from qtpy.QtGui import QTextCharFormat, QTextDocument, QPixmap, QImage, QTransform, QPalette, QPainter, QTextFrame, QTextBlock, QAbstractTextDocumentLayout, QTextLayout, QFont, QFontMetricsF, QTextOption, QTextLine, QTextFormat
@@ -909,7 +912,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         self._left_boundary_fn = None
         self._right_boundary_fn = None
         self._has_overflow_char_break: bool = False  # True if char-level breaks AND vertical overflow
-
+        self._has_char_level_breaks: bool = False  # True if ANY char-level breaks (regardless of overflow)
     def set_line_x_offsets(self, left_offsets: dict, right_offsets: dict = None):
         """Store per-line left offsets and right boundaries, trigger relayout."""
         self._line_left_offsets = left_offsets if left_offsets is not None else {}
@@ -931,6 +934,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         self.shrink_height = 0
         self.shrink_width = 0
         self._has_overflow_char_break = False  # reset before each layout pass
+        self._has_char_level_breaks = False  # reset before each layout pass
         block = doc.firstBlock()
         while block.isValid():
             self.layoutBlock(block)
@@ -941,9 +945,14 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         else:
             new_height = doc_margin
         if new_height > self.available_height:
+            LOGGER.warning("  reLayout() expanding available_height: %.1f → %.1f (new_height=%.1f)",
+                           self.available_height, new_height, new_height)
             self.max_height = new_height + doc_margin * 2
             self.available_height = new_height
             self.size_enlarged.emit()
+        else:
+            LOGGER.info("  reLayout(): new_height=%.1f <= available_height=%.1f, no expansion",
+                        new_height, self.available_height)
 
         if doc.defaultTextOption().alignment() == Qt.AlignmentFlag.AlignCenter:
             block = doc.firstBlock()
@@ -1097,12 +1106,6 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         # WrapAtWordBoundaryOrAnywhere tries word breaks first, then soft-hyphen,
         # then falls back to character-by-character breaking.
         #
-        # We only set _has_overflow_char_break when BOTH conditions are met:
-        # 1. There is a forced character-level break (word broken mid-character)
-        # 2. The text overflows available_height (shrink_height > available_height)
-        # This means font shrinking is only triggered when there's not enough
-        # vertical space AND characters are being broken at line ends — i.e.
-        # forcing more lines but there's nowhere to put them.
         has_char_break = False
         for ii in range(tl.lineCount() - 1):
             cur_line = tl.lineAt(ii)
@@ -1127,6 +1130,14 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
                         not first_char.isspace()):
                         has_char_break = True
                         break
+        # _has_char_level_breaks: set whenever char-level breaks occur (regardless of overflow).
+        # This triggers font shrinking even when text fits vertically, because
+        # hyphenation should have provided soft-hyphen break points — if we still
+        # get character-level breaks, the font is too wide for the available space.
+        self._has_char_level_breaks = has_char_break
+        # _has_overflow_char_break: ONLY set when BOTH char breaks AND overflow,
+        # used as a stronger signal for shrinking but _has_char_level_breaks is
+        # checked first in _auto_shrink_font.
         if has_char_break and self.shrink_height > self.available_height:
             self._has_overflow_char_break = True
 
