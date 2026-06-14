@@ -14,6 +14,7 @@ the visual boundary overlay in the exported image.
 """
 
 import logging
+import re
 from typing import List, Union, Tuple
 
 logger = logging.getLogger('BallonTranslator')
@@ -27,6 +28,7 @@ from utils.fontformat import FontFormat
 from .textitem import TextBlkItem
 from .scene_textlayout import HorizontalTextDocumentLayout
 from .textitem import TEXTRECT_SHOW_COLOR, TEXTRECT_SELECTED_COLOR
+import pyphen
 
 
 # ── Constants ────────────────────────────────────────────────
@@ -35,6 +37,61 @@ DEFAULT_POINTS_PER_SIDE: int = 3  # количество точек при ин�
 MIN_POINTS_PER_SIDE: int = 3      # минимальное количество точек для кривой Безье и удаления
 MIN_FONT_SIZE_PT: float = 5.0     # минимальный размер шрифта для auto-shrink
 FONT_SHRINK_FACTOR: float = 0.9   # мультипликативный коэффициент за итерацию auto-shrink
+
+
+# ── Hyphenation ──────────────────────────────────────────────
+
+_LATIN_RE = re.compile(r'[a-zA-Zà-ÿÀ-ß]+', re.UNICODE)
+_CYRILLIC_RE = re.compile(r'[а-яёА-ЯЁ]+', re.UNICODE)
+_PYPHEN_CACHE: dict = {}  # lang -> Pyphen instance cache
+_LANG_MAP = {
+    'LATIN': 'en_US',      # default Latin → English hyphenation
+    'CYRILLIC': 'ru_RU',  # default Cyrillic → Russian hyphenation
+}
+
+
+def _get_pyphen(lang: str = 'en_US'):
+    """Get a cached Pyphen instance for the given language."""
+    if lang not in _PYPHEN_CACHE:
+        _PYPHEN_CACHE[lang] = pyphen.Pyphen(lang=lang)
+    return _PYPHEN_CACHE[lang]
+
+
+def _hyphenate_text(text: str, min_word_len: int = 5) -> str:
+    """
+    Insert soft hyphens (U+00AD) between syllables of long words.
+    Supports both Cyrillic (ru_RU) and Latin (en_US) text.
+    Non-alphabetic text and words shorter than min_word_len are left unchanged.
+
+    Soft hyphens are zero-width and invisible in the editor; Qt's line breaker
+    treats them as valid break points when a word overflows the line width.
+
+    Args:
+        text: Input text (may contain mixed languages).
+        min_word_len: Minimum word length (in characters) to hyphenate.
+                      Shorter words are left as-is.
+
+    Returns:
+        Text with soft hyphens inserted at syllable boundaries.
+    """
+    if not text:
+        return text
+
+    def _hyphenate_word(match, hyphenator):
+        word = match.group(0)
+        if len(word) < min_word_len:
+            return word
+        return hyphenator.inserted(word, hyphen='\u00AD')
+
+    # Hyphenate Cyrillic words with ru_RU
+    ru_hyphenator = _get_pyphen('ru_RU')
+    text = _CYRILLIC_RE.sub(lambda m: _hyphenate_word(m, ru_hyphenator), text)
+
+    # Hyphenate Latin words with en_US
+    en_hyphenator = _get_pyphen('en_US')
+    text = _LATIN_RE.sub(lambda m: _hyphenate_word(m, en_hyphenator), text)
+
+    return text
 
 
 # ─────────────────────────────────────────────────────────────
@@ -147,15 +204,51 @@ class FlowTextBlkItem(TextBlkItem):
                       [(p.x(), p.y()) for p in self._left_points],
                       [(p.x(), p.y()) for p in self._right_points])
 
-    # ── Text change override ──────────────────────────────────
+    # ── Text change overrides ────────────────────────────────
 
     def setPlainText(self, text: str = ''):
         """Override to ensure flow layout boundaries are applied after text changes.
-        Does NOT call _auto_shrink_font here — that is deferred to set_size()
-        where layout dimensions are known and layout_textblk binary search works."""
+        Also hyphenates text via pyphen (Cyrillic → ru_RU, Latin → en_US) to enable
+        syllable-level line breaking.  Does NOT call _auto_shrink_font here — that
+        is deferred to set_size() where layout dimensions are known and
+        layout_textblk binary search works."""
+        # Apply hyphenation before passing text to the layout engine.
+        # Soft hyphens are zero-width and invisible; Qt wraps at them naturally.
+        text = _hyphenate_text(text)
         super().setPlainText(text)
         if self._left_points and self._right_points:
             # Only reapply boundary functions (no auto-shrink since layout size unknown yet).
+            if isinstance(self.layout, HorizontalTextDocumentLayout):
+                lp = self._left_points[:]
+                rp = self._right_points[:]
+                self.layout.set_boundary_functions(
+                    left_fn=lambda y, _lp=lp: interpolate_boundary(_lp, y),
+                    right_fn=lambda y, _rp=rp: interpolate_boundary(_rp, y),
+                )
+                self.repaint_background()
+                self.update()
+
+    def setHtml(self, text: str = ''):
+        """Override setHtml to also apply hyphenation (used for rich text loading
+        and undo/redo restoration)."""
+        text = _hyphenate_text(text)
+        super().setHtml(text)
+        if self._left_points and self._right_points:
+            if isinstance(self.layout, HorizontalTextDocumentLayout):
+                lp = self._left_points[:]
+                rp = self._right_points[:]
+                self.layout.set_boundary_functions(
+                    left_fn=lambda y, _lp=lp: interpolate_boundary(_lp, y),
+                    right_fn=lambda y, _rp=rp: interpolate_boundary(_rp, y),
+                )
+                self.repaint_background()
+                self.update()
+
+    def setPlainTextAndKeepUndoStack(self, text: str):
+        """Override from TextBlkItem to apply hyphenation for undo-safe text setting."""
+        text = _hyphenate_text(text)
+        super().setPlainTextAndKeepUndoStack(text)
+        if self._left_points and self._right_points:
             if isinstance(self.layout, HorizontalTextDocumentLayout):
                 lp = self._left_points[:]
                 rp = self._right_points[:]
@@ -280,35 +373,36 @@ class FlowTextBlkItem(TextBlkItem):
             return False
 
         text_extent = layout.shrink_height
+
+        # Check conditions for shrinking:
+        # 1. Height overflow (text_extent > target_height) — standard shrink
+        # 2. Overflow + forced char breaks (layout._has_overflow_char_break) —
+        #    Only shrink when there are character-level breaks AND the text
+        #    overflows vertically. If text fits but has char breaks (narrow
+        #    block), let it wrap to more lines — font size is fine.
         if text_extent <= target_height:
             return False
 
+        # If text overflows AND has character-level breaks, always shrink.
+        # If text overflows WITHOUT char breaks (just height overflow), also shrink.
         applied = False
         doc_margin = self.document().documentMargin()
         for _ in range(20):
-            # CRITICAL: setRelFontSize() calls reLayoutEverything() which calls
-            # reLayout() which EXPANDS available_height when text overflows
-            # (line: self.available_height = new_height). After the first shrink,
-            # the expanded constraint makes shrink_height always <= available_height.
-            #
-            # Fix: after setRelFontSize, reset constraints and force a fresh
-            # reLayout to compute shrink_height with the CORRECT target constraint.
-            # This is done at the end of the loop so it takes effect before the
-            # next iteration's shrink_height read.
             if applied:
-                set_rel_font_called = True
                 layout.available_height = target_height
                 layout.max_height = target_height + doc_margin * 2
                 layout.reLayout()
             else:
-                set_rel_font_called = False
+                pass  # first iteration, no reset needed
 
             text_extent = layout.shrink_height
+
+            # Stop shrinking when text fits vertically
             if text_extent <= target_height:
                 break
 
             # compute shrink factor: 5% safety margin, cap at 0.9
-            factor = min(FONT_SHRINK_FACTOR, (target_height / text_extent) * 0.95)
+            factor = min(FONT_SHRINK_FACTOR, (target_height / text_extent) * 0.95) if text_extent > 0 else FONT_SHRINK_FACTOR
             if factor >= 1.0:
                 break
 

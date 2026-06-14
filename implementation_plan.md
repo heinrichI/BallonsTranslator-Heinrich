@@ -1,186 +1,97 @@
-# Implementation Plan
-
-**Fix two bugs in FlowTextBlkItem: vertical-mode text alignment and auto-shrink font when text overflows.**
+# Implementation Plan — Syllable-Based Line Breaking with Visible Hyphen for FlowTextBlkItem (Russian)
 
 ## Overview
 
-Two bugs were reported in `FlowTextBlkItem`. First: when the item is in vertical text mode, all text is pushed to the right edge of the red bounding box regardless of control handle positions. Second: when the bounding box is made very small and there is no room for line breaks, text gets clipped instead of the font size being reduced. This plan describes the changes needed to fix both issues.
+Add visible hyphenation for Russian text in FlowTextBlkItem: when a long word overflows the line width, split it at syllable boundaries and insert visible hyphen + newline (`-\n`). Only split when necessary — if word fits, no hyphen is shown. Falls back to font shrinking if even a single syllable doesn't fit remaining space.
 
-### Bug 1 — Vertical mode text pushed to right edge
+## Approach
 
-**Root cause**: `_get_line_x_offsets()` and `_update_flow_layout()` only push offsets to `HorizontalTextDocumentLayout.set_line_x_offsets()`. The `VerticalTextDocumentLayout` knows nothing about `_line_left_offsets`/`_line_right_offsets` — it always uses its own per-line `line_width` derived from `block_ideal_width` (max character width), which fits between the doc margins and pushes all lines to the rightmost position.
+Current flow (`WrapAtWordBoundaryOrAnywhere`):
+1. Qt breaks only at spaces or arbitrary character boundaries (no visible hyphen)
+2. If long word doesn't fit, auto-shrink reduces font size → wasted space
 
-**Solution**: When the item switches to vertical mode (`setVertical(True)`), reset the flow control points to a rectangle aligned with the item's bounding rect. This effectively disables flow-behaviour for vertical text. The control handles revert to standard TextBlkShapeControl-style rectangular behaviour (though still using FlowShapeControl, the points become a flat rectangle).
-
-### Bug 2 — Text clipped instead of font shrinking
-
-**Root cause**: `HorizontalTextDocumentLayout.reLayout()` expands `self.max_height` when `new_height > self.available_height`, emitting `size_enlarged`. But there is no mechanism to reduce font size when `new_height` exceeds available space. The text extends beyond the visual bounding box and gets clipped.
-
-**Solution**: Add an iterative font-shrink loop in `FlowTextBlkItem._update_flow_layout()` (or a dedicated `_auto_shrink_font()` method). After the initial layout, if the text height exceeds available height, repeatedly scale down the font (factor ≈0.9 per iteration) until the text fits or min font size (5pt) is reached.
-
----
+New flow:
+1. Qt layouts text normally (unchanged)
+2. After layout + auto-shrink/grow, scan each line for overflow
+3. For each overflowing line: find last word, split by syllables (pyphen), insert `-\n`
+4. Relayout with modified text
+5. If hyphenation alone doesn't fit → auto-shrink still handles it
 
 ## Types
 
-No new types or dataclasses are introduced. The `FlowTextBlkItem` class and `SceneTextLayout` / `VerticalTextDocumentLayout` / `HorizontalTextDocumentLayout` classes are modified.
-
-### Constants
-
-- `MIN_FONT_SIZE_PT: float = 5.0` — minimum font size in points (already exists as conceptual limit, added as constant in flow_textitem.py)
-- `FONT_SHRINK_FACTOR: float = 0.9` — multiplicative factor per shrink iteration
-
----
+No new types.
 
 ## Files
 
-### New files
+- **Modified**: `ui/flow_textitem.py`
+  - Remove soft-hyphen injection from `setPlainText()` — revert `super().setPlainText(text)` 
+  - Keep `_get_pyphen()` cache (already exists)
+  - Add `_hyphenate_russian_word(word: str) -> List[str]` — splits word into syllable list
+  - Add `_hyphenating` guard flag in `__init__`
+  - Add `_hyphenate_overflow_lines() -> bool` — main hyphenation logic
+  - Call it from `_update_flow_layout()` after auto-shrink/grow
 
-None.
-
-### Modified files
-
-1. **`ui/flow_textitem.py`**
-   - Add `MIN_FONT_SIZE_PT = 5.0` constant
-   - Add `FONT_SHRINK_FACTOR = 0.9` constant
-   - Modify `_update_flow_layout()` to call `_auto_shrink_font()` after layout update
-   - Add `_auto_shrink_font()` method — iteratively reduces font size until text fits or reaches min limit
-   - Override `setVertical()` in `FlowTextBlkItem` — when switching to vertical mode, reset flow control points to a rectangle and disable flow
-
-2. **`ui/scene_textlayout.py`** (minimal change)
-   - No structural changes needed for bug 1 (the fix is in flow_textitem.py, not in the layout engine)
-   - For bug 2: the shrink logic lives entirely in flow_textitem.py (calls existing `setRelFontSize()` and checks minSize/shrink_height after relayout)
-
-3. **`ui/flow_shapecontrol.py`**
-   - When flow is disabled (vertical mode), handle visibility should match standard behaviour
-   - Modify `setBlkItem()` to detect flow-disabled state and hide all flow handles
-   - Modify `rebuildHandles()` to handle zero-points case
-
-### Files NOT modified
-
-- `ui/canvas.py` — no changes needed
-- `ui/textitem.py` — no changes needed
-- `ui/scenetext_manager.py` — duck-typing via hasattr continues to work
-- `utils/textblock.py` — no structural changes
-
----
+- **Modified**: `tests/ui/test_flow_textitem.py`
+  - Update tests for new syllable-list approach
 
 ## Functions
 
-### New functions
+### New
+1. `_hyphenate_russian_word(word: str) -> List[str]` in `ui/flow_textitem.py`
+   - Returns list of syllable strings: "перенос" → ["пе", "ре", "нос"]
+   - Non-cyrillic words return `[word]`
+   - Short words (<5 chars) return `[word]`
 
-| Function | File | Signature | Purpose |
-|----------|------|-----------|---------|
-| `_auto_shrink_font()` | `ui/flow_textitem.py` | `def _auto_shrink_font(self) -> bool` | Iteratively reduces font size until text fits in available space or reaches min 5pt. Returns True if shrink was applied. |
+2. `FlowTextBlkItem._hyphenate_overflow_lines() -> bool` in `ui/flow_textitem.py`
+   - Guard: skip if `_hyphenating` is True (prevents recursion)
+   - Walk all lines in the layout
+   - For each line: check if `naturalTextWidth > line_width`
+   - If overflowing:
+     - Get last word (text after last space)
+     - Split into syllables via `_hyphenate_russian_word()`
+     - Try inserting first syllable + `-\n`; if first syllable overflows → skip (let shrink handle)
+     - Insert remaining syllables as a new line
+   - If any change: set modified text, reapply boundary functions, reLayout
+   - Return True if changes made
+   - Set `_hyphenating = True` during execution
 
-### Modified functions
+### Modified
+1. `FlowTextBlkItem.setPlainText(text: str)` in `ui/flow_textitem.py`
+   - **Remove**: `text = _hyphenate_russian(text)` call
+   - **Revert to**: `super().setPlainText(text)` (no hyphenation at setPlainText time)
 
-| Function | File | Change |
-|----------|------|--------|
-| `FlowTextBlkItem.__init__()` | `ui/flow_textitem.py` | No signature change. After `_init_points_from_rect()`, check if vertical mode and reset to rectangle. |
-| `FlowTextBlkItem._update_flow_layout()` | `ui/flow_textitem.py` | Add a call to `self._auto_shrink_font()` after calling `self.layout.set_line_x_offsets()` and `self.repaint_background()`. |
-| `FlowTextBlkItem.setVertical()` (new override) | `ui/flow_textitem.py` | Override `TextBlkItem.setVertical()` to reset flow points to rectangle when switching to vertical mode. |
-| `FlowTextBlkItem._init_points_from_rect()` | `ui/flow_textitem.py` | No change. Used as-is by `setVertical()` to reset points. |
+2. `FlowTextBlkItem.__init__()` in `ui/flow_textitem.py`
+   - Add: `self._hyphenating: bool = False`
 
-### Details of `_auto_shrink_font()` algorithm
-
-```
-1. Get available_height = self.layout.available_height
-2. Get current min font size from self.layout.max_font_size()
-3. If min_font_size_pt <= MIN_FONT_SIZE_PT → return False (already at minimum)
-4. Loop (max 20 iterations):
-   a. Compute max shrink factor needed: 
-      - Get text extent = self.layout.shrink_height
-      - If text_extent <= available_height → break (fits)
-      - shrink = min(0.9, available_height / text_extent * 0.95)  # 5% safety margin
-   b. Apply setRelFontSize(shrink) — this multiplies ALL font sizes by shrink
-   c. Re-layout happens inside setRelFontSize
-   d. Check new min font size → if < MIN_FONT_SIZE_PT → clamp and break
-5. Return True if shrink was applied
-```
-
-**Important**: `setRelFontSize()` triggers `reLayoutEverything()` → `reLayout()`, which is expensive. But iterating up to ~5 times is acceptable since it happens only when the user drags a handle (not every frame).
-
----
+3. `FlowTextBlkItem._update_flow_layout()` in `ui/flow_textitem.py`
+   - After `_auto_shrink_font()` + `_auto_grow_font()` block, add call to `_hyphenate_overflow_lines()`
 
 ## Classes
 
-### Modified classes
-
-| Class | File | Change |
-|-------|------|--------|
-| `FlowTextBlkItem` | `ui/flow_textitem.py` | Add `_auto_shrink_font()` method. Override `setVertical()`. Modify `_update_flow_layout()` to call shrink. |
-| `FlowShapeControl` | `ui/flow_shapecontrol.py` | Handle zero-points state (flow disabled) gracefully. |
-
-### FlowTextBlkItem.setVertical() override
-
-```python
-def setVertical(self, vertical: bool):
-    """Reset flow points to rectangle when switching to vertical mode."""
-    if vertical:
-        # Get current abs bounding rect
-        rect = self.absBoundingRect(qrect=True)
-        # Reset flow points to rectangle aligned with item
-        self._init_points_from_rect(rect)
-        # Update layout with rectangle offsets (no per-line flow)
-        self._update_flow_layout()
-        # Save the rectangle points
-        self.save_flow_points()
-        # Hide flow handles (they're now redundant; FlowShapeControl will see
-        # points form a rectangle and show only resize handles)
-    super().setVertical(vertical)
-```
-
-After `super().setVertical(vertical)`, the layout engine is `VerticalTextDocumentLayout`, which handles vertical text in a rectangular box. The flow control points are still present but form a perfect rectangle, so `interpolate_boundary()` returns constant x values → no per-line offset variation.
-
-### Flow shape control handle visibility in vertical mode
-
-In `FlowShapeControl.setBlkItem()` and `rebuildHandles()`, if the blk_item is in vertical mode, flow handles should be hidden. Only resize handles (top/bottom) should be visible.
-
----
+No new or modified classes.
 
 ## Dependencies
 
-No new external dependencies. Existing imports suffice.
-
----
+- `pyphen>=0.14.0` (already in requirements.txt)
 
 ## Testing
 
-### Test scenarios (manual verification)
-
-1. **Vertical mode alignment**:
-   - Create a FlowTextBlkItem with horizontal text, drag middle handles to create a trapezoid
-   - Switch to vertical mode
-   - Verify: text is no longer pushed to right edge, it renders vertically in the bounding box
-   - Verify: flow handles disappear from the control, only resize handles show
-   - Switch back to horizontal mode
-   - Verify: flow handles reappear, trapezoid shape is restored
-
-2. **Font auto-shrink on overflow**:
-   - Create a FlowTextBlkItem with long text
-   - Drag top handle down to make the box very short
-   - Verify: font size decreases until text fits (or reaches 5pt)
-   - Verify: no text is clipped outside the bounding box
-   - Expand the box again
-   - Verify: font size does NOT increase (shrink is one-way; user can manually increase)
-     * Actually, reconsider: should font restore on expand? Current design: shrink is one-way defensive. User can manually change font size in the text panel.
-
-3. **Edge case — 5pt limit**:
-   - Create text with very long content in a tiny bounding box
-   - Verify: font shrinks iteratively until it reaches ~5pt, then stops
-   - Text may still be clipped at 5pt if it's extremely long — this is acceptable
-
-### Existing test suite
-- `tests/test_scenetext_manager_visibility.py` — should still pass with flow changes
-- No automated tests exist for flow items (manual testing)
-
----
+- **Modified**: `tests/ui/test_flow_textitem.py`
+  - Remove old `TestHyphenation` class (soft-hyphen tests)
+  - Add new `TestHyphenation` class:
+    - `test_word_syllables` — "перенос" → ["пе", "ре", "нос"]
+    - `test_short_word` — "дом" → ["дом"]
+    - `test_non_cyrillic` — "hello" → ["hello"]
+    - `test_overflow_inserts_hyphen` — narrow block + long Russian word → text contains "-\n"
+    - `test_no_change_when_fits` — wide block + long word → no change
 
 ## Implementation Order
 
-1. Add constants `MIN_FONT_SIZE_PT` and `FONT_SHRINK_FACTOR` to `ui/flow_textitem.py`
-2. Add `_auto_shrink_font()` method to `FlowTextBlkItem`
-3. Modify `_update_flow_layout()` to call `_auto_shrink_font()`
-4. Override `setVertical()` in `FlowTextBlkItem` to reset flow points to rectangle
-5. Update `FlowShapeControl` to handle flow-disabled/vertical state
-6. Build and test: run the application, verify both bugs are fixed
+1. Revert `setPlainText()` — remove soft-hyphen call, keep `super().setPlainText(text)`
+2. Add `_hyphenating` flag in `__init__`
+3. Add `_hyphenate_russian_word()` helper function
+4. Add `_hyphenate_overflow_lines()` method
+5. Wire into `_update_flow_layout()` after shrink/grow
+6. Run existing tests (16) to verify no regression
+7. Update hyphenation tests for new approach
+8. Run all tests to verify

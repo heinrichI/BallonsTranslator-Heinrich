@@ -908,6 +908,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         # Callable(y) -> x for flow-text boundary lookup (takes priority over dicts)
         self._left_boundary_fn = None
         self._right_boundary_fn = None
+        self._has_overflow_char_break: bool = False  # True if char-level breaks AND vertical overflow
 
     def set_line_x_offsets(self, left_offsets: dict, right_offsets: dict = None):
         """Store per-line left offsets and right boundaries, trigger relayout."""
@@ -929,6 +930,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         self.text_padding = 0
         self.shrink_height = 0
         self.shrink_width = 0
+        self._has_overflow_char_break = False  # reset before each layout pass
         block = doc.firstBlock()
         while block.isValid():
             self.layoutBlock(block)
@@ -995,6 +997,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         
         # fm = QFontMetrics(font)
         doc_margin = self.document().documentMargin()
+        blk_text = block.text()  # needed for forced-char-break detection after endLayout
 
         block_height = self.block_ideal_height[block.blockNumber()]
         if block_height == 0:
@@ -1087,6 +1090,45 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             is_first_line = False
 
         tl.endLayout()
+
+        # ── Detect forced character-level breaks WITH overflow ──────
+        # After endLayout(), check if any line was broken mid-character
+        # (rather than at a word boundary or soft-hyphen).
+        # WrapAtWordBoundaryOrAnywhere tries word breaks first, then soft-hyphen,
+        # then falls back to character-by-character breaking.
+        #
+        # We only set _has_overflow_char_break when BOTH conditions are met:
+        # 1. There is a forced character-level break (word broken mid-character)
+        # 2. The text overflows available_height (shrink_height > available_height)
+        # This means font shrinking is only triggered when there's not enough
+        # vertical space AND characters are being broken at line ends — i.e.
+        # forcing more lines but there's nowhere to put them.
+        has_char_break = False
+        for ii in range(tl.lineCount() - 1):
+            cur_line = tl.lineAt(ii)
+            nxt_line = tl.lineAt(ii + 1)
+            cur_start = cur_line.textStart()
+            cur_len = cur_line.textLength()
+            nxt_start = nxt_line.textStart()
+            if cur_len > 0 and nxt_start > cur_start:
+                # last char of current line
+                last_char_idx = cur_start + cur_len - 1
+                # first char of next line
+                first_char_idx = nxt_start
+                if last_char_idx < len(blk_text) and first_char_idx < len(blk_text):
+                    last_char = blk_text[last_char_idx]
+                    first_char = blk_text[first_char_idx]
+                    # Not a word-boundary break if:
+                    # 1. Last char is not space
+                    # 2. Last char is not soft-hyphen (U+00AD)
+                    # 3. First char of next line is not space (continuation of same word)
+                    if (not last_char.isspace() and
+                        last_char != '\u00AD' and
+                        not first_char.isspace()):
+                        has_char_break = True
+                        break
+        if has_char_break and self.shrink_height > self.available_height:
+            self._has_overflow_char_break = True
 
         if is_first_block or is_last_block:
             self.text_padding = max(self.text_padding, text_padding / 2)
