@@ -590,23 +590,19 @@ class FlowTextBlkItem(TextBlkItem):
                         pass
 
             elif isinstance(self.layout, VerticalTextDocumentLayout):
-                # Vertical mode with INDEPENDENT left and top margins.
-                # In VerticalTextDocumentLayout.layoutBlock():
-                #   - Text starts at y = docMargin (top), flows downward
-                #   - Text starts at x = max_width - docMargin (right), flows leftward
-                #   - Text wraps leftward until x reaches _vertical_left_margin (left boundary)
+                # Vertical mode: reduce available_height when left handle moves right.
+                # When moving left handle rightward (min_x increases), the horizontal
+                # space (effective_w) shrinks. To prevent text from reaching past
+                # the new left boundary, we reduce available_height proportionally:
+                #   ratio_remaining = effective_w / max_x  (clamped to [0.1, 1.0])
+                #   available_height = effective_h * ratio_remaining
                 #
-                # We use:
-                #   docMargin = min_y          → controls TOP edge of text
-                #   max_width = max_x + min_y  → so text_right = max_width - docMargin = max_x (RIGHT fixed!)
-                #   max_height = max_y + min_y → so available_height = max_y - min_y
-                #   vertical_left_margin = min_x + min_y → controls LEFT edge independently
+                # This makes columns shorter vertically, so more columns are created,
+                # and the leftmost column naturally stops at the left boundary —
+                # just like how the top handle works: reducing available_height creates
+                # more columns that start further right.
                 #
-                # Result:
-                #   - Top handle (min_y) → changes text_top + available_height ✓
-                #   - Bottom handle (max_y) → changes available_height ✓
-                #   - Right handle (max_x) → changes text_right ✓
-                #   - Left handle (min_x) → changes available_width (wrapping) but NOT text_right ✓
+                # The right edge (max_x) stays fixed — no text clipping on the right.
                 if self._left_points and self._right_points:
                     all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
                     all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
@@ -618,17 +614,11 @@ class FlowTextBlkItem(TextBlkItem):
                     if effective_w > 10 and effective_h > 10:
                         self.document().setDocumentMargin(min_y)
                         # max_width - docMargin = max_x => max_width = max_x + min_y
-                        # available_height = max_y - min_y => max_height = max_y + min_y
                         self.layout.setMaxSize(max_x + min_y, max_y + min_y)
-                        # Left boundary: vertical_left_margin = min_x + min_y
-                        # Effective text width = (max_x + min_y - min_y) - (min_x + min_y) = max_x - min_x - min_y
-                        # But we want effective text width = max_x - min_x
-                        # So we need: max_width - docMargin - vertical_left_margin = max_x - min_x
-                        # => max_x + min_y - min_y - vertical_left_margin = max_x - min_x
-                        # => vertical_left_margin = min_x
-                        self.layout.set_vertical_left_margin(min_x)
-                        # Fix available_width to account for independent left margin
-                        self.layout.available_width = effective_w
+                        # Reduce available_height when left handle moves right
+                        # to create shorter columns that naturally stop at the left boundary.
+                        ratio = max(0.1, effective_w / max(max_x, 1))
+                        self.layout.available_height = effective_h * ratio
                         self.layout.reLayout()
 
             self.repaint_background()
