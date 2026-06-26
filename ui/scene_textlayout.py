@@ -19,7 +19,7 @@ def print_transform(tr: QTransform):
     print(f'[[{tr.m11(), tr.m12(), tr.m13()}]\n [{tr.m21(), tr.m22(), tr.m23()}]\n [{tr.m31(), tr.m32(), tr.m33()}]]')
 
 
-PUNSET_HALF = {chr(i) for i in range(0x21, 0x7F)}
+PUNSET_HALF = {chr(i) for i in range(0x21, 0x7F)} | {chr(i) for i in range(0x0400, 0x0500)}
 
 # https://www.w3.org/TR/2022/DNOTE-clreq-20220801/#tables_of_chinese_punctuation_marks
 # https://www.w3.org/TR/2022/DNOTE-clreq-20220801/#glyphs_sizes_and_positions_in_character_faces_of_punctuation_marks
