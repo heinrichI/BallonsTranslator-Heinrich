@@ -6,15 +6,19 @@ modify the flow boundary points of a FlowTextBlkItem.  Handles are only
 visible on hover or when the item is under control.
 
 2 diamond handles (top/bottom) for resizing the block height.
+1 circular rotation handle above the block.
 """
 
+import math
 import logging
 
+import numpy as np
 from qtpy.QtWidgets import QGraphicsItem, QGraphicsEllipseItem, QGraphicsSceneMouseEvent, QWidget, QStyleOptionGraphicsItem, QLabel, QMenu
-from qtpy.QtCore import Qt, QRectF, QPointF, QSizeF
+from qtpy.QtCore import Qt, QRectF, QPointF, QSizeF, QPoint
 from qtpy.QtGui import QPainter, QPen, QColor, QBrush, QPolygonF
 
 from .flow_textitem import DEFAULT_POINTS_PER_SIDE, MIN_POINTS_PER_SIDE
+from .cursor import rotateCursorList
 
 logger = logging.getLogger('BallonTranslator')
 
@@ -272,6 +276,93 @@ class FlowResizeHandle(QGraphicsItem):
         event.accept()
 
 
+ROTATION_HANDLE_RADIUS = 6  # px at scale=1
+ROTATION_HANDLE_OFFSET = 20  # px above top edge at scale=1
+
+
+class FlowRotationHandle(QGraphicsEllipseItem):
+    """Draggable circular handle for rotating the text block."""
+
+    def __init__(self, parent: 'FlowShapeControl'):
+        r = ROTATION_HANDLE_RADIUS
+        super().__init__(-r, -r, r * 2, r * 2, parent)
+        self.ctrl: FlowShapeControl = parent
+        self._radius = r
+        self._dragging = False
+        self._rotate_start = 0.0
+
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+        self.setBrush(QBrush(QColor(255, 140, 0, 220)))
+        self.setPen(QPen(QColor(180, 90, 0), 1.5))
+
+    def setRadius(self, r: float):
+        self._radius = r
+        self.setRect(-r, -r, r * 2, r * 2)
+
+    def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            blk_item = self.ctrl.blk_item
+            if blk_item is not None:
+                center = blk_item.mapToScene(blk_item.boundingRect().center())
+                rotate_vec = event.scenePos() - center
+                rotation = np.rad2deg(math.atan2(rotate_vec.y(), rotate_vec.x()))
+                self._rotate_start = -rotation + self.ctrl.rotation()
+        event.accept()
+
+    def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
+        if not self._dragging:
+            return
+        blk_item = self.ctrl.blk_item
+        if blk_item is None:
+            return
+
+        center = blk_item.mapToScene(blk_item.boundingRect().center())
+        rotate_vec = event.scenePos() - center
+        rotation = np.rad2deg(math.atan2(rotate_vec.y(), rotate_vec.x()))
+        new_angle = rotation + self._rotate_start
+
+        self.ctrl.setAngle(new_angle)
+
+        angle_label = self.ctrl.angleLabel
+        gv = self.ctrl.gv
+        pos = gv.mapFromScene(event.scenePos())
+        x = max(min(pos.x(), gv.width() - angle_label.width()), 0)
+        y = max(min(pos.y(), gv.height() - angle_label.height()), 0)
+        angle_label.move(QPoint(x, y))
+        angle_label.setText("{:.1f}°".format(new_angle))
+        if not angle_label.isVisible():
+            angle_label.setVisible(True)
+            angle_label.raise_()
+
+        angle = self.ctrl.rotation() + 45 * self._get_angle_idx(new_angle)
+        idx = self._get_angle_idx(angle)
+        self.setCursor(rotateCursorList[idx])
+
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._dragging = False
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+            blk_item = self.ctrl.blk_item
+            self.ctrl.angleLabel.setVisible(False)
+            if blk_item is not None:
+                blk_item.rotated.emit(self.ctrl.rotation())
+                blk_item.update()
+            self.ctrl.updateBoundingRect()
+        event.accept()
+
+    def _get_angle_idx(self, angle) -> int:
+        return int((angle + 22.5) % 360 / 45)
+
+
 class FlowShapeControl(QGraphicsItem):
     """
     Replaces TextBlkShapeControl for FlowTextBlkItem.
@@ -305,6 +396,10 @@ class FlowShapeControl(QGraphicsItem):
         self.left_handle = FlowHResizeHandle(self, 'left')
         self.right_handle = FlowHResizeHandle(self, 'right')
         self._h_resize_handles = [self.left_handle, self.right_handle]
+
+        # Rotation handle above the block
+        self.rotation_handle = FlowRotationHandle(self)
+        self.rotation_handle.setVisible(False)
 
         for h in self.handles:
             h.setVisible(False)
@@ -370,6 +465,7 @@ class FlowShapeControl(QGraphicsItem):
                 h.setVisible(has_points)
             for h in self._h_resize_handles:
                 h.setVisible(has_points)
+            self.rotation_handle.setVisible(has_points)
             if has_points:
                 self.updateHandlePositions()
             self.show()
@@ -501,6 +597,11 @@ class FlowShapeControl(QGraphicsItem):
         ry = sum(p.y() for p in right_pts_parent) / len(right_pts_parent)
         self.right_handle.setPos(QPointF(rx, ry))
 
+        # Rotation handle: above the top handle
+        top_pos = self.top_handle.pos()
+        offset = ROTATION_HANDLE_OFFSET / self.current_scale
+        self.rotation_handle.setPos(QPointF(top_pos.x(), top_pos.y() - offset))
+
     def updateBoundingRect(self):
         """Compat shim — just refresh handle positions."""
         self.updateHandlePositions()
@@ -523,6 +624,11 @@ class FlowShapeControl(QGraphicsItem):
             h.setSize(s)
         for h in self._h_resize_handles:
             h.setSize(s)
+        r = ROTATION_HANDLE_RADIUS / scale
+        self.rotation_handle.setRadius(r)
+        pen = self.rotation_handle.pen()
+        pen.setWidthF(1.5 / scale)
+        self.rotation_handle.setPen(pen)
 
     def startEditing(self):
         """Hide flow handles when entering text edit mode."""
@@ -532,6 +638,7 @@ class FlowShapeControl(QGraphicsItem):
             h.setVisible(False)
         for h in self._h_resize_handles:
             h.setVisible(False)
+        self.rotation_handle.setVisible(False)
 
     def endEditing(self):
         """Show flow handles again when exiting text edit mode."""
@@ -545,6 +652,7 @@ class FlowShapeControl(QGraphicsItem):
             h.setVisible(has_points)
         for h in self._h_resize_handles:
             h.setVisible(has_points)
+        self.rotation_handle.setVisible(has_points)
 
     def hideControls(self):
         for h in self.handles:
@@ -553,6 +661,7 @@ class FlowShapeControl(QGraphicsItem):
             h.hide()
         for h in self._h_resize_handles:
             h.hide()
+        self.rotation_handle.hide()
 
     def showControls(self):
         has_points = self.blk_item is not None and \
@@ -564,9 +673,14 @@ class FlowShapeControl(QGraphicsItem):
             h.setVisible(has_points)
         for h in self._h_resize_handles:
             h.setVisible(has_points)
+        self.rotation_handle.setVisible(has_points)
 
     def setAngle(self, angle: float):
-        pass
+        if self.blk_item is not None:
+            center = self.blk_item.boundingRect().center()
+            self.blk_item.setTransformOriginPoint(center)
+            self.blk_item.setRotation(angle)
+            self.blk_item.blk.angle = angle
 
     def setPos(self, *args):
         """Compatibility method for canvas drag-create positioning (accepts QPointF or x, y)."""
@@ -651,6 +765,7 @@ class FlowShapeControl(QGraphicsItem):
             h.setVisible(has_points)
         for h in self._h_resize_handles:
             h.setVisible(has_points)
+        self.rotation_handle.setVisible(has_points)
         if has_points:
             self.updateHandlePositions()
         self.setZValue(1)
@@ -663,6 +778,7 @@ class FlowShapeControl(QGraphicsItem):
             h.setVisible(False)
         for h in self._h_resize_handles:
             h.setVisible(False)
+        self.rotation_handle.setVisible(False)
 
     def ctrlblockPressed(self):
         if self.scene() is not None:
@@ -678,7 +794,9 @@ class FlowShapeControl(QGraphicsItem):
         return 0.0
 
     def setRotation(self, angle: float):
-        pass
+        if self.blk_item is not None:
+            self.blk_item.setRotation(angle)
+            self.blk_item.blk.angle = angle
 
     def sceneBoundingRect(self) -> QRectF:
         if self.blk_item is not None:
