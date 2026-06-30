@@ -1,4 +1,7 @@
 import re
+import logging
+
+LOGGER = logging.getLogger('BallonTranslator')
 
 from qtpy.QtCore import Qt, QRectF, QPointF, Signal, QSizeF, QSize
 from qtpy.QtGui import QTextCharFormat, QTextDocument, QPixmap, QImage, QTransform, QPalette, QPainter, QTextFrame, QTextBlock, QAbstractTextDocumentLayout, QTextLayout, QFont, QFontMetricsF, QTextOption, QTextLine, QTextFormat
@@ -16,7 +19,7 @@ def print_transform(tr: QTransform):
     print(f'[[{tr.m11(), tr.m12(), tr.m13()}]\n [{tr.m21(), tr.m22(), tr.m23()}]\n [{tr.m31(), tr.m32(), tr.m33()}]]')
 
 
-PUNSET_HALF = {chr(i) for i in range(0x21, 0x7F)}
+PUNSET_HALF = {chr(i) for i in range(0x21, 0x7F)} | {chr(i) for i in range(0x0400, 0x0500)}
 
 # https://www.w3.org/TR/2022/DNOTE-clreq-20220801/#tables_of_chinese_punctuation_marks
 # https://www.w3.org/TR/2022/DNOTE-clreq-20220801/#glyphs_sizes_and_positions_in_character_faces_of_punctuation_marks
@@ -353,6 +356,24 @@ class VerticalTextDocumentLayout(SceneTextLayout):
 
         self.per_char_records = []
 
+        # Independent left margin for flow text blocks.
+        # When > 0, used instead of docMargin for the LEFT boundary check
+        # (docMargin still controls TOP boundary). This allows independent
+        # control of left and top edges in vertical mode.
+        self._vertical_left_margin = -1.0
+
+    def set_vertical_left_margin(self, value: float):
+        """Set independent left margin for vertical text layout.
+        When set (>0), this value is used as the left boundary instead of docMargin.
+        This allows the left edge to be controlled independently from the top edge."""
+        self._vertical_left_margin = value
+
+    def _get_left_margin(self):
+        """Get the effective left margin: _vertical_left_margin if set, else docMargin."""
+        if self._vertical_left_margin > 0:
+            return self._vertical_left_margin
+        return self.document().documentMargin()
+
     @property
     def align_right(self):
         return False
@@ -375,8 +396,9 @@ class VerticalTextDocumentLayout(SceneTextLayout):
 
         enlarged = False
         x_shift = 0
-        if self.layout_left < doc_margin:
-            x_shift  = doc_margin - self.layout_left
+        left_margin = self._get_left_margin()
+        if self.layout_left < left_margin:
+            x_shift  = left_margin - self.layout_left
             self.max_width += x_shift
             self.available_width = self.max_width - 2*doc_margin
             enlarged = True
@@ -861,7 +883,8 @@ class VerticalTextDocumentLayout(SceneTextLayout):
         tl.endLayout()
             
         self.layout_left = x_offset - self.draw_shifted
-        self.shrink_width = max(self.max_width - self.layout_left - doc_margin + 0.01, self.shrink_width)
+        left_margin = self._get_left_margin()
+        self.shrink_width = max(self.max_width - self.layout_left - left_margin + 0.01, self.shrink_width)
         self.shrink_height = max(shrink_height + 0.01 - doc_margin, self.shrink_height)
         self.x_offset_lst.append(x_offset)
         self.y_offset_lst.append(blk_char_yoffset)
@@ -883,6 +906,26 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
     def __init__(self, doc: QTextDocument, fontformat: FontFormat):
         super().__init__(doc, fontformat)
         self.need_ideal_height = True
+        self._line_left_offsets: dict = {}   # line_idx -> left x offset
+        self._line_right_offsets: dict = {}  # line_idx -> right x boundary
+        # Callable(y) -> x for flow-text boundary lookup (takes priority over dicts)
+        self._left_boundary_fn = None
+        self._right_boundary_fn = None
+        self._has_overflow_char_break: bool = False  # True if char-level breaks AND vertical overflow
+        self._has_char_level_breaks: bool = False  # True if ANY char-level breaks (regardless of overflow)
+    def set_line_x_offsets(self, left_offsets: dict, right_offsets: dict = None):
+        """Store per-line left offsets and right boundaries, trigger relayout."""
+        self._line_left_offsets = left_offsets if left_offsets is not None else {}
+        self._line_right_offsets = right_offsets if right_offsets is not None else {}
+        self.reLayout()
+
+    def set_boundary_functions(self, left_fn=None, right_fn=None):
+        """Set callable y->x boundary functions for flow layout. Triggers reLayout.
+        These take priority over the per-line-index dicts and are immune to
+        line-count changes between passes."""
+        self._left_boundary_fn = left_fn
+        self._right_boundary_fn = right_fn
+        self.reLayout()
 
     def reLayout(self):
         doc = self.document()
@@ -890,6 +933,8 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         self.text_padding = 0
         self.shrink_height = 0
         self.shrink_width = 0
+        self._has_overflow_char_break = False  # reset before each layout pass
+        self._has_char_level_breaks = False  # reset before each layout pass
         block = doc.firstBlock()
         while block.isValid():
             self.layoutBlock(block)
@@ -900,9 +945,14 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         else:
             new_height = doc_margin
         if new_height > self.available_height:
+            LOGGER.warning("  reLayout() expanding available_height: %.1f → %.1f (new_height=%.1f)",
+                           self.available_height, new_height, new_height)
             self.max_height = new_height + doc_margin * 2
             self.available_height = new_height
             self.size_enlarged.emit()
+        else:
+            LOGGER.info("  reLayout(): new_height=%.1f <= available_height=%.1f, no expansion",
+                        new_height, self.available_height)
 
         if doc.defaultTextOption().alignment() == Qt.AlignmentFlag.AlignCenter:
             block = doc.firstBlock()
@@ -956,6 +1006,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         
         # fm = QFontMetrics(font)
         doc_margin = self.document().documentMargin()
+        blk_text = block.text()  # needed for forced-char-break detection after endLayout
 
         block_height = self.block_ideal_height[block.blockNumber()]
         if block_height == 0:
@@ -984,8 +1035,32 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             line = tl.createLine()
             if not line.isValid():
                 break
-            # line.setLeadingIncluded(False)
-            line.setLineWidth(self.available_width)
+            # Calculate dynamic line width based on boundary functions
+            line_y = y_offset
+
+            # Determine left x position
+            if self._left_boundary_fn is not None:
+                x_pos = self._left_boundary_fn(line_y)
+            else:
+                x_pos = doc_margin + self._line_left_offsets.get(line_idx, 0)
+
+            # Determine right boundary and line width
+            if self._right_boundary_fn is not None:
+                right_x = self._right_boundary_fn(line_y)
+                if right_x > x_pos:
+                    line_width = max(right_x - x_pos, 10)
+                else:
+                    line_width = 10
+            elif line_idx in self._line_right_offsets:
+                right_x = self._line_right_offsets[line_idx]
+                if right_x > x_pos:
+                    line_width = max(right_x - x_pos, 10)
+                else:
+                    line_width = 10
+            else:
+                line_width = max(self.available_width - (x_pos - doc_margin), 10)
+
+            line.setLineWidth(line_width)
             nchar = line.textLength()
 
             dy = 0
@@ -1010,7 +1085,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             if idea_height == -1:
                 idea_height = block_height
                 
-            line.setPosition(QPointF(doc_margin, y_offset + dy))
+            line.setPosition(QPointF(x_pos, y_offset + dy))
             tw = line.naturalTextWidth()
             shrink_width = max(tw, shrink_width)
             self.shrink_height = max(idea_height + y_offset - doc_margin, self.shrink_height)    #????
@@ -1024,6 +1099,47 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             is_first_line = False
 
         tl.endLayout()
+
+        # ── Detect forced character-level breaks WITH overflow ──────
+        # After endLayout(), check if any line was broken mid-character
+        # (rather than at a word boundary or soft-hyphen).
+        # WrapAtWordBoundaryOrAnywhere tries word breaks first, then soft-hyphen,
+        # then falls back to character-by-character breaking.
+        #
+        has_char_break = False
+        for ii in range(tl.lineCount() - 1):
+            cur_line = tl.lineAt(ii)
+            nxt_line = tl.lineAt(ii + 1)
+            cur_start = cur_line.textStart()
+            cur_len = cur_line.textLength()
+            nxt_start = nxt_line.textStart()
+            if cur_len > 0 and nxt_start > cur_start:
+                # last char of current line
+                last_char_idx = cur_start + cur_len - 1
+                # first char of next line
+                first_char_idx = nxt_start
+                if last_char_idx < len(blk_text) and first_char_idx < len(blk_text):
+                    last_char = blk_text[last_char_idx]
+                    first_char = blk_text[first_char_idx]
+                    # Not a word-boundary break if:
+                    # 1. Last char is not space
+                    # 2. Last char is not soft-hyphen (U+00AD)
+                    # 3. First char of next line is not space (continuation of same word)
+                    if (not last_char.isspace() and
+                        last_char != '\u00AD' and
+                        not first_char.isspace()):
+                        has_char_break = True
+                        break
+        # _has_char_level_breaks: set whenever char-level breaks occur (regardless of overflow).
+        # This triggers font shrinking even when text fits vertically, because
+        # hyphenation should have provided soft-hyphen break points — if we still
+        # get character-level breaks, the font is too wide for the available space.
+        self._has_char_level_breaks = has_char_break
+        # _has_overflow_char_break: ONLY set when BOTH char breaks AND overflow,
+        # used as a stronger signal for shrinking but _has_char_level_breaks is
+        # checked first in _auto_shrink_font.
+        if has_char_break and self.shrink_height > self.available_height:
+            self._has_overflow_char_break = True
 
         if is_first_block or is_last_block:
             self.text_padding = max(self.text_padding, text_padding / 2)

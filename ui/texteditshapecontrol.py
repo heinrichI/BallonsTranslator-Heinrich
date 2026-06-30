@@ -349,3 +349,9 @@ class TextBlkShapeControl(QGraphicsRectItem):
         if self.isVisible():
             for ctrlb in self.ctrlblock_group:
                 ctrlb.show()
+
+# Alias: use FlowShapeControl as the active TextBlkShapeControl
+try:
+    from .flow_shapecontrol import FlowShapeControl  # noqa: F401
+except Exception:
+    pass

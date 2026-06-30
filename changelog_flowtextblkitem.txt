@@ -1,0 +1,194 @@
+================================================================================
+CHANGELOG: FlowTextBlkItem — Изогнутые текстовые блоки
+================================================================================
+
+Ветка: FlowTextBlkItem-Cline-claude2
+Описание: Добавление поддержки изогнутых/трапециевидных текстовых блоков
+с перетаскиваемыми контрольными точками границ.
+
+НОВЫЕ ФАЙЛЫ:
+────────────────────────────────────────────────────────────────────────────────
+
+ui/flow_textitem.py
+  - FlowTextBlkItem(TextBlkItem) — класс для изогнутых текстовых блоков
+    * 3+3 контрольные точки границ (левая/правая сторона) в item-local координатах
+    * interpolate_boundary(points, y) — линейная интерполяция между точками границы
+    * build_quad_path(points) — квадратичный Bezier path через 3 точки
+    * _init_points_from_rect() — инициализация 3+3 точек из прямоугольника
+    * _get_line_x_offsets() — per-line смещения для layout
+    * _update_flow_layout() — отправка смещений в HorizontalTextDocumentLayout
+    * save_flow_points() — сериализация точек в TextBlock.left_points/right_points
+    * Переопределения set_size/on_document_enlarged/docSizeChanged — pos() не сдвигается
+    * boundingRect() — включает все контрольные точки
+    * hoverEnterEvent/hoverLeaveEvent — для отрисовки границ при наведении
+    * showFlowContextMenu() — контекстное меню "Добавить точку к левой/правой стороне"
+    * paint() — рисует границы (кривые + верхнюю/нижнюю линии) при hover/under_ctrl
+    * _auto_shrink_font() — итеративное уменьшение шрифта при переполнении
+    * _auto_grow_font() — итеративное увеличение шрифта при пустом месте
+    * _draw_accessories() — подавление красной пунктирной рамки при under_ctrl
+
+ui/flow_shapecontrol.py (466 строк)
+  - FlowShapeControl(QGraphicsItem) — замена TextBlkShapeControl для FlowTextBlkItem
+    * Public API совместим с TextBlkShapeControl
+    * setBlkItem/rebuildHandles/updateHandlePositions/updateScale
+    * startEditing/endEditing/hideControls/showControls
+    * handleContextMenu(scene_pos, screen_pos) -> bool — инкапсуляция правого клика
+      (возвращает True если flow-элемент обработал событие)
+  - FlowControlHandle(QGraphicsEllipseItem) — 6 перетаскиваемых кругов
+    (3 слева белые, 3 справа синие) для контрольных точек
+  - FlowResizeHandle(QGraphicsItem) — 2 ромбовидных хендла (оранжевые)
+    для изменения высоты блока сверху и снизу
+  - FlowHResizeHandle(QGraphicsItem) — 2 ромбовидных хендла (голубые)
+    для изменения ширины блока слева и справа (вертикальный режим)
+  - _NullPixmapItem(QGraphicsItem) — заглушка previewPixmap
+
+ИЗМЕНЁННЫЕ ФАЙЛЫ:
+────────────────────────────────────────────────────────────────────────────────
+
+ui/canvas.py (изменения в 5 местах)
+  - import FlowShapeControl (вместо TextBlkShapeControl)
+  - self.txtblkShapeControl = FlowShapeControl(self.gv) — замена инициализации
+  - scaleImage() — вызов txtblkShapeControl.updateScale()
+  - render_result_img() — draw_boundaries=False на FlowTextBlkItem
+  - mouseReleaseEvent() — делегирование правого клика в handleContextMenu()
+
+ui/scene_textlayout.py (изменения в HorizontalTextDocumentLayout, 3 места)
+  - _line_left_offsets, _line_right_offsets — словари per-line смещений
+  - set_line_x_offsets(left_offsets, right_offsets) — установка и relayout
+  - layoutBlock() — динамическая ширина строк через _line_left_offsets/_line_right_offsets
+
+ИСПРАВЛЕНИЯ:
+────────────────────────────────────────────────────────────────────────────────
+
+2026-06-08 — commit 8e01f1b5 — контекстное меню: стандартные пункты пропадали
+  - **Проблема**: При добавлении пунктов "Добавить точку к левой/правой стороне"
+    в контекстное меню FlowTextBlkItem, стандартные пункты (Copy, Paste, Delete и др.)
+    переставали отображаться.
+  - **Причина**: PyQt6 требует, чтобы QAction имел parent при вставке через
+    `insertAction`. В showFlowContextMenu() action'ы создавались без parent'а.
+  - **Исправление**:
+    * flow_textitem.py — добавлен `parent=menu` для всех action'ов
+    * canvas.py — убрана прямая проверка isinstance(FlowTextBlkItem),
+      теперь handleContextMenu() сам определяет тип и маршрутизирует
+  - **Статус**: Исправлено
+
+2026-06-11 — Bug 3: Верхний ромб меняет красную пунктирную рамку
+  - **Проблема**: При перетаскивании верхнего ромбовидного хендла (ResizeHandle top)
+    красная пунктирная рамка (`_draw_accessories`) меняла размер. Другие контролы
+    (кружки, нижний ромб) такого не делали.
+  - **Причина**: `boundingRect()` во FlowTextBlkItem расширен за счёт
+    `united(pts_rect)` (включает все контрольные точки). Когда верхний хендл двигал
+    левую/правую верхнюю точку, `boundingRect()` расширялся, и рамка растягивалась.
+  - **Исправление**: `FlowTextBlkItem._draw_accessories()` — override, который
+    рисует `background_pixmap` (текст + тень/обводка) как обычно, но подавляет
+    отрисовку пунктирной рамки, когда `under_ctrl=True`.
+  - **Статус**: Исправлено
+
+2026-06-11 — Bug 4: Auto-shrink не работал (текст обрезался)
+  - **Проблема**: `_auto_shrink_font()` не уменьшал шрифт достаточно, текст
+    обрезался за пределами блока.
+  - **Причина**: `setRelFontSize()` вызывал `reLayoutEverything()` → `reLayout()`,
+    который расширял `available_height` при переполнении (строка:
+    `self.available_height = new_height`). После первого уменьшения шрифта,
+    расширенный `available_height` делал `shrink_height` всегда ≤ `available_height`,
+    и цикл завершался на первой итерации.
+  - **Исправление**: После `setRelFontSize()` сбрасываем `layout.available_height`
+    и `layout.max_height` обратно к целевым значениям и вызываем `layout.reLayout()`
+    принудительно перед проверкой `shrink_height`.
+  - **Статус**: Исправлено
+
+2026-06-11 — Feature: Auto-grow — шрифт максимально большого размера в блоке
+  - **Проблема**: При создании блоков или перетаскивании хендлов шрифт оставался
+    исходного размера, даже если блок был значительно больше текста.
+  - **Причина**: `_auto_shrink_font()` только уменьшал шрифт, но не было механизма
+    для его увеличения при наличии свободного места.
+  - **Исправление**: Добавлен `_auto_grow_font()` — вызывается после
+    `_auto_shrink_font()` в `_update_flow_layout()`. Если текст занимает менее 70%
+    высоты блока, шрифт итеративно увеличивается до ~90% заполнения.
+    Использует те же меры с reset available_height после setRelFontSize.
+  - **Статус**: Исправлено
+
+2026-06-12 — Bug 5: NameError — TEXTRECT_SELECTED_COLOR not defined
+  - **Проблема**: При вызове `_draw_accessories()` падало с NameError.
+  - **Причина**: `_draw_accessories()` использует константы `TEXTRECT_SELECTED_COLOR`
+    и `TEXTRECT_SHOW_COLOR`, определённые в `textitem.py`, но они не были
+    импортированы в `flow_textitem.py`.
+  - **Исправление**: Добавлен `from .textitem import TEXTRECT_SHOW_COLOR, TEXTRECT_SELECTED_COLOR`
+  - **Статус**: Исправлено
+
+2026-06-12 — Bug 6: Global font size отключает auto-grow
+  - **Проблема**: Когда в настройках Typesettings/FontSize стоит "global setting",
+    auto-grow всё равно увеличивал шрифт, игнорируя глобальный размер.
+  - **Причина**: Не было механизма отключения auto-grow при использовании глобального шрифта.
+  - **Исправление**: Добавлен флаг `_auto_grow_enabled`. В `_update_flow_layout()` grow
+    вызывается только если `self._auto_grow_enabled == True`. Флаг выставляется снаружи
+    (в `scenetext_manager.py`) когда `pcfg.let_fntsize_flag != 0`.
+  - **Статус**: Исправлено
+
+2026-06-12 — Тесты: `tests/ui/test_flow_textitem.py`
+  - Добавлены 16 юнит-тестов для FlowTextBlkItem:
+    * 3 теста на инициализацию (создание точек, текст, вертикальный режим)
+    * 3 теста на boundary layout (сужение/расширение блока → изменение числа строк)
+    * 3 теста на auto-shrink (уменьшение шрифта при overflow, текст влезает в блок)
+    * 3 теста на auto-grow (увеличение при пустом месте, не растёт когда заполнено, флаг)
+    * 2 теста на симметрию shrink+grow (fill ratio 50-105%)
+    * 2 теста на paint (не падает с NameError)
+  - Запуск: `$env:PYTHONPATH = "путь_к_проекту"; python -m pytest tests/ui/test_flow_textitem.py -v`
+  - **Статус**: 16/16 passed
+
+АНАЛИЗ: ПОЧЕМУ АВТОРАЗМЕР ЧИНИЛСЯ ТАК ДОЛГО
+────────────────────────────────────────────────────────────────────────────────
+
+Корень проблемы: каждая попытка фикса разбивалась о неочевидное поведение
+layout-движка:
+
+1. **SceneTextLayout.reLayout() расширяет available_height при переполнении**
+   (строка 943: `self.available_height = new_height`). Это сделано чтобы
+   документ мог расти, но ломает любой цикл, который использует available_height
+   как целевой лимит — после первого relayout лимит становится равен текущему
+   размеру текста, и цикл думает "всё влезает".
+
+2. **setRelFontSize() вызывает reLayoutEverything() → reLayout()**
+   Нельзя просто вызвать setRelFontSize и надеяться — нужно после него явно
+   восстанавливать constraints и делать ещё один reLayout.
+
+3. **Не было grow-фазы**
+   Даже если shrink работал правильно, не было кода, который бы увеличивал
+   шрифт когда текста мало. Пришлось добавить _auto_grow_font.
+
+Как можно было решить быстрее:
+- Первым делом прочитать **SceneTextLayout.reLayout()** и понять, что он
+  модифицирует available_height. Это единственная причина всех проблем.
+- Сразу спроектировать _auto_grow_font вместе с _auto_shrink_font — они
+  симметричны и используют одни и те же механизмы.
+
+Что нужно знать при похожих изменениях:
+- SceneTextLayout.reLayout() **всегда** расширяет available_height при
+  overflow — это не баг, а фича движка, которую надо компенсировать.
+- setRelFontSize → reLayoutEverything → reLayout — полная перестройка
+  документа, после которой все constraints сбрасываются.
+- Всегда делать reset constraints после любого вызова setRelFontSize
+  или setFontSize перед чтением shrink_height.
+
+НЕ ТРОГАЛИСЬ (используют duck-typing / hasattr):
+  - ui/scenetext_manager.py
+  - ui/textedit_commands.py
+  - ui/texteditshapecontrol.py
+  - ui/textitem.py
+  - utils/textblock.py
+
+КЛЮЧЕВЫЕ ОСОБЕННОСТИ:
+────────────────────────────────────────────────────────────────────────────────
+
+1. 6 контрольных точек (3 слева + 3 справа) для изогнутых границ
+2. Quadratic Bezier — кривая проходит через ВСЕ 3 точки (не только крайние)
+3. Per-line интерполяция — каждая строка текста подстраивается под границы
+4. Перетаскивание хендлов — обновление layout'а в реальном времени
+5. Resize сверху/снизу — сдвиг всей верхней/нижней границы
+6. Добавление/удаление точек через контекстное меню
+7. Hover-подсветка границ (только при наведении или выборе)
+8. draw_boundaries=False — подавление границ в экспортированном изображении
+9. Сериализация в TextBlock.left_points/right_points
+10. _auto_shrink_font() — итеративное уменьшение шрифта при переполнении
+11. _auto_grow_font() — итеративное увеличение шрифта при пустом месте
+12. _draw_accessories() — подавление пунктирной рамки при under_ctrl

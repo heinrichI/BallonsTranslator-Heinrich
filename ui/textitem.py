@@ -1129,3 +1129,11 @@ class TextBlkItem(QGraphicsTextItem):
         self.setPos(self.pos() + pos_shift)
         if self.blk is not None and set_blk_size:
             self.blk._bounding_rect = self.absBoundingRect()
+
+
+# Import alias so other modules can use FlowTextBlkItem as TextBlkItem
+# This is intentionally at the bottom to avoid circular imports.
+try:
+    from .flow_textitem import FlowTextBlkItem  # noqa: F401
+except Exception:
+    pass

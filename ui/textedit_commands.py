@@ -101,21 +101,47 @@ class ReshapeItemCommand(QUndoCommand):
         self.oldRect = item.oldRect
         self.newRect = item.absBoundingRect(qrect=True)
         self.idx = -1
+        # Save flow points if item supports them
+        if hasattr(item, '_left_points'):
+            from copy import deepcopy
+            self.old_left_points = deepcopy(item._left_points)
+            self.old_right_points = deepcopy(item._right_points)
+            self.new_left_points = deepcopy(item._left_points)
+            self.new_right_points = deepcopy(item._right_points)
+        else:
+            self.old_left_points = self.old_right_points = None
+            self.new_left_points = self.new_right_points = None
 
     def redo(self):
         if self.idx < 0:
             self.idx += 1
             return
         self.item.setRect(self.newRect)
+        if self.new_left_points is not None and hasattr(self.item, '_left_points'):
+            from copy import deepcopy
+            self.item._left_points = deepcopy(self.new_left_points)
+            self.item._right_points = deepcopy(self.new_right_points)
+            if hasattr(self.item, '_update_flow_layout'):
+                self.item._update_flow_layout()
 
     def undo(self):
         self.item.setRect(self.oldRect)
+        if self.old_left_points is not None and hasattr(self.item, '_left_points'):
+            from copy import deepcopy
+            self.item._left_points = deepcopy(self.old_left_points)
+            self.item._right_points = deepcopy(self.old_right_points)
+            if hasattr(self.item, '_update_flow_layout'):
+                self.item._update_flow_layout()
 
     def mergeWith(self, command: QUndoCommand):
         item = command.item
         if self.item != item:
             return False
         self.newRect = item.rect()
+        if hasattr(item, '_left_points') and command.new_left_points is not None:
+            from copy import deepcopy
+            self.new_left_points = deepcopy(command.new_left_points)
+            self.new_right_points = deepcopy(command.new_right_points)
         return True
 
 

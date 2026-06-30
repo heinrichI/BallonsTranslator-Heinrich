@@ -1,6 +1,9 @@
+import logging
 import numpy as np
 from typing import List, Union
 import os
+
+logger = logging.getLogger(__name__)
 
 from qtpy.QtWidgets import QApplication, QSlider, QMenu, QGraphicsScene, QGraphicsSceneDragDropEvent , QGraphicsView, QGraphicsSceneDragDropEvent, QGraphicsRectItem, QGraphicsItem, QScrollBar, QGraphicsPixmapItem, QGraphicsSceneMouseEvent, QGraphicsSceneContextMenuEvent, QRubberBand
 from qtpy.QtCore import Qt, QDateTime, QRectF, QPointF, QPoint, Signal, QSizeF, QEvent
@@ -14,6 +17,8 @@ from qtpy.QtGui import QUndoStack, QUndoCommand
 from .misc import ndarray2pixmap, QKEY, QNUMERIC_KEYS, ARROWKEY2DIRECTION
 from .textitem import TextBlkItem, TextBlock
 from .texteditshapecontrol import TextBlkShapeControl
+from .flow_shapecontrol import FlowShapeControl
+from .flow_textitem import FlowTextBlkItem
 from .custom_widget import ScrollBar, FadeLabel
 from .image_edit import ImageEditMode, DrawingLayer, StrokeImgItem
 from .page_search_widget import PageSearchWidget
@@ -241,7 +246,7 @@ class Canvas(QGraphicsScene):
         self.scaleFactorLabel.setText('100%')
         self.scaleFactorLabel.gv = self.gv
 
-        self.txtblkShapeControl = TextBlkShapeControl(self.gv)
+        self.txtblkShapeControl = FlowShapeControl(self.gv)
         
         self.baseLayer = QGraphicsRectItem()
         pen = QPen()
@@ -366,6 +371,11 @@ class Canvas(QGraphicsScene):
             if blk_item.isSelected():
                 blk_item.setSelected(False)
 
+        # Suppress flow boundary overlay in rendered output
+        flow_items = [item for item in self.items() if isinstance(item, FlowTextBlkItem)]
+        for item in flow_items:
+            item.draw_boundaries = False
+
         result = ndarray2pixmap(self.imgtrans_proj.inpainted_array, return_qimg=True)
         canvas_sz = self.img_window_size()
         painter = QPainter(result)
@@ -375,6 +385,10 @@ class Canvas(QGraphicsScene):
         self.render(painter, rect, rect)   #  produce blurred result if target/source rect not specified #320
         painter.end()
         
+        # Restore flow boundary overlay
+        for item in flow_items:
+            item.draw_boundaries = True
+
         if tlayer_opacity_before != 1:
             self.textLayer.setOpacity(tlayer_opacity_before)
         if not tlayer_visible:
@@ -682,7 +696,23 @@ class Canvas(QGraphicsScene):
             if self.stroke_img_item is not None:
                 self.finish_erasing.emit(self.stroke_img_item)
             if self.textEditMode() and not textblk_created:
-                self.context_menu_requested.emit(event.screenPos(), False)
+                scene_pos = event.scenePos()
+                screen_pos = event.screenPos()
+
+                logger.debug(
+                    "RIGHT-CLICK: textEditMode=%s, textblk_created=%s, blk_item=%s, blk_item_type=%s",
+                    self.textEditMode(), textblk_created,
+                    self.txtblkShapeControl.blk_item,
+                    type(self.txtblkShapeControl.blk_item).__name__ if self.txtblkShapeControl.blk_item else "None"
+                )
+
+                # Delegate to FlowShapeControl.handleContextMenu which checks:
+                # 1. Click on FlowControlHandle → "Удалить точку"
+                # 2. Click on FlowTextBlkItem → "Добавить точку к левой/правой стороне" + standard menu
+                # 3. Otherwise → return False → fall through to standard context menu
+                handled = self.txtblkShapeControl.handleContextMenu(scene_pos, screen_pos)
+                if not handled:
+                    self.context_menu_requested.emit(screen_pos, False)
         if btn == Qt.MouseButton.LeftButton:
             if self.stroke_img_item is not None:
                 self.finish_painting.emit(self.stroke_img_item)
@@ -756,70 +786,93 @@ class Canvas(QGraphicsScene):
     def setTextBlockMode(self, mode: bool):
         self.textblock_mode = mode
 
+    def build_context_menu(self):
+        """Build the standard context menu and return (menu, actions_dict)."""
+        menu = QMenu(self.gv)
+        
+        copy_act = menu.addAction(self.tr("Copy"))
+        copy_act.setShortcut(QKeySequence.StandardKey.Copy)
+        paste_act = menu.addAction(self.tr("Paste"))
+        paste_act.setShortcut(QKeySequence.StandardKey.Paste)
+        delete_act = menu.addAction(self.tr("Delete"))
+        delete_act.setShortcut(QKeySequence("Ctrl+D"))
+        copy_src_act = menu.addAction(self.tr("Copy source text"))
+        copy_src_act.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        paste_src_act = menu.addAction(self.tr("Paste source text"))
+        paste_src_act.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        delete_recover_act = menu.addAction(self.tr("Delete and Recover removed text"))
+        delete_recover_act.setShortcut(QKeySequence("Ctrl+Shift+D"))
+
+        menu.addSeparator()
+
+        format_act = menu.addAction(self.tr("Apply font formatting"))
+        layout_act = menu.addAction(self.tr("Auto layout"))
+        angle_act = menu.addAction(self.tr("Reset Angle"))
+        squeeze_act = menu.addAction(self.tr("Squeeze"))
+        savePng_act = menu.addAction(self.tr("Save PNG"))
+        menu.addSeparator()
+        translate_act = menu.addAction(self.tr("translate"))
+        ocr_act = menu.addAction(self.tr("OCR"))
+        ocr_translate_act = menu.addAction(self.tr("OCR and translate"))
+        ocr_translate_inpaint_act = menu.addAction(self.tr("OCR, translate and inpaint"))
+        inpaint_act = menu.addAction(self.tr("inpaint"))
+
+        actions = {
+            delete_act: ("delete_textblks", 0),
+            delete_recover_act: ("delete_textblks", 1),
+            copy_act: ("copy", None),
+            paste_act: ("paste", None),
+            copy_src_act: ("copy_src", None),
+            paste_src_act: ("paste_src", None),
+            format_act: ("format", None),
+            layout_act: ("layout", None),
+            angle_act: ("reset_angle", None),
+            squeeze_act: ("squeeze", None),
+            savePng_act: ("savepng", None),
+            translate_act: ("trans", -1),
+            ocr_act: ("trans", 0),
+            ocr_translate_act: ("trans", 1),
+            ocr_translate_inpaint_act: ("trans", 2),
+            inpaint_act: ("trans", 3),
+        }
+        return menu, actions
+
+    def exec_context_menu(self, menu: QMenu, actions: dict, pos: QPoint):
+        """Execute context menu and handle the selected action."""
+        rst = menu.exec(pos)
+        if rst is None:
+            return
+        action_info = actions.get(rst)
+        if action_info is None:
+            return
+        action_type, param = action_info
+        if action_type == "delete_textblks":
+            self.delete_textblks.emit(param)
+        elif action_type == "copy":
+            self.on_copy()
+        elif action_type == "paste":
+            self.on_paste()
+        elif action_type == "copy_src":
+            self.copy_src_signal.emit()
+        elif action_type == "paste_src":
+            self.paste_src_signal.emit()
+        elif action_type == "format":
+            self.format_textblks.emit()
+        elif action_type == "layout":
+            self.layout_textblks.emit()
+        elif action_type == "reset_angle":
+            self.reset_angle.emit()
+        elif action_type == "squeeze":
+            self.squeeze_blk.emit()
+        elif action_type == "savepng":
+            self.savePng_blk.emit()
+        elif action_type == "trans":
+            self.run_blktrans.emit(param)
+
     def on_create_contextmenu(self, pos: QPoint, is_textpanel: bool):
         if self.textEditMode() and not self.creating_textblock:
-            menu = QMenu(self.gv)
-            copy_act = menu.addAction(self.tr("Copy"))
-            copy_act.setShortcut(QKeySequence.StandardKey.Copy)
-            paste_act = menu.addAction(self.tr("Paste"))
-            paste_act.setShortcut(QKeySequence.StandardKey.Paste)
-            delete_act = menu.addAction(self.tr("Delete"))
-            delete_act.setShortcut(QKeySequence("Ctrl+D"))
-            copy_src_act = menu.addAction(self.tr("Copy source text"))
-            copy_src_act.setShortcut(QKeySequence("Ctrl+Shift+C"))
-            paste_src_act = menu.addAction(self.tr("Paste source text"))
-            paste_src_act.setShortcut(QKeySequence("Ctrl+Shift+V"))
-            delete_recover_act = menu.addAction(self.tr("Delete and Recover removed text"))
-            delete_recover_act.setShortcut(QKeySequence("Ctrl+Shift+D"))
-
-            menu.addSeparator()
-
-            format_act = menu.addAction(self.tr("Apply font formatting"))
-            layout_act = menu.addAction(self.tr("Auto layout"))
-            angle_act = menu.addAction(self.tr("Reset Angle"))
-            squeeze_act = menu.addAction(self.tr("Squeeze"))
-            savePng_act = menu.addAction(self.tr("Save PNG"))
-            menu.addSeparator()
-            translate_act = menu.addAction(self.tr("translate"))
-            ocr_act = menu.addAction(self.tr("OCR"))
-            ocr_translate_act = menu.addAction(self.tr("OCR and translate"))
-            ocr_translate_inpaint_act = menu.addAction(self.tr("OCR, translate and inpaint"))
-            inpaint_act = menu.addAction(self.tr("inpaint"))
-
-            rst = menu.exec(pos)
-            
-            if rst == delete_act:
-                self.delete_textblks.emit(0)
-            elif rst == delete_recover_act:
-                self.delete_textblks.emit(1)
-            elif rst == copy_act:
-                self.on_copy()
-            elif rst == paste_act:
-                self.on_paste()
-            elif rst == copy_src_act:
-                self.copy_src_signal.emit()
-            elif rst == paste_src_act:
-                self.paste_src_signal.emit()
-            elif rst == format_act:
-                self.format_textblks.emit()
-            elif rst == layout_act:
-                self.layout_textblks.emit()
-            elif rst == angle_act:
-                self.reset_angle.emit()
-            elif rst == squeeze_act:
-                self.squeeze_blk.emit()
-            elif rst == savePng_act:
-                self.savePng_blk.emit()                
-            elif rst == translate_act:
-                self.run_blktrans.emit(-1)
-            elif rst == ocr_act:
-                self.run_blktrans.emit(0)
-            elif rst == ocr_translate_act:
-                self.run_blktrans.emit(1)
-            elif rst == ocr_translate_inpaint_act:
-                self.run_blktrans.emit(2)
-            elif rst == inpaint_act:
-                self.run_blktrans.emit(3)
+            menu, actions = self.build_context_menu()
+            self.exec_context_menu(menu, actions, pos)
 
     @property
     def have_selected_blkitem(self):
@@ -993,4 +1046,3 @@ class Canvas(QGraphicsScene):
         self.blockSignals(True)
         self.text_undo_stack.blockSignals(True)
         self.draw_undo_stack.blockSignals(True)
-
