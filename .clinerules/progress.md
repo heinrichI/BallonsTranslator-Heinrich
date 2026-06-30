@@ -21,7 +21,16 @@
 - **Hyphenation**: long words split by syllables via pyphen (Cyrillic ru_RU + Latin en_US) with soft hyphens
 - **Char-level break detection**: _has_char_level_breaks flag triggers font shrink when words break at character boundaries, even without vertical overflow
 - **25 unit tests**: tests/ui/test_flow_textitem.py covering init, boundary, shrink, grow, symmetry, paint, hyphenation
+- HF ogkalu detector integrated and auto-registered as `comic-text-and-bubble-detector`.
+- CTD-based refinemask integration in detectors: `refine_mask(img, coarse_mask, blk_list)` returns per-character masks when blk_list aligns to text lines.
+- Debug tooling: scripts to run detector and compare masks.
+- Russian comments added to CTD detector and CTD basemodel/inference files for maintainability.
 
+## What's Left
+- Split large merged blocks into lines before calling `refine_mask` to obtain character-level masks instead of block masks.
+- Unit tests to cover HF parsing helpers and large-block split logic.
+- UI exposure: surface `box_padding` and `mask dilate size` more prominently and consider safer defaults (0/0) for new users.
+- Documentation: update doc/modules and CHANGELOG with the detector changes.
 ## What's Left to Build
 - [x] Initial FlowTextBlkItem implementation with control points
 - [x] FlowShapeControl with drag handles
@@ -44,6 +53,9 @@ All known issues (vertical mode alignment, text clipping, _display_rect regressi
 
 ## Known Issues
 - None currently open.
+- Implemented defensive parsing, padding/clamping, merge protection.
+- Added debug scripts and mask diagnostics.
+- Added localised comments in CTD-related modules.
 
 ## Evolution of Project Decisions
 1. Initially `showFlowContextMenu()` in FlowTextBlkItem was called directly from canvas via `isinstance()` check
@@ -65,3 +77,8 @@ All known issues (vertical mode alignment, text clipping, _display_rect regressi
 17. Updated `_auto_shrink_font()` to trigger on char-level breaks even without vertical overflow — two-stage strategy: hyphenation first, then shrink if needed
 18. Expanded test suite to 25 tests — added 9 hyphenation tests
 19. Overrode `setHtml()` and `setPlainTextAndKeepUndoStack()` to apply hyphenation before passing text to layout
+## Next Milestones
+- [ ] Implement splitting of oversized merged blocks into lines and re-run diagnostics.
+- [ ] Add unit tests for `_safe_box_from_item` and split logic.
+- [ ] Manual UI verification with multiple comic pages.
+- [ ] Update doc/modules and CHANGELOG.

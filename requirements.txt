@@ -9,7 +9,7 @@ urllib3
 jaconv
 torch
 torchvision
-transformers
+transformers>=5.0.0
 mecab-python3; sys_platform == 'darwin'
 fugashi
 unidic_lite
@@ -56,4 +56,3 @@ pyobjc-framework-coreml; sys_platform == 'darwin'
 pyobjc-framework-quartz; sys_platform == 'darwin'
 pyobjc-framework-vision; sys_platform == 'darwin'
 betterproto
-pyphen>=0.14.0
