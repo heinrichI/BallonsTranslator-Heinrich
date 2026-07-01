@@ -27,6 +27,14 @@ preview
   - Support rich text formatting and [text style presets](https://github.com/dmMaze/BallonsTranslator/pull/311), translated texts can be edited interactively.
   - Support search & replace
   - Support export/import to/from word documents
+  - **Flow Text Blocks (FlowTextBlkItem)**: Curved/trapezoidal text blocks with draggable boundary handles for non-rectangular text layout (manga SFX, irregular speech bubbles). Supports syllable-based hyphenation (Latin/Cyrillic) and auto-shrink/auto-grow font sizing.
+  - **Spell Checking**: Built-in spellcheck engine (EN/FR/IT/DE) with word suggestions, replace-all, and image preview dialog. Enable via Settings.
+  
+* Run Selected Pages
+  - Multi-select pages in the file list (Ctrl+Click / Shift+Click) and translate only selected pages via right-click context menu.
+
+* Auto Font Sizing
+  - Translation pipeline auto-adjusts font size to fill balloon regions with overlap-check layout.
 
 # Installation
 
@@ -141,6 +149,7 @@ This project is heavily dependent upon [manga-image-translator](https://github.c
    * For detailed instructions, see **Tuanzi OCR Instructions**: ([Chinese](doc/团子OCR说明.md) & [Brazilian Portuguese](doc/Manual_TuanziOCR_pt-BR.md) only)
  
  * `YSGDetector` models are trained by [lhj5426](https://github.com/lhj5426), these models would filter out onomatopoeia in CGs/Manga, download checkpoints from [YSGYoloDetector](https://huggingface.co/YSGforMTL/YSGYoloDetector) and put into `data/models`. 
+ * **ComicTextAndBubbleDetector**: HuggingFace RT-DETR based detector ([ogkalu/comic-text-and-bubble-detector](https://huggingface.co/ogkalu/comic-text-and-bubble-detector)). Labels: `bubble`, `text_bubble`, `text_free` (SFX/captions outside bubbles). Includes CTD segmentation fallback and IoU-based NMS.
 
 
 ## OCR
@@ -152,6 +161,8 @@ This project is heavily dependent upon [manga-image-translator](https://github.c
    * For detailed instructions, see **Tuanzi OCR Instructions**: ([Chinese](doc/团子OCR说明.md) & [Brazilian Portuguese](doc/Manual_TuanziOCR_pt-BR.md) only)
 * Added as an "optional" PaddleOCR module. In Debug mode you will see a message stating that it is not there. You can simply install it by following the instructions described there. If you don’t want to install the package yourself, just uncomment (remove the `#`) the lines with paddlepaddle(gpu) and paddleocr. Bet everything at your own peril andrisk. For me (bropines) and two testers, everything was installed fine, you may have an error. Write about it in issue and tag me.
 * Added [OneOCR](https://github.com/b1tg/win11-oneocr). Local WINDOWS model taken from SnippingTOOL or Win.PHOTOS applications. To use it, you need to place the model and DLL files in the 'data/models/one-ocr' folder. Before running, it is better to throw the files at once. Read how to find and get DLL and model files here: https://github.com/dmMaze/BallonsTranslator/discussions/859#discussioncomment-12876757 . Thanks AuroraWright for the project [OneOCR](https://github.com/AuroraWright/oneocr)
+ * **PaddleOCR-VL 1.5**: OCR via `AutoModelForImageTextToText` with chat template support, OCR/spotting modes, and flash attention option.
+ * **PaddleOCR-VL My / MyColor**: Custom PaddleOCR-VL integration with garbage text detection heuristics and optional MIT-48px CTC color extraction.
 
 ## Inpainting
   * AOT is from [manga-image-translator](https://github.com/zyddnys/manga-image-translator).
@@ -160,6 +171,9 @@ This project is heavily dependent upon [manga-image-translator](https://github.c
   
 ## Translators
 * **You can find information about Translators modules [here.](doc/modules/translators.md)**
+* **TransGemma**: LLM translation via OpenAI-compatible API with Pydantic structured output. Supports batch translation, configurable temperature/top-p/penalties, and low VRAM mode.
+* **NLLB-200**: Local 200-language translation using `facebook/nllb-200-distilled-600M`. No API key needed.
+* Uppercase translation preservation: all-caps source text is automatically uppercased in the translation.
 
 ## FAQ & Misc
 * If your computer has an Nvidia GPU or Apple silicon, the program will enable hardware acceleration. 
@@ -168,3 +182,5 @@ This project is heavily dependent upon [manga-image-translator](https://github.c
 * Fonts are from your system's fonts.
 * Thanks to [bropines](https://github.com/bropines) for the Russian localization.
 * Added Export to photoshop JSX script by [bropines](https://github.com/bropines). </br> To read the instructions, improve the code and just poke around to see how it works, you can go to `scripts/export to photoshop` -> `install_manual.md`.
+* [pyphen](https://pyphen.org/) is used for syllable-based hyphenation in Flow Text Blocks (Latin/Cyrillic). It is installed automatically.
+* DirectML support is currently disabled.
