@@ -420,10 +420,17 @@ class FlowShapeControl(QGraphicsItem):
     # ── QGraphicsItem required overrides ──────────────────────
 
     def boundingRect(self) -> QRectF:
+        if self.blk_item is None and hasattr(self, '_drag_rect') and self._drag_rect is not None:
+            return self._drag_rect
         return QRectF()
 
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget = None):
-        pass
+        if self.blk_item is None and hasattr(self, '_drag_rect') and self._drag_rect is not None:
+            pen = QPen(QColor(69, 71, 87), 2 / self.current_scale, Qt.PenStyle.SolidLine)
+            pen.setDashPattern([7, 14])
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self._drag_rect)
 
     # ── Public API (compatible with TextBlkShapeControl) ──────
 
@@ -694,7 +701,9 @@ class FlowShapeControl(QGraphicsItem):
     def setRect(self, rect: QRectF):
         """Compatibility method for canvas drag-create rectangle."""
         if self.blk_item is None:
+            self.prepareGeometryChange()
             self._drag_rect = rect
+            self.update()
             return
         self.blk_item.setRect(rect)
 
