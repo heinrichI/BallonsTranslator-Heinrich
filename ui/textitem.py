@@ -942,32 +942,11 @@ class TextBlkItem(QGraphicsTextItem):
             self.update()
 
     def setRelFontSize(self, value: float, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, clip_size: bool = False, **kwargs):
-        self.layout.relayout_on_changed = False
-        _, after_kwargs = self._before_set_ffmt(set_selected, restore_cursor)
-        doc = self.document()
-        cursor = QTextCursor(doc)
-        block = doc.firstBlock()
-        while block.isValid():
-            it = block.begin()
-            while not it.atEnd():
-                fragment = it.fragment()
-                old_font_size = fragment.charFormat().fontPointSize()
-                new_font_size = round(old_font_size * value,2)
-                cfmt = fragment.charFormat()
-                cfmt.setFontPointSize(new_font_size)
-                pos1 = fragment.position()
-                pos2 = pos1 + fragment.length()
-                cursor.setPosition(pos1)
-                cursor.setPosition(pos2, QTextCursor.MoveMode.KeepAnchor)
-                cursor.mergeCharFormat(cfmt)
-                it += 1
-            block = block.next()
-        self.layout.relayout_on_changed = True
-        self.layout.reLayoutEverything()
-        if clip_size:
-            self.squeezeBoundingRect(True, repaint=False)
-
-        self._after_set_ffmt(cursor, repaint_background, restore_cursor, **after_kwargs)
+        current = self.layout.max_font_size()
+        if current < 1:
+            current = self.document().defaultFont().pointSizeF()
+        new_size = round(current * value, 2)
+        self.setFontSize(new_size, repaint_background, set_selected, restore_cursor, clip_size, **kwargs)
         
 
     def setFontSize(self, value: float, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, clip_size: bool = False, **kwargs):
