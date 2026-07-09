@@ -27,6 +27,7 @@ def _fmt_pts(pts):
 
 HANDLE_RADIUS = 6       # px at scale=1
 RESIZE_HANDLE_SIZE = 8  # px at scale=1
+DIAMOND_OFFSET = 10     # px offset from control points for left/right diamond handles
 
 class FlowControlHandle(QGraphicsEllipseItem):
     """Draggable circular handle for one boundary control point."""
@@ -42,7 +43,6 @@ class FlowControlHandle(QGraphicsEllipseItem):
         self._drag_start_pos = QPointF()
 
         self.setFlags(
-            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
             QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
         )
         self.setAcceptHoverEvents(True)
@@ -379,6 +379,13 @@ class FlowShapeControl(QGraphicsItem):
         self.blk_item = None
         self.current_scale: float = 1.0
         self.need_rescale: bool = False
+        self._dragging = False
+        self._drag_start_pos = QPointF()
+        self._block_start_pos = QPointF()
+
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
 
         # DEFAULT_POINTS_PER_SIDE left handles then DEFAULT_POINTS_PER_SIDE right handles
         self.handles: list[FlowControlHandle] = []
@@ -420,7 +427,9 @@ class FlowShapeControl(QGraphicsItem):
     # ── QGraphicsItem required overrides ──────────────────────
 
     def boundingRect(self) -> QRectF:
-        if self.blk_item is None and hasattr(self, '_drag_rect') and self._drag_rect is not None:
+        if self.blk_item is not None:
+            return self.blk_item.boundingRect()
+        if hasattr(self, '_drag_rect') and self._drag_rect is not None:
             return self._drag_rect
         return QRectF()
 
@@ -431,6 +440,26 @@ class FlowShapeControl(QGraphicsItem):
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self._drag_rect)
+
+    def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self.blk_item is not None:
+            self._dragging = True
+            self._drag_start_pos = event.scenePos()
+            self._block_start_pos = self.blk_item.pos()
+        event.accept()
+
+    def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
+        if not self._dragging or self.blk_item is None:
+            return
+        delta = event.scenePos() - self._drag_start_pos
+        new_pos = self._block_start_pos + delta
+        self.blk_item.setPos(new_pos)
+        self.updateHandlePositions()
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        self._dragging = False
+        event.accept()
 
     # ── Public API (compatible with TextBlkShapeControl) ──────
 
@@ -592,15 +621,15 @@ class FlowShapeControl(QGraphicsItem):
             (bl.y() + br.y()) / 2,
         ))
 
-        # Left handle: midpoint of all left points (vertical center, left edge)
+        # Left handle: midpoint of all left points, shifted left by offset
         left_pts_parent = [blk_item.mapToItem(parent_item, p) for p in blk_item._left_points]
-        lx = sum(p.x() for p in left_pts_parent) / len(left_pts_parent)
+        lx = sum(p.x() for p in left_pts_parent) / len(left_pts_parent) - DIAMOND_OFFSET / self.current_scale
         ly = sum(p.y() for p in left_pts_parent) / len(left_pts_parent)
         self.left_handle.setPos(QPointF(lx, ly))
 
-        # Right handle: midpoint of all right points (vertical center, right edge)
+        # Right handle: midpoint of all right points, shifted right by offset
         right_pts_parent = [blk_item.mapToItem(parent_item, p) for p in blk_item._right_points]
-        rx = sum(p.x() for p in right_pts_parent) / len(right_pts_parent)
+        rx = sum(p.x() for p in right_pts_parent) / len(right_pts_parent) + DIAMOND_OFFSET / self.current_scale
         ry = sum(p.y() for p in right_pts_parent) / len(right_pts_parent)
         self.right_handle.setPos(QPointF(rx, ry))
 

@@ -176,31 +176,28 @@ class FlowTextBlkItem(TextBlkItem):
         self._updating_flow: bool = False  # guard flag to prevent _display_rect changes during flow updates
         self._auto_grow_enabled: bool = True  # set to False when global font size is used
 
+        # Restore flow points BEFORE super().__init__() — otherwise setVertical()
+        # (called from initTextBlock inside super) generates default rectangle points
+        # and save_flow_points() overwrites blk.left_points before we can read them.
+        if blk is not None and blk.left_points and blk.right_points:
+            self._left_points = [QPointF(p[0], p[1]) for p in blk.left_points]
+            self._right_points = [QPointF(p[0], p[1]) for p in blk.right_points]
+
         super().__init__(blk, idx, set_format, show_rect, *args, **kwargs)
         self.setAcceptHoverEvents(True)
 
+        # Generate default flow points if not restored from blk and not yet set.
+        # Must be AFTER super().__init__() so _display_rect has correct dimensions
+        # from setRect() (during super init, _display_rect is still 1x1 default).
+        if not self._left_points and not self._right_points:
+            dr = self._display_rect
+            p = self.pos()
+            if dr is not None and dr.isValid() and dr.width() > 10 and dr.height() > 10:
+                rect = QRectF(p.x(), p.y(), dr.width(), dr.height())
+                self._init_points_from_rect(rect)
+
         logging.debug("=== FlowTextBlkItem.__init__ ===")
         logging.debug("  idx=%d pos=%s", idx, self.pos())
-        logging.debug("  blk=%s", blk)
-
-        # Initialize flow points from the block if already set
-        if blk is not None:
-            logging.debug("  blk has left_points=%s right_points=%s",
-                          bool(blk.left_points), bool(blk.right_points))
-            if blk.left_points and blk.right_points:
-                self._left_points = [QPointF(p[0], p[1]) for p in blk.left_points]
-                self._right_points = [QPointF(p[0], p[1]) for p in blk.right_points]
-                logging.debug("  restored from blk: left=%s right=%s",
-                              [(p.x(), p.y()) for p in self._left_points],
-                              [(p.x(), p.y()) for p in self._right_points])
-            else:
-                # Use _display_rect (properly sized by setRect) to avoid
-                # absBoundingRect returning near-zero during early init.
-                dr = self._display_rect
-                pos = self.pos()
-                abr = QRectF(pos.x(), pos.y(), dr.width(), dr.height())
-                logging.debug("  calling _init_points_from_rect with displayRect-based=%s", abr)
-                self._init_points_from_rect(abr)
         logging.debug("  after init: left=%s right=%s",
                       [(p.x(), p.y()) for p in self._left_points],
                       [(p.x(), p.y()) for p in self._right_points])
@@ -265,13 +262,19 @@ class FlowTextBlkItem(TextBlkItem):
     def _init_points_from_rect(self, rect: QRectF):
         """Initialise DEFAULT_POINTS_PER_SIDE boundary points per side from a plain rectangle.
         rect is in scene coordinates (includes pos offset).  Skips if rect is too small
-        (degenerate or not yet fully initialised)."""
+        (degenerate or not yet fully initialised).
+        Also skips if flow points were already restored from blk.left_points/right_points."""
         logging.debug("=== _init_points_from_rect ===")
         logging.debug("  rect=%s (x=%.1f y=%.1f w=%.1f h=%.1f)",
                       rect, rect.x() if rect else 0, rect.y() if rect else 0,
                       rect.width() if rect else 0, rect.height() if rect else 0)
         if rect is None or rect.width() < 10 or rect.height() < 10:
             logging.debug("  rect too small, returning")
+            return
+        # Skip if flow points already restored from blk.left_points/right_points
+        if self._left_points and self._right_points:
+            logging.debug("  flow points already set (%d left, %d right), skipping",
+                          len(self._left_points), len(self._right_points))
             return
         pos = self.pos()
         logging.debug("  self.pos()=%s", pos)
@@ -625,6 +628,22 @@ class FlowTextBlkItem(TextBlkItem):
             self.update()
         finally:
             self._updating_flow = was_updating
+        # Update _display_rect AFTER flow layout completes.
+        # Use shrink_height from layout (actual text extent, no margin inflation)
+        # and control point x-range for width (actual text width).
+        doc_margin = self.document().documentMargin()
+        if self._left_points and self._right_points:
+            all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
+            text_w = max(all_xs) - min(all_xs)
+            text_h = self.layout.shrink_height if hasattr(self.layout, 'shrink_height') and self.layout.shrink_height > 0 else self.documentSize().height() - 2 * doc_margin
+            self._display_rect.setWidth(text_w + 2 * doc_margin)
+            self._display_rect.setHeight(text_h + 2 * doc_margin)
+        else:
+            size = self.documentSize()
+            if size.width() > 0 and size.height() > 0:
+                self._display_rect.setWidth(size.width())
+                self._display_rect.setHeight(size.height())
+        self.save_flow_points()
 
     # ── Vertical mode override ────────────────────────────────
 
@@ -650,7 +669,8 @@ class FlowTextBlkItem(TextBlkItem):
             self._init_points_from_rect(rect)
         # 3. Update layout for both modes — vertical mode now also needs layout sync
         self._update_flow_layout()
-        self.save_flow_points()
+        if self._left_points and self._right_points:
+            self.save_flow_points()
 
     # ── Serialisation ─────────────────────────────────────────
 
@@ -660,6 +680,8 @@ class FlowTextBlkItem(TextBlkItem):
             return
         self.blk.left_points = [[p.x(), p.y()] for p in self._left_points]
         self.blk.right_points = [[p.x(), p.y()] for p in self._right_points]
+        logging.debug("save_flow_points: blk=%s left=%s right=%s",
+                      id(self.blk), self.blk.left_points, self.blk.right_points)
 
     # ── Override size/pos methods to prevent pos() shift ─────
 
@@ -686,6 +708,17 @@ class FlowTextBlkItem(TextBlkItem):
         # the red dashed border from resizing when dragging the top resize handle.
         if self._updating_flow:
             return
+        doc_margin = self.document().documentMargin()
+        if self._left_points and self._right_points:
+            all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
+            text_w = max(all_xs) - min(all_xs)
+            text_h = self.layout.shrink_height if hasattr(self.layout, 'shrink_height') and self.layout.shrink_height > 0 else self.documentSize().height() - 2 * doc_margin
+            self._display_rect.setWidth(text_w + 2 * doc_margin)
+            self._display_rect.setHeight(text_h + 2 * doc_margin)
+        else:
+            size = self.documentSize()
+            self._display_rect.setWidth(size.width())
+            self._display_rect.setHeight(size.height())
         self.setCenterTransform()
         self.prepareGeometryChange()
         self.update()
@@ -694,6 +727,17 @@ class FlowTextBlkItem(TextBlkItem):
         # For flow items: guard against _display_rect changes during flow updates.
         if self._updating_flow:
             return
+        doc_margin = self.document().documentMargin()
+        if self._left_points and self._right_points:
+            all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
+            text_w = max(all_xs) - min(all_xs)
+            text_h = self.layout.shrink_height if hasattr(self.layout, 'shrink_height') and self.layout.shrink_height > 0 else self.documentSize().height() - 2 * doc_margin
+            self._display_rect.setWidth(text_w + 2 * doc_margin)
+            self._display_rect.setHeight(text_h + 2 * doc_margin)
+        else:
+            size = self.documentSize()
+            self._display_rect.setWidth(size.width())
+            self._display_rect.setHeight(size.height())
         self.setCenterTransform()
         self.update()
 
@@ -708,6 +752,31 @@ class FlowTextBlkItem(TextBlkItem):
             pts_rect = QRectF(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
             rect = rect.united(pts_rect)
         return rect
+
+    def absBoundingRect(self, max_h=None, max_w=None, qrect=False):
+        """Override to use _display_rect for dimensions (excludes control points)."""
+        import math
+        P = 2 * self.padding()
+        pos = self.pos()
+        x = pos.x() + self.padding()
+        y = pos.y() + self.padding()
+        if self._display_rect is not None and self._display_rect.isValid():
+            w = self._display_rect.width() - P
+            h = self._display_rect.height() - P
+        else:
+            br = super().boundingRect()
+            w, h = br.width() - P, br.height() - P
+        if max_h is not None:
+            y = min(max(0, y), max_h)
+            y1 = y + h
+            h = min(max_h, y1) - y
+        if max_w is not None:
+            x = min(max(0, x), max_w)
+            x1 = x + w
+            w = min(max_w, x1) - x
+        if qrect:
+            return QRectF(x, y, w, h)
+        return [int(round(x)), int(round(y)), math.ceil(w), math.ceil(h)]
 
     # ── Hover events ──────────────────────────────────────────
 
@@ -797,6 +866,7 @@ class FlowTextBlkItem(TextBlkItem):
         Legacy entry point for the combined context menu.
         Builds the standard canvas menu, injects flow items, and shows it.
         """
+        self.setSelected(True)
         logger.debug("showFlowContextMenu called — scene_pos=(%.1f, %.1f)", scene_pos.x(), scene_pos.y())
         scene = self.scene()
         if scene is not None and hasattr(scene, 'build_context_menu') and hasattr(scene, 'exec_context_menu'):

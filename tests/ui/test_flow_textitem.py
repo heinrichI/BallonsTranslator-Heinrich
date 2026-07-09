@@ -385,5 +385,96 @@ class TestHyphenation:
         )
 
 
+# ── Regression tests for flow points persistence ──────────────
+
+class TestFlowPointsPersistence:
+    """Tests for flow control points saving/loading across page switches."""
+
+    def test_saved_points_restored_on_reinit(self, scene):
+        """Flow points saved to blk must survive re-creation of FlowTextBlkItem."""
+        blk = _make_blk(xyxy=(100, 100, 300, 200))
+        blk.left_points = [[0, 0], [0, 50], [100, 60]]
+        blk.right_points = [[200, 0], [200, 50], [200, 100]]
+
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Verify custom points restored (not default rectangle)
+        assert item._left_points[2].x() == 100
+        assert item._left_points[2].y() == 60
+        assert item._right_points[2].x() == 200
+        assert item._right_points[2].y() == 100
+
+    def test_save_flow_points_does_not_overwrite_with_empty(self, scene):
+        """save_flow_points with empty _left_points must not clear blk.left_points."""
+        blk = _make_blk(xyxy=(100, 100, 300, 200))
+        blk.left_points = [[0, 0], [0, 50], [100, 60]]
+        blk.right_points = [[200, 0], [200, 50], [200, 100]]
+
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Simulate what setVertical used to do: call save_flow_points
+        # when _left_points might be empty during init
+        original_left = list(blk.left_points)
+        item.save_flow_points()
+
+        # Points must NOT be overwritten with empty
+        assert blk.left_points == original_left
+
+    def test_default_points_generated_for_new_blocks(self, scene):
+        """New blocks without saved points must get default rectangle points."""
+        blk = _make_blk(xyxy=(0, 0, 400, 200))
+        # No left_points/right_points set
+
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        assert len(item._left_points) == 3
+        assert len(item._right_points) == 3
+        # Points should form a rectangle
+        assert item._left_points[0].x() == item._left_points[2].x()  # same x
+        assert item._right_points[0].x() == item._right_points[2].x()
+
+    def test_display_rect_not_inflated_by_margins(self, scene):
+        """_display_rect height must match actual text extent, not document size."""
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text="Hello")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # _display_rect should be close to block size, not inflated
+        dr = item._display_rect
+        assert dr.width() <= 400 + 10  # small tolerance
+        assert dr.height() <= 200 + 10
+
+    def test_absBoundingRect_dimensions_reasonable(self, scene):
+        """absBoundingRect must return dimensions that make sense for font sizing."""
+        blk = _make_blk(xyxy=(50, 50, 250, 150), text="Test text here")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        abr = item.absBoundingRect()
+        # width and height must be positive and not wildly different from block
+        assert abr[2] > 0
+        assert abr[3] > 0
+        assert abr[2] <= 500  # reasonable upper bound
+        assert abr[3] <= 500
+
+    def test_points_survive_setPlainText(self, scene):
+        """Flow points must not be lost when text is set."""
+        blk = _make_blk(xyxy=(0, 0, 400, 200))
+        blk.left_points = [[0, 0], [0, 50], [150, 60]]
+        blk.right_points = [[300, 0], [300, 50], [300, 100]]
+
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        item.setPlainText("New text content")
+
+        # Custom points must survive
+        assert item._left_points[2].x() == 150
+        assert item._right_points[2].x() == 300
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

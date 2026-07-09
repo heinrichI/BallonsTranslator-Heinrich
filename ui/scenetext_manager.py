@@ -443,8 +443,14 @@ class SceneTextManager(QObject):
         self.txtblkShapeControl.updateBoundingRect()
 
     def clearSceneTextitems(self):
+        LOGGER.debug("clearSceneTextitems: saving flow points for %d items", len(self.textblk_item_list))
         self.hovering_transwidget = None
         self.txtblkShapeControl.setBlkItem(None)
+        for blkitem in self.textblk_item_list:
+            if hasattr(blkitem, 'save_flow_points'):
+                blkitem.save_flow_points()
+                LOGGER.debug("  saved flow points for blk id=%s left=%s",
+                             id(blkitem.blk), getattr(blkitem.blk, 'left_points', None))
         for blkitem in self.textblk_item_list:
             self.canvas.removeItem(blkitem)
         self.textblk_item_list.clear()
@@ -473,8 +479,7 @@ class SceneTextManager(QObject):
         # Update the word panel with the extracted words
         self.updateUnknownWordsPanel()
 
-        if self.auto_textlayout_flag:
-            self.updateTextBlkList()
+        self.updateTextBlkList()
 
     def addTextBlock(self, blk: Union[TextBlock, TextBlkItem] = None) -> TextBlkItem:
         # import debugpy
@@ -1334,6 +1339,10 @@ class SceneTextManager(QObject):
                 blk_item.blk.translation = ''
             blk_item.blk.text = [trans_pair.e_source.toPlainText()]
             blk_item.blk._bounding_rect = blk_item.absBoundingRect()
+            LOGGER.debug("SAVED blk idx=%d absBoundingRect=%s pos=%s _display_rect=%s left_points=%d",
+                         blk_item.idx, blk_item.blk._bounding_rect, blk_item.pos(),
+                         blk_item._display_rect if hasattr(blk_item, '_display_rect') else 'N/A',
+                         len(getattr(blk_item, '_left_points', [])))
             blk_item.updateBlkFormat()
             # Save flow points if supported
             if hasattr(blk_item, 'save_flow_points'):
