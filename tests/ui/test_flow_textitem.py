@@ -476,5 +476,279 @@ class TestFlowPointsPersistence:
         assert item._right_points[2].x() == 300
 
 
+class TestBinarySearchFontSizing:
+    """Test _find_best_font_size with Cyrillic text that caused small-font bug.
+
+    Bug: binary search used document().size().height() instead of
+    layout.shrink_height, causing it to pick fonts ~5x too small.
+
+    Real data from logs.txt (Sensation Comics 001-006.jpg):
+      idx=6: text='БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ З...'
+             target=(305.0x92.0) optimal_size=14.55pt
+      idx=8: text='60 МИЛЬ В ЧАС-- И ОНА ЕЩЕ ВПЕРЕД, ЕДУ ЧТОБЫ ОТКРЫТЬ ЭТО БАГГ...'
+             target=(247.0x161.0) optimal_size=16.11pt
+    """
+
+    def test_bystre_block_gets_reasonable_font(self, scene):
+        """БЫСТРЕЕ block (305x92) should get ~14pt font, not ~3pt."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        font = item.layout.max_font_size()
+        # From logs: optimal_size=14.55pt
+        assert font >= 12.0, f"БЫСТРЕЕ font too small: {font:.1f}pt (expected >= 12pt)"
+        assert font <= 18.0, f"БЫСТРЕЕ font too large: {font:.1f}pt (expected <= 18pt)"
+
+    def test_60_mil_block_fills_height(self, scene):
+        """60 МИЛЬ В ЧАС block (247x161) should fill ~70%+ of height."""
+        text = "60 МИЛЬ В ЧАС-- И ОНА ЕЩЕ ВПЕРЕД, ЕДУ ЧТОБЫ ОТКРЫТЬ ЭТО БАГРОВОЕ ДЕЛО"
+        blk = _make_blk(xyxy=(0, 0, 247, 161), text=text, font_size=119.2)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        target_h = 161.0
+        text_extent = item.layout.shrink_height
+        fill_ratio = text_extent / target_h
+        # From logs: text_extent=117.3, fill=73%
+        assert fill_ratio >= 0.50, (
+            f"60 МИЛЬ text should fill >= 50% of block: "
+            f"shrink_height={text_extent:.1f} target={target_h:.1f} "
+            f"fill={fill_ratio:.1%}"
+        )
+
+    def test_no_oscillation_after_shrink_grow(self, scene):
+        """After shrink+grow, running again should produce same result."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+
+        # First pass
+        item._update_flow_layout()
+        font1 = item.layout.max_font_size()
+        extent1 = item.layout.shrink_height
+
+        # Second pass — should be stable
+        item._update_flow_layout()
+        font2 = item.layout.max_font_size()
+        extent2 = item.layout.shrink_height
+
+        assert abs(font1 - font2) < 1.0, (
+            f"Font oscillation: pass1={font1:.1f}pt pass2={font2:.1f}pt"
+        )
+        assert abs(extent1 - extent2) < 10.0, (
+            f"Height oscillation: pass1={extent1:.1f} pass2={extent2:.1f}"
+        )
+
+    def test_text_fits_width_after_binary_search(self, scene):
+        """Text width should not exceed block width after binary search."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        target_w = 305.0
+        text_w = item.layout.shrink_width
+        assert text_w <= target_w * 1.05, (
+            f"Text overflows width: {text_w:.1f} > {target_w:.1f}"
+        )
+
+    def test_set_size_with_auto_font_adjust_false(self, scene):
+        """set_size(auto_font_adjust=False) should not trigger shrink/grow."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+        font_before = item.layout.max_font_size()
+
+        # set_size with auto_font_adjust=False should not change font
+        item.set_size(305, 92, set_layout_maxsize=True, auto_font_adjust=False)
+        font_after = item.layout.max_font_size()
+
+        assert abs(font_before - font_after) < 1.0, (
+            f"set_size(auto_font_adjust=False) changed font: "
+            f"before={font_before:.1f} after={font_after:.1f}"
+        )
+
+
+class TestAutoFontAdjustFlag:
+    """Regression: _auto_font_adjust must survive internal shrink/grow cycles.
+
+    Bug: FlowTextBlkItem.setFontSize() unconditionally set _auto_font_adjust=False,
+    even when called internally by _auto_shrink_font/_auto_grow_font via
+    setRelFontSize(). This permanently disabled auto-adjust after the first layout.
+    """
+
+    def test_auto_font_adjust_survives_shrink(self, scene):
+        """_auto_font_adjust stays True after _auto_shrink_font runs."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+
+        assert item._auto_font_adjust is True
+        item._auto_shrink_font()
+        assert item._auto_font_adjust is True, (
+            "_auto_font_adjust was reset to False by _auto_shrink_font"
+        )
+
+    def test_auto_font_adjust_survives_grow(self, scene):
+        """_auto_font_adjust stays True after _auto_grow_font runs."""
+        text = "Hello"
+        blk = _make_blk(xyxy=(0, 0, 400, 300), text=text, font_size=10.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+
+        assert item._auto_font_adjust is True
+        item._auto_grow_font()
+        assert item._auto_font_adjust is True, (
+            "_auto_font_adjust was reset to False by _auto_grow_font"
+        )
+
+    def test_auto_font_adjust_survives_update_flow_layout(self, scene):
+        """_auto_font_adjust stays True after full _update_flow_layout with shrink."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+
+        assert item._auto_font_adjust is True
+        item._update_flow_layout()
+        assert item._auto_font_adjust is True, (
+            "_auto_font_adjust was reset to False by _update_flow_layout"
+        )
+
+    def test_manual_font_change_still_disables_auto_adjust(self, scene):
+        """User font change via setFontSize should still set _auto_font_adjust=False."""
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text="Hello world", font_size=14.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText("Hello world")
+
+        assert item._auto_font_adjust is True
+        item.setFontSize(20.0)  # Simulate user changing font via toolbar
+        assert item._auto_font_adjust is False, (
+            "User font change should set _auto_font_adjust=False"
+        )
+
+
+class TestBlockResizeShrinkGrow:
+    """Test that font auto-adjusts when block boundaries change (handle drag)."""
+
+    def _resize_right(self, item, new_right_x):
+        """Simulate dragging the right boundary control point."""
+        # Set right boundary x to new_right_x for all right points
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(new_right_x, pt.y())
+        item._update_flow_layout()
+
+    def _resize_left(self, item, new_left_x):
+        """Simulate dragging the left boundary control point."""
+        for i, pt in enumerate(item._left_points):
+            item._left_points[i] = QPointF(new_left_x, pt.y())
+        item._update_flow_layout()
+
+    def test_resize_narrower_triggers_shrink(self, scene):
+        """Making block narrower should shrink font to fit."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        font_before = item.layout.max_font_size()
+        width_before = item.layout.shrink_width
+
+        # Make block narrower (200px instead of 305px)
+        self._resize_right(item, 200)
+
+        font_after = item.layout.max_font_size()
+        # Font should have shrunk to fit the narrower width
+        assert font_after < font_before, (
+            f"Font did not shrink on narrower block: "
+            f"before={font_before:.1f} after={font_after:.1f}"
+        )
+
+    def test_resize_wider_triggers_grow(self, scene):
+        """Making block wider after shrink should grow font back."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+
+        # Shrink first
+        self._resize_right(item, 200)
+        font_after_shrink = item.layout.max_font_size()
+
+        # Now widen back to original
+        self._resize_right(item, 305)
+        font_after_grow = item.layout.max_font_size()
+
+        assert font_after_grow > font_after_shrink, (
+            f"Font did not grow on wider block: "
+            f"after_shrink={font_after_shrink:.1f} after_grow={font_after_grow:.1f}"
+        )
+
+    def test_shrink_then_widen_recovers_font(self, scene):
+        """Font after shrink→widen should be close to original."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        font_original = item.layout.max_font_size()
+
+        # Shrink to 200px, then back to 305px
+        self._resize_right(item, 200)
+        self._resize_right(item, 305)
+        font_recovered = item.layout.max_font_size()
+
+        # Should recover most of the original font size (within 3pt tolerance)
+        assert abs(font_recovered - font_original) < 3.0, (
+            f"Font did not recover after shrink→widen: "
+            f"original={font_original:.1f} recovered={font_recovered:.1f}"
+        )
+
+    def test_multiple_resizes_no_oscillation(self, scene):
+        """Repeated narrow→wide→narrow cycles should stabilize."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+
+        fonts = []
+        for w in [200, 305, 200, 305]:
+            self._resize_right(item, w)
+            fonts.append(item.layout.max_font_size())
+
+        # Last two (both at 305px) should be very close
+        assert abs(fonts[1] - fonts[3]) < 1.0, (
+            f"Font oscillation at same width: pass1={fonts[1]:.1f} pass2={fonts[3]:.1f}"
+        )
+        # Last two (both at 200px) should be very close
+        assert abs(fonts[0] - fonts[2]) < 1.0, (
+            f"Font oscillation at same width: pass1={fonts[0]:.1f} pass2={fonts[2]:.1f}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -20,6 +20,9 @@ from typing import List, Union, Tuple
 logger = logging.getLogger('BallonTranslator')
 LOGGER = logger  # alias used in _auto_shrink_font, _auto_grow_font
 
+# Only log shrink/grow for blocks with these text prefixes
+_LOG_PREFIXES = ("БЫСТРЕЕ", "60 МИЛЬ В ЧАС")
+
 from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent, QMenu, QAction
 from qtpy.QtCore import Qt, QRectF, QPointF, Signal
 from qtpy.QtGui import (QPainter, QPen, QColor, QPainterPath, QTextCursor)
@@ -175,6 +178,8 @@ class FlowTextBlkItem(TextBlkItem):
         self.draw_boundaries: bool = True
         self._updating_flow: bool = False  # guard flag to prevent _display_rect changes during flow updates
         self._auto_grow_enabled: bool = True  # set to False when global font size is used
+        self._auto_font_adjust: bool = True  # False when user changed font manually, True on block create/resize
+        self._internal_font_change: bool = False  # True during _auto_shrink_font/_auto_grow_font to prevent _auto_font_adjust reset
 
         # Restore flow points BEFORE super().__init__() — otherwise setVertical()
         # (called from initTextBlock inside super) generates default rectangle points
@@ -336,6 +341,23 @@ class FlowTextBlkItem(TextBlkItem):
 
         return left_offsets, right_boundaries
 
+    def _block_text(self) -> str:
+        """Return first 30 chars of block text for logging filter."""
+        try:
+            return self.document().toPlainText()[:30]
+        except Exception:
+            return ""
+
+    def _should_log(self) -> bool:
+        """True only for blocks whose text starts with a _LOG_PREFIXES entry."""
+        txt = self._block_text()
+        return any(txt.startswith(p) for p in _LOG_PREFIXES)
+
+    def _log(self, msg: str, level: int = logging.DEBUG):
+        """Log only for target blocks, with block text prefix."""
+        if self._should_log():
+            LOGGER.log(level, "[%s] %s", self._block_text()[:20], msg)
+
     def _auto_shrink_font(self) -> bool:
         """
         Iteratively reduce font size until text fits in available space
@@ -366,84 +388,82 @@ class FlowTextBlkItem(TextBlkItem):
         if min_font <= MIN_FONT_SIZE_PT:
             return False
 
-        # Compute target height from control points (not from layout.available_height
-        # which may have grown after the layout expanded to fit overflowing text).
+        # Compute target height and width from control points (not from
+        # layout.available_height/width which may have grown after the layout
+        # expanded to fit overflowing text).
         if self._left_points and self._right_points:
             all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
             target_height = max(all_ys) - min(all_ys)
+            all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
+            target_width = max(all_xs) - min(all_xs)
         else:
             target_height = layout.available_height
+            target_width = layout.available_width
         if target_height < 10:
             return False
 
         text_extent = layout.shrink_height
-        LOGGER.info("=== _auto_shrink_font ===")
-        LOGGER.info("  target_height=%.1f text_extent(shrink_height)=%.1f",
-                    target_height, text_extent)
-        LOGGER.info("  layout.available_height=%.1f layout.max_height=%.1f",
-                    layout.available_height, layout.max_height)
+        text_width = layout.shrink_width
+        self._log("=== _auto_shrink_font ===")
+        self._log("  target_height=%.1f text_extent=%.1f target_width=%.1f text_width=%.1f" %
+                     (target_height, text_extent, target_width, text_width))
 
-        # Check conditions for shrinking:
-        # 1. Height overflow (text_extent > target_height) — standard shrink
-        # 2. Character-level breaks (layout._has_char_level_breaks) —
-        #    Even if text fits vertically, if the layout engine had to break
-        #    words at character boundaries (after hyphenation failed to provide
-        #    good break points), the font is too wide and needs shrinking.
         char_level_breaks = getattr(layout, '_has_char_level_breaks', False)
-        LOGGER.info("  _has_char_level_breaks=%s", char_level_breaks)
-        if text_extent <= target_height and not char_level_breaks:
-            LOGGER.info("  => text_extent <= target_height and NO char-level breaks, NO SHRINK (return False)")
+        height_overflow = text_extent > target_height
+        width_overflow = text_width > target_width if target_width > 0 else False
+        # Shrink triggers: width overflow, char-level breaks, or close to width limit.
+        # "close to width" means font is near the max it can be — growing to fill
+        # height would cause width overflow.
+        close_to_width = target_width > 0 and text_width > target_width * 0.85
+        if not width_overflow and not char_level_breaks and not close_to_width:
+            self._log("  => no overflow and NOT close to width, NO SHRINK")
             return False
-        if text_extent <= target_height and char_level_breaks:
-            LOGGER.info("  => text_extent <= target_height BUT char-level breaks present — WILL SHRINK")
 
-        # If text overflows AND has character-level breaks, always shrink.
-        # If text overflows WITHOUT char breaks (just height overflow), also shrink.
         applied = False
         doc_margin = self.document().documentMargin()
         for iteration in range(1, 21):
-            LOGGER.info("  --- shrink iteration %d ---", iteration)
             if applied:
-                LOGGER.info("  resetting available_height=%.1f max_height=%.1f",
-                            target_height, target_height + doc_margin * 2)
                 layout.available_height = target_height
                 layout.max_height = target_height + doc_margin * 2
                 layout.reLayout()
-            else:
-                pass  # first iteration, no reset needed
 
             text_extent = layout.shrink_height
-            LOGGER.info("  after layout: text_extent=%.1f target_height=%.1f",
-                        text_extent, target_height)
-            LOGGER.info("  layout.available_height=%.1f layout.max_height=%.1f",
-                        layout.available_height, layout.max_height)
+            text_width = layout.shrink_width
+            self._log("  iter %d: text_extent=%.1f target_h=%.1f text_w=%.1f target_w=%.1f" %
+                         (iteration, text_extent, target_height, text_width, target_width))
 
-            # Stop shrinking when text fits vertically
-            if text_extent <= target_height:
-                LOGGER.info("  => text_extent <= target_height, STOP")
+            # Stop shrinking when text fits in BOTH height and width
+            height_ok = text_extent <= target_height
+            width_ok = text_width <= target_width if target_width > 0 else True
+            if height_ok and width_ok:
+                self._log("  => text fits, STOP")
                 break
 
-            # compute shrink factor: 5% safety margin, cap at 0.9
-            factor = min(FONT_SHRINK_FACTOR, (target_height / text_extent) * 0.95) if text_extent > 0 else FONT_SHRINK_FACTOR
-            LOGGER.info("  factor=%.4f (FONT_SHRINK_FACTOR=%.2f target/text_extent=%.4f)",
-                        factor, FONT_SHRINK_FACTOR, target_height / text_extent if text_extent > 0 else 0)
+            # Compute shrink factor: width-based when close to width limit,
+            # height-based for pure height overflow.
+            close_to_width = target_width > 0 and text_width > target_width * 0.85
+            if close_to_width and text_width > 0:
+                factor = min(FONT_SHRINK_FACTOR, (target_width / text_width) * 0.95)
+            elif not height_ok and text_extent > 0:
+                factor = min(FONT_SHRINK_FACTOR, (target_height / text_extent) * 0.95)
+            else:
+                factor = FONT_SHRINK_FACTOR
             if factor >= 1.0:
-                LOGGER.info("  => factor >= 1.0, STOP (no shrink needed)")
                 break
 
-            current_font = layout.max_font_size()
-            LOGGER.info("  calling setRelFontSize(factor=%.4f), current_font=%.1fpt", factor, current_font)
-            self.setRelFontSize(factor)
+            self._internal_font_change = True
+            try:
+                self.setRelFontSize(factor)
+            finally:
+                self._internal_font_change = False
             applied = True
 
             # check min size after shrink
             new_min = layout.max_font_size()
-            LOGGER.info("  after setRelFontSize: new_min=%.1fpt", new_min)
             if new_min <= MIN_FONT_SIZE_PT:
-                LOGGER.info("  => new_min <= MIN_FONT_SIZE_PT (%.1f), STOP", MIN_FONT_SIZE_PT)
                 break
 
-        LOGGER.info("=== _auto_shrink_font DONE, applied=%s ===", applied)
+        self._log("  _auto_shrink_font DONE, applied=%s" % applied)
 
         if applied:
             # Sync fontformat.size so the font-size panel reflects the new size.
@@ -472,6 +492,10 @@ class FlowTextBlkItem(TextBlkItem):
         too small for the box), increase font size until text fills ~90%
         of the available height.
 
+        Respects width constraints: does not grow when char-level breaks
+        indicate the font is at max width, and caps grow factor to prevent
+        width overflow.
+
         Called AFTER _auto_shrink_font() in _update_flow_layout() so that
         overflow is handled first, then growth is applied if there's room.
         """
@@ -481,37 +505,63 @@ class FlowTextBlkItem(TextBlkItem):
         if not isinstance(layout, HorizontalTextDocumentLayout):
             return False
 
-        # Target height from control points
+        # Target height and width from control points
         if self._left_points and self._right_points:
             all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
             target_height = max(all_ys) - min(all_ys)
+            all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
+            target_width = max(all_xs) - min(all_xs)
         else:
             target_height = layout.available_height
+            target_width = layout.available_width
         if target_height < 10:
             return False
 
         text_extent = layout.shrink_height
+        text_width = layout.shrink_width
         # Only grow if text fills less than 70% of available height
         if text_extent >= target_height * 0.70:
+            self._log("  _auto_grow: text fills %.0f%% of height, SKIP" % (text_extent / target_height * 100))
             return False
+        self._log("  _auto_grow: text_extent=%.1f target_h=%.1f text_w=%.1f target_w=%.1f" %
+                     (text_extent, target_height, text_width, target_width))
 
         applied = False
         doc_margin = self.document().documentMargin()
-        for _ in range(20):
+        for iteration in range(20):
             # Reset constraints before each iteration (same as shrink)
             layout.available_height = target_height
             layout.max_height = target_height + doc_margin * 2
             layout.reLayout()
 
             text_extent = layout.shrink_height
+            text_width = layout.shrink_width
+            width_ok = text_width <= target_width if target_width > 0 else True
+
+            # Stop if width overflows — the font is too large
+            if not width_ok:
+                self._log("  _auto_grow iter %d: width overflow %.1f>%.1f, STOP" %
+                             (iteration, text_width, target_width))
+                break
+
             # Stop when text fills >= 90% of target
-            if text_extent >= target_height * 0.90:
+            height_ok = text_extent >= target_height * 0.90
+            if height_ok:
+                self._log("  _auto_grow iter %d: height=%.0f%%, STOP" %
+                             (iteration, text_extent / target_height * 100))
                 break
 
             # Compute grow factor: aim for 90% fill, cap at 1.08 per iteration
-            factor = min(1.08, (target_height * 0.90) / max(text_extent, 1))
+            height_factor = (target_height * 0.90) / max(text_extent, 1)
+            # Cap by width ratio to prevent overshooting width
+            width_factor = target_width / max(text_width, 1) if target_width > 0 and text_width > 0 else 1.08
+            factor = min(1.08, height_factor, width_factor)
 
-            self.setRelFontSize(factor)
+            self._internal_font_change = True
+            try:
+                self.setRelFontSize(factor)
+            finally:
+                self._internal_font_change = False
             applied = True
 
         if applied:
@@ -535,8 +585,14 @@ class FlowTextBlkItem(TextBlkItem):
         """Push current boundary functions to the layout engine and repaint."""
         from .scene_textlayout import VerticalTextDocumentLayout
 
+        # Re-entrancy guard: prevent recursive calls triggered by reLayout()
+        # signals (size_enlarged, documentSizeChanged) during grow/shrink loops.
+        if self._updating_flow:
+            return
+
+        LOGGER.debug("_update_flow_layout: _auto_font_adjust=%s", self._auto_font_adjust)
+
         # Guard: prevent _display_rect changes from docSizeChanged during flow updates
-        was_updating = self._updating_flow
         self._updating_flow = True
         try:
             if isinstance(self.layout, HorizontalTextDocumentLayout):
@@ -563,7 +619,7 @@ class FlowTextBlkItem(TextBlkItem):
                     # available_height = max_height - 2*doc_margin => max_height = target_height + 2*min_y
                     self.layout.setMaxSize(target_width + 2 * min_y, target_height + 2 * min_y)
                 else:
-                    self._updating_flow = was_updating
+                    self._updating_flow = False
                     return
 
                 # Use callable y->x boundary functions instead of per-line-index dicts.
@@ -582,9 +638,16 @@ class FlowTextBlkItem(TextBlkItem):
                 )
                 # set_boundary_functions calls reLayout() internally — no second pass needed.
                 # First shrink if text overflows, then grow if there's room.
-                font_changed = self._auto_shrink_font()
-                if self._auto_grow_enabled:
-                    font_changed = self._auto_grow_font() or font_changed
+                # Skip auto-adjust when user changed font manually (_auto_font_adjust=False).
+                font_changed = False
+                if self._auto_font_adjust:
+                    font_changed = self._auto_shrink_font()
+                    # Only grow when shrink did NOT apply — prevents oscillation
+                    # where grow undoes shrink and triggers another cycle.
+                    if self._auto_grow_enabled and not font_changed:
+                        font_changed = self._auto_grow_font() or font_changed
+                else:
+                    LOGGER.debug("  _update_flow_layout: _auto_font_adjust=False, shrink/grow SKIPPED")
                 if font_changed:
                     # Notify the text panel so it refreshes the font-size display.
                     try:
@@ -627,7 +690,7 @@ class FlowTextBlkItem(TextBlkItem):
             self.repaint_background()
             self.update()
         finally:
-            self._updating_flow = was_updating
+            self._updating_flow = False
         # Update _display_rect AFTER flow layout completes.
         # Use shrink_height from layout (actual text extent, no margin inflation)
         # and control point x-range for width (actual text width).
@@ -672,6 +735,20 @@ class FlowTextBlkItem(TextBlkItem):
         if self._left_points and self._right_points:
             self.save_flow_points()
 
+    # ── Font change override ────────────────────────────────────
+
+    def setFontSize(self, value, *args, **kwargs):
+        """Override to disable auto-adjust when user changes font manually.
+
+        _internal_font_change is True during _auto_shrink_font/_auto_grow_font
+        calls to setRelFontSize(), which prevents the flag from being reset
+        by internal font adjustments (shrink/grow). Only external calls
+        (toolbar, font panel) should set _auto_font_adjust = False.
+        """
+        if not self._internal_font_change:
+            self._auto_font_adjust = False
+        return super().setFontSize(value, *args, **kwargs)
+
     # ── Serialisation ─────────────────────────────────────────
 
     def save_flow_points(self):
@@ -685,7 +762,7 @@ class FlowTextBlkItem(TextBlkItem):
 
     # ── Override size/pos methods to prevent pos() shift ─────
 
-    def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True):
+    def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True, auto_font_adjust=True):
         """For flow items: update layout max size but never shift pos()."""
         if set_layout_maxsize and hasattr(self, 'layout') and self.layout is not None:
             try:
@@ -696,10 +773,17 @@ class FlowTextBlkItem(TextBlkItem):
         self.prepareGeometryChange()
         if set_blk_size and self.blk is not None:
             self.blk._bounding_rect = self.absBoundingRect()
-        # After layout size is set, reapply flow boundaries + auto-shrink font.
-        # This is where _auto_shrink_font gets correct layout dimensions.
+        if auto_font_adjust:
+            # Normal path: enable shrink/grow, leave flag True after
+            self._auto_font_adjust = True
+        else:
+            # Suppress shrink/grow for this call only, then restore
+            saved = self._auto_font_adjust
+            self._auto_font_adjust = False
         if self._left_points and self._right_points:
             self._update_flow_layout()
+        if not auto_font_adjust:
+            self._auto_font_adjust = saved
         self.update()
 
     def on_document_enlarged(self):

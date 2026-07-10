@@ -945,14 +945,14 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         else:
             new_height = doc_margin
         if new_height > self.available_height:
-            LOGGER.warning("  reLayout() expanding available_height: %.1f → %.1f (new_height=%.1f)",
-                           self.available_height, new_height, new_height)
+            _blk_txt = doc.toPlainText()[:30].replace('\n', ' ')
+            _LOG_RE = ("БЫСТРЕЕ", "60 МИЛЬ В ЧАС")
+            if any(_blk_txt.startswith(p) for p in _LOG_RE):
+                LOGGER.warning("  reLayout() [%s] expanding available_height: %.1f → %.1f",
+                               _blk_txt[:20], self.available_height, new_height)
             self.max_height = new_height + doc_margin * 2
             self.available_height = new_height
             self.size_enlarged.emit()
-        else:
-            LOGGER.info("  reLayout(): new_height=%.1f <= available_height=%.1f, no expansion",
-                        new_height, self.available_height)
 
         if doc.defaultTextOption().alignment() == Qt.AlignmentFlag.AlignCenter:
             block = doc.firstBlock()

@@ -940,19 +940,14 @@ class SceneTextManager(QObject):
             if original_size < 1:
                 original_size = 12.0
 
-            # LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} text={repr(text[:60])} "
-            #              f"orig_size={original_size:.1f} target=({target_w:.1f}x{target_h:.1f})")
-
             optimal_size = self._find_best_font_size(
                 blkitem, text, target_w, target_h, original_size
             )
 
-            # LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} optimal_size={optimal_size:.2f}pt")
-
-            block_w = target_w * LAYOUT_BLOCK_SHRINK_W          # ← ДОБАВЛЕНО
+            block_w = target_w * LAYOUT_BLOCK_SHRINK_W
             blkitem.setFontSize(optimal_size)
-            blkitem.setPlainText(text)                                      # сначала текст
-            blkitem.set_size(block_w, target_h, set_layout_maxsize=True)    # потом размер (последним!)
+            blkitem.setPlainText(text)
+            blkitem.set_size(block_w, target_h, set_layout_maxsize=True, auto_font_adjust=False)
 
             if len(self.pairwidget_list) > blkitem.idx:
                 self.pairwidget_list[blkitem.idx].e_trans.setPlainText(text)
@@ -965,6 +960,9 @@ class SceneTextManager(QObject):
             final_h = blkitem.document().size().height()
             # LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} FINAL font={optimal_size:.2f}pt "
             #              f"doc_h={final_h:.1f} target_h={target_h:.1f}")
+            # Restore auto-adjust and run one shrink/grow pass to fill available space.
+            blkitem._auto_font_adjust = True
+            blkitem._update_flow_layout()
             return True
 
         # =====================================================
@@ -1096,10 +1094,21 @@ class SceneTextManager(QObject):
 
         try:
             iteration = 0
+            # Save original layout dimensions — reLayout() inside set_boundary_functions
+            # can expand available_height when text overflows, and this persists across
+            # iterations, causing binary search to see inflated doc_h and shrink too much.
+            orig_avail_h = blkitem.layout.available_height if hasattr(blkitem.layout, 'available_height') else None
+            orig_max_h = blkitem.layout.max_height if hasattr(blkitem.layout, 'max_height') else None
             for iteration in range(LAYOUT_BEST_FONT_SIZE_ITERATION):
                 if hi - lo < 0.1:
                     break
                 mid = (lo + hi) / 2.0
+
+                # Reset layout dimensions to prevent cumulative expansion
+                if orig_avail_h is not None:
+                    blkitem.layout.available_height = orig_avail_h
+                if orig_max_h is not None:
+                    blkitem.layout.max_height = orig_max_h
 
                 # 1. Set font size (custom layout auto-relayouts)
                 blkitem.setFontSize(mid)
@@ -1107,10 +1116,12 @@ class SceneTextManager(QObject):
                 blkitem.setPlainText(text)
                 # 3. Ensure wrapping width matches target
                 #    (called AFTER setPlainText in case it resets width)
-                blkitem.set_size(target_w, target_h, set_layout_maxsize=True)
+                blkitem.set_size(target_w, target_h, set_layout_maxsize=True, auto_font_adjust=False)
 
                 # 4. Read actual height from the custom layout
-                doc_h = blkitem.document().size().height()
+                # Use shrink_height (actual text extent within boundaries),
+                # NOT document().size().height() which doesn't account for flow boundaries.
+                doc_h = blkitem.layout.shrink_height if hasattr(blkitem.layout, 'shrink_height') and blkitem.layout.shrink_height > 0 else blkitem.document().size().height()
                 fits = doc_h <= target_h
 
                 # if iteration < 10:
@@ -1339,10 +1350,10 @@ class SceneTextManager(QObject):
                 blk_item.blk.translation = ''
             blk_item.blk.text = [trans_pair.e_source.toPlainText()]
             blk_item.blk._bounding_rect = blk_item.absBoundingRect()
-            LOGGER.debug("SAVED blk idx=%d absBoundingRect=%s pos=%s _display_rect=%s left_points=%d",
-                         blk_item.idx, blk_item.blk._bounding_rect, blk_item.pos(),
-                         blk_item._display_rect if hasattr(blk_item, '_display_rect') else 'N/A',
-                         len(getattr(blk_item, '_left_points', [])))
+            # LOGGER.debug("SAVED blk idx=%d absBoundingRect=%s pos=%s _display_rect=%s left_points=%d",
+            #              blk_item.idx, blk_item.blk._bounding_rect, blk_item.pos(),
+            #              blk_item._display_rect if hasattr(blk_item, '_display_rect') else 'N/A',
+            #              len(getattr(blk_item, '_left_points', [])))
             blk_item.updateBlkFormat()
             # Save flow points if supported
             if hasattr(blk_item, 'save_flow_points'):
