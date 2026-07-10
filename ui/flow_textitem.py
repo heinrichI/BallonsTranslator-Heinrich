@@ -354,9 +354,8 @@ class FlowTextBlkItem(TextBlkItem):
         return any(txt.startswith(p) for p in _LOG_PREFIXES)
 
     def _log(self, msg: str, level: int = logging.DEBUG):
-        """Log only for target blocks, with block text prefix."""
-        if self._should_log():
-            LOGGER.log(level, "[%s] %s", self._block_text()[:20], msg)
+        """Log for all blocks, with block text prefix."""
+        LOGGER.log(level, "[%s] %s", self._block_text()[:20], msg)
 
     def _auto_shrink_font(self) -> bool:
         """
@@ -379,13 +378,16 @@ class FlowTextBlkItem(TextBlkItem):
         """
         layout = self.layout
         if layout is None:
+            self._log("_auto_shrink_font: layout is None, SKIP")
             return False
         # Only shrink in horizontal mode — vertical layout has different metrics
         if not isinstance(layout, HorizontalTextDocumentLayout):
+            self._log("_auto_shrink_font: not horizontal layout, SKIP")
             return False
 
         min_font = layout.max_font_size()
         if min_font <= MIN_FONT_SIZE_PT:
+            self._log("_auto_shrink_font: min_font=%.1f <= MIN, SKIP" % min_font)
             return False
 
         # Compute target height and width from control points (not from
@@ -411,11 +413,10 @@ class FlowTextBlkItem(TextBlkItem):
         char_level_breaks = getattr(layout, '_has_char_level_breaks', False)
         height_overflow = text_extent > target_height
         width_overflow = text_width > target_width if target_width > 0 else False
-        # Shrink triggers: width overflow, char-level breaks, or close to width limit.
-        # "close to width" means font is near the max it can be — growing to fill
-        # height would cause width overflow.
+        # Shrink triggers: height overflow, width overflow, char-level breaks,
+        # or close to width limit.
         close_to_width = target_width > 0 and text_width > target_width * 0.85
-        if not width_overflow and not char_level_breaks and not close_to_width:
+        if not height_overflow and not width_overflow and not char_level_breaks and not close_to_width:
             self._log("  => no overflow and NOT close to width, NO SHRINK")
             return False
 
@@ -501,8 +502,10 @@ class FlowTextBlkItem(TextBlkItem):
         """
         layout = self.layout
         if layout is None:
+            self._log("_auto_grow_font: layout is None, SKIP")
             return False
         if not isinstance(layout, HorizontalTextDocumentLayout):
+            self._log("_auto_grow_font: not horizontal layout, SKIP")
             return False
 
         # Target height and width from control points
@@ -515,6 +518,7 @@ class FlowTextBlkItem(TextBlkItem):
             target_height = layout.available_height
             target_width = layout.available_width
         if target_height < 10:
+            self._log("_auto_grow_font: target_height=%.1f < 10, SKIP" % target_height)
             return False
 
         text_extent = layout.shrink_height
