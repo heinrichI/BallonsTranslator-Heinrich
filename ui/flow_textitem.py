@@ -384,6 +384,10 @@ class FlowTextBlkItem(TextBlkItem):
         if not isinstance(layout, HorizontalTextDocumentLayout):
             self._log("_auto_shrink_font: not horizontal layout, SKIP")
             return False
+        # Don't shrink on empty blocks
+        if not self.document().toPlainText().strip():
+            self._log("_auto_shrink_font: empty text, SKIP")
+            return False
 
         min_font = layout.max_font_size()
         if min_font <= MIN_FONT_SIZE_PT:
@@ -507,6 +511,10 @@ class FlowTextBlkItem(TextBlkItem):
         if not isinstance(layout, HorizontalTextDocumentLayout):
             self._log("_auto_grow_font: not horizontal layout, SKIP")
             return False
+        # Don't grow on empty blocks — grow inflates font for no content
+        if not self.document().toPlainText().strip():
+            self._log("_auto_grow_font: empty text, SKIP")
+            return False
 
         # Target height and width from control points
         if self._left_points and self._right_points:
@@ -557,8 +565,14 @@ class FlowTextBlkItem(TextBlkItem):
 
             # Compute grow factor: aim for 90% fill, cap at 1.08 per iteration
             height_factor = (target_height * 0.90) / max(text_extent, 1)
-            # Cap by width ratio to prevent overshooting width
-            width_factor = target_width / max(text_width, 1) if target_width > 0 and text_width > 0 else 1.08
+            # Cap by width ratio to prevent overshooting width.
+            # Only cap when text_width EXCEEDS target_width — when text_width
+            # equals target_width, allow growth (width_factor=1.08) so the font
+            # can still grow to fill remaining height.
+            if text_width > target_width and target_width > 0:
+                width_factor = target_width / max(text_width, 1)
+            else:
+                width_factor = 1.08
             factor = min(1.08, height_factor, width_factor)
 
             self._internal_font_change = True
@@ -594,7 +608,9 @@ class FlowTextBlkItem(TextBlkItem):
         if self._updating_flow:
             return
 
-        LOGGER.debug("_update_flow_layout: _auto_font_adjust=%s", self._auto_font_adjust)
+        LOGGER.debug("_update_flow_layout: _auto_font_adjust=%s max_font_before=%.1f",
+                         self._auto_font_adjust,
+                         self.layout.max_font_size() if self.layout else 0)
 
         # Guard: prevent _display_rect changes from docSizeChanged during flow updates
         self._updating_flow = True
@@ -658,6 +674,11 @@ class FlowTextBlkItem(TextBlkItem):
                         self.reshaped.emit(self)
                     except Exception:
                         pass
+                # Reset flag so next handle drag will auto-adjust,
+                # even after a previous manual font change.
+                self._auto_font_adjust = True
+                LOGGER.debug("_update_flow_layout: DONE max_font_after=%.1f font_changed=%s",
+                             self.layout.max_font_size() if self.layout else 0, font_changed)
 
             elif isinstance(self.layout, VerticalTextDocumentLayout):
                 # Vertical mode: reduce available_height when left handle moves right.
@@ -749,9 +770,14 @@ class FlowTextBlkItem(TextBlkItem):
         by internal font adjustments (shrink/grow). Only external calls
         (toolbar, font panel) should set _auto_font_adjust = False.
         """
+        self._log("setFontSize: value=%.1f _auto_font_adjust=%s _internal=%s" %
+                     (value, self._auto_font_adjust, self._internal_font_change))
         if not self._internal_font_change:
             self._auto_font_adjust = False
-        return super().setFontSize(value, *args, **kwargs)
+        result = super().setFontSize(value, *args, **kwargs)
+        self._log("setFontSize: DONE, max_font=%.1f" %
+                     (self.layout.max_font_size() if self.layout else 0))
+        return result
 
     # ── Serialisation ─────────────────────────────────────────
 
@@ -768,6 +794,8 @@ class FlowTextBlkItem(TextBlkItem):
 
     def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True, auto_font_adjust=True):
         """For flow items: update layout max size but never shift pos()."""
+        self._log("set_size: w=%.1f h=%.1f auto_font_adjust=%s" %
+                     (w, h, auto_font_adjust))
         if set_layout_maxsize and hasattr(self, 'layout') and self.layout is not None:
             try:
                 self.layout.setMaxSize(w, h)
@@ -777,10 +805,10 @@ class FlowTextBlkItem(TextBlkItem):
         self.prepareGeometryChange()
         if set_blk_size and self.blk is not None:
             self.blk._bounding_rect = self.absBoundingRect()
-        if auto_font_adjust:
-            # Normal path: enable shrink/grow, leave flag True after
-            self._auto_font_adjust = True
-        else:
+        # Don't set _auto_font_adjust=True here — _update_flow_layout resets it.
+        # Setting it here overrides the False set by setFontSize(), causing grow
+        # to run and override the user's font choice.
+        if not auto_font_adjust:
             # Suppress shrink/grow for this call only, then restore
             saved = self._auto_font_adjust
             self._auto_font_adjust = False
@@ -789,6 +817,32 @@ class FlowTextBlkItem(TextBlkItem):
         if not auto_font_adjust:
             self._auto_font_adjust = saved
         self.update()
+
+    def squeezeBoundingRect(self, cond_on_alignment: bool = False, repaint=True):
+        """Override to pass auto_font_adjust=False so grow doesn't override
+        the user's font choice when squeezeBoundingRect resizes the block."""
+        from .scene_textlayout import HorizontalTextDocumentLayout
+        mh, mw = self.layout.minSize()
+        if mh == 0 or mw == 0:
+            return
+        br = self.absBoundingRect(qrect=True)
+        br_w, br_h = br.width(), br.height()
+        import numpy as np
+        if self.fontformat.vertical:
+            if cond_on_alignment:
+                mh = br.height()
+        else:
+            if cond_on_alignment:
+                mw = br.width()
+        if np.abs(br_w - mw) > 0.001 or np.abs(br_h - mh) > 0.001:
+            P = self.padding() * 2
+            mh += P
+            mw += P
+            self.set_size(mw, mh, set_layout_maxsize=True, set_blk_size=True, auto_font_adjust=False)
+            if self.under_ctrl:
+                self.doc_size_changed.emit(self.idx)
+            if repaint:
+                self.repaint_background()
 
     def on_document_enlarged(self):
         # For flow items: do NOT shift pos() to preserve control point positions.

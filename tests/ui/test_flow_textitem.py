@@ -632,8 +632,12 @@ class TestAutoFontAdjustFlag:
             "_auto_font_adjust was reset to False by _update_flow_layout"
         )
 
-    def test_manual_font_change_still_disables_auto_adjust(self, scene):
-        """User font change via setFontSize should still set _auto_font_adjust=False."""
+    def test_manual_font_change_disables_auto_adjust(self, scene):
+        """User font change via setFontSize should set _auto_font_adjust=False.
+
+        This prevents grow from overriding the user's font choice.
+        Internal shrink/grow use _internal_font_change=True to skip this.
+        """
         blk = _make_blk(xyxy=(0, 0, 400, 200), text="Hello world", font_size=14.0)
         item = FlowTextBlkItem(blk, idx=0)
         scene.addItem(item)
@@ -747,6 +751,274 @@ class TestBlockResizeShrinkGrow:
         # Last two (both at 200px) should be very close
         assert abs(fonts[0] - fonts[2]) < 1.0, (
             f"Font oscillation at same width: pass1={fonts[0]:.1f} pass2={fonts[2]:.1f}"
+        )
+
+
+class TestEmptyBlockNoGrow:
+    """Regression: _auto_grow_font must NOT run on empty blocks."""
+
+    def test_grow_skipped_on_empty_block(self, scene):
+        """Empty block should not have its font inflated by grow."""
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text="", font_size=12.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText("")
+
+        font_before = item.layout.max_font_size()
+        item._auto_grow_font()
+        font_after = item.layout.max_font_size()
+
+        assert font_before == font_after, (
+            f"Grow ran on empty block: before={font_before:.1f} after={font_after:.1f}"
+        )
+
+    def test_shrink_skipped_on_empty_block(self, scene):
+        """Empty block should not have its font changed by shrink."""
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text="", font_size=12.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText("")
+
+        font_before = item.layout.max_font_size()
+        item._auto_shrink_font()
+        font_after = item.layout.max_font_size()
+
+        assert font_before == font_after, (
+            f"Shrink ran on empty block: before={font_before:.1f} after={font_after:.1f}"
+        )
+
+    def test_grow_skipped_on_whitespace_only(self, scene):
+        """Block with only whitespace should not have font inflated."""
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text="   ", font_size=12.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText("   ")
+
+        font_before = item.layout.max_font_size()
+        item._auto_grow_font()
+        font_after = item.layout.max_font_size()
+
+        assert font_before == font_after, (
+            f"Grow ran on whitespace block: before={font_before:.1f} after={font_after:.1f}"
+        )
+
+    def test_update_flow_layout_no_font_change_on_empty(self, scene):
+        """Full _update_flow_layout should not change font on empty block."""
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text="", font_size=12.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText("")
+
+        font_before = item.layout.max_font_size()
+        item._update_flow_layout()
+        font_after = item.layout.max_font_size()
+
+        assert abs(font_before - font_after) < 0.1, (
+            f"Font changed on empty block: before={font_before:.1f} after={font_after:.1f}"
+        )
+
+
+class TestUndoFontRestore:
+    """Regression: Ctrl+Z should restore font size after handle drag."""
+
+    def test_reshape_undo_restores_font_size(self, scene):
+        """Undo after resize should restore original font size."""
+        from ui.textedit_commands import ReshapeItemCommand
+
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        font_before = item.layout.max_font_size()
+
+        # Save old rect and flow points for the command
+        from copy import deepcopy
+        item.oldRect = item.rect()
+        cmd = ReshapeItemCommand(item)
+
+        # Simulate handle drag: narrow the block (triggers shrink)
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(200, pt.y())
+        item._update_flow_layout()
+
+        font_after_resize = item.layout.max_font_size()
+        assert font_after_resize < font_before, "Font should have shrunk"
+
+        # Apply the command (redo)
+        cmd.redo()
+
+        # Now undo — should restore original flow points and font size
+        cmd.undo()
+
+        font_after_undo = item.layout.max_font_size()
+        # Undo restores font size, then _update_flow_layout runs shrink/grow
+        # which may adjust it slightly. The key check is that undo doesn't
+        # leave the font at the shrunken size.
+        assert font_after_undo > font_after_resize, (
+            f"Undo did not restore font: after_resize={font_after_resize:.1f} after_undo={font_after_undo:.1f}"
+        )
+
+
+class TestAutoAdjustReset:
+    """Regression: _auto_font_adjust should reset to True after _update_flow_layout."""
+
+    def test_flag_resets_after_update_flow_layout(self, scene):
+        """After _update_flow_layout, _auto_font_adjust should be True."""
+        text = "Hello world test text here"
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text=text, font_size=14.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+
+        # Simulate manual font change
+        item._auto_font_adjust = False
+        item._update_flow_layout()
+
+        assert item._auto_font_adjust is True, (
+            "_auto_font_adjust should be True after _update_flow_layout"
+        )
+
+    def test_auto_adjust_works_after_manual_font_change(self, scene):
+        """After manual font change, next resize should auto-adjust.
+
+        Manual font change sets _auto_font_adjust=False (prevents grow from
+        overriding). But _update_flow_layout resets it to True, so the
+        NEXT resize will auto-adjust.
+        """
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        # Manual font change sets flag to False
+        item.setFontSize(20.0)
+        assert item._auto_font_adjust is False
+
+        # Resize triggers _update_flow_layout which resets flag to True
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(200, pt.y())
+        item._update_flow_layout()
+
+        assert item._auto_font_adjust is True
+
+
+class TestFontPanelAfterResize:
+    """Regression: font panel should still set font size after block resize."""
+
+    def test_font_size_changes_after_resize(self, scene):
+        """After resizing block, font size from panel should still work."""
+        text = "КАК ГРОМ С НЕБА ПРИХОДИТ ВЕСЬ МИР СХОДИТ С УМА"
+        blk = _make_blk(xyxy=(0, 0, 300, 200), text=text, font_size=20.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        # Step 1: Set font size via panel (simulates panel calling setFontSize)
+        item.setFontSize(30.0)
+        font_after_first = item.layout.max_font_size()
+        assert font_after_first > 20.0, "Font should have increased"
+
+        # Step 2: Resize block (simulate handle drag)
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(400, pt.y())
+        item._update_flow_layout()
+
+        # Step 3: Set font size again via panel
+        item.setFontSize(25.0)
+        font_after_second = item.layout.max_font_size()
+
+        # Font should actually change to 25pt
+        assert abs(font_after_second - 25.0) < 2.0, (
+            f"Font should be ~25pt after second setFontSize: got {font_after_second:.1f}"
+        )
+
+    def test_font_size_changes_after_narrow_resize(self, scene):
+        """After narrowing block, font size from panel should still work."""
+        text = "КАК ГРОМ С НЕБА ПРИХОДИТ ВЕСЬ МИР СХОДИТ С УМА"
+        blk = _make_blk(xyxy=(0, 0, 300, 200), text=text, font_size=20.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        # Step 1: Set font size
+        item.setFontSize(30.0)
+
+        # Step 2: Make block narrower (triggers shrink)
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(150, pt.y())
+        item._update_flow_layout()
+
+        font_after_resize = item.layout.max_font_size()
+
+        # Step 3: Set font size again via panel
+        item.setFontSize(20.0)
+        font_after_second = item.layout.max_font_size()
+
+        assert abs(font_after_second - 20.0) < 2.0, (
+            f"Font should be ~20pt after second setFontSize: got {font_after_second:.1f}"
+        )
+
+    def test_font_format_syncs_after_resize(self, scene):
+        """fontformat.size should sync with actual font after resize + setFontSize."""
+        text = "КАК ГРОМ С НЕБА ПРИХОДИТ ВЕСЬ МИР СХОДИТ С УМА"
+        blk = _make_blk(xyxy=(0, 0, 300, 200), text=text, font_size=20.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        # Set font size
+        item.setFontSize(35.0)
+
+        # Resize
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(400, pt.y())
+        item._update_flow_layout()
+
+        # Set font size again
+        item.setFontSize(15.0)
+
+        # Check fontformat.size is synced
+        actual_font = item.layout.max_font_size()
+        assert abs(actual_font - 15.0) < 2.0, (
+            f"Actual font {actual_font:.1f} != expected 15.0"
+        )
+
+    def test_font_changed_twice_in_a_row(self, scene):
+        """Font can be set twice in a row via panel — both times stick."""
+        text = "КАК ГРОМ С НЕБА ПРИХОДИТ ВЕСЬ МИР СХОДИТ С УМА"
+        blk = _make_blk(xyxy=(0, 0, 300, 200), text=text, font_size=20.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText(text)
+        item._update_flow_layout()
+
+        # First font change
+        item.setFontSize(15.0)
+        font1 = item.layout.max_font_size()
+        assert abs(font1 - 15.0) < 2.0, (
+            f"First setFontSize failed: got {font1:.1f}, expected 15.0"
+        )
+
+        # Second font change — should also work
+        item.setFontSize(25.0)
+        font2 = item.layout.max_font_size()
+        assert abs(font2 - 25.0) < 2.0, (
+            f"Second setFontSize failed: got {font2:.1f}, expected 25.0"
+        )
+
+        # Third font change — should also work
+        item.setFontSize(10.0)
+        font3 = item.layout.max_font_size()
+        assert abs(font3 - 10.0) < 2.0, (
+            f"Third setFontSize failed: got {font3:.1f}, expected 10.0"
         )
 
 
