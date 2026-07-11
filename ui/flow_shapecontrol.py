@@ -60,6 +60,9 @@ class FlowControlHandle(QGraphicsEllipseItem):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
             self._drag_start_pos = event.scenePos()
+            blk_item = self.ctrl.blk_item
+            if blk_item is not None:
+                blk_item.startReshape()
         event.accept()
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
@@ -90,6 +93,10 @@ class FlowControlHandle(QGraphicsEllipseItem):
         event.accept()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        if self._dragging:
+            blk_item = self.ctrl.blk_item
+            if blk_item is not None:
+                blk_item.endReshape()
         self._dragging = False
         event.accept()
 
@@ -153,6 +160,9 @@ class FlowHResizeHandle(QGraphicsItem):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
             self._last_scene_x = event.scenePos().x()
+            blk_item = self.ctrl.blk_item
+            if blk_item is not None:
+                blk_item.startReshape()
         event.accept()
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
@@ -188,6 +198,10 @@ class FlowHResizeHandle(QGraphicsItem):
         event.accept()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        if self._dragging:
+            blk_item = self.ctrl.blk_item
+            if blk_item is not None:
+                blk_item.endReshape()
         self._dragging = False
         event.accept()
 
@@ -234,6 +248,9 @@ class FlowResizeHandle(QGraphicsItem):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
             self._last_scene_y = event.scenePos().y()
+            blk_item = self.ctrl.blk_item
+            if blk_item is not None:
+                blk_item.startReshape()
         event.accept()
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
@@ -272,6 +289,10 @@ class FlowResizeHandle(QGraphicsItem):
         event.accept()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        if self._dragging:
+            blk_item = self.ctrl.blk_item
+            if blk_item is not None:
+                blk_item.endReshape()
         self._dragging = False
         event.accept()
 

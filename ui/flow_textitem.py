@@ -567,6 +567,13 @@ class FlowTextBlkItem(TextBlkItem):
 
     # ── Override size/pos methods to prevent pos() shift ─────
 
+    def startReshape(self):
+        """Override to snapshot flow points before drag modifies them."""
+        super().startReshape()
+        from copy import deepcopy
+        self._old_left_points = deepcopy(self._left_points)
+        self._old_right_points = deepcopy(self._right_points)
+
     def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True, auto_font_adjust=True):
         """For flow items: update layout max size but never shift pos()."""
         self._log("set_size: w=%.1f h=%.1f auto_font_adjust=%s" %

@@ -107,8 +107,11 @@ class ReshapeItemCommand(QUndoCommand):
         # Save flow points if item supports them
         if hasattr(item, '_left_points'):
             from copy import deepcopy
-            self.old_left_points = deepcopy(item._left_points)
-            self.old_right_points = deepcopy(item._right_points)
+            # Use pre-drag snapshot if available (saved by startReshape)
+            old_lp = getattr(item, '_old_left_points', item._left_points)
+            old_rp = getattr(item, '_old_right_points', item._right_points)
+            self.old_left_points = deepcopy(old_lp)
+            self.old_right_points = deepcopy(old_rp)
             self.new_left_points = deepcopy(item._left_points)
             self.new_right_points = deepcopy(item._right_points)
         else:
