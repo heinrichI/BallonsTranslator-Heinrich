@@ -30,7 +30,7 @@ QUIET_UI = True  # Set to False for verbose UI debug logging
 
 def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
-        _debug(msg, *args, **kwargs)
+        LOGGER.debug(msg, *args, **kwargs)
 
 from utils.spell_check_engine import get_spellcheck_engine
 

@@ -24,7 +24,7 @@ QUIET_UI = True  # Set to False for verbose UI debug logging
 
 def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
-        _debug(msg, *args, **kwargs)
+        LOGGER.debug(msg, *args, **kwargs)
 
 # Only log shrink/grow for blocks with these text prefixes
 _LOG_PREFIXES = ("БЫСТРЕЕ", "60 МИЛЬ В ЧАС")

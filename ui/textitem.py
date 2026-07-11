@@ -245,6 +245,10 @@ class TextBlkItem(QGraphicsTextItem):
             self.setGradientEnabled(True)
         self.setShadow(font_fmt, repaint=False)
         self.setStrokeWidth(font_fmt.stroke_width, repaint_background=False)
+        # Sync font_size from document — detector/OCR may have set fontformat.font_size=0
+        doc_font_size = self.document().defaultFont().pointSizeF()
+        if doc_font_size > 0:
+            self.fontformat.font_size = pt2px(doc_font_size)
         self.repaint_background()
 
     def setCenterTransform(self):
@@ -550,15 +554,20 @@ class TextBlkItem(QGraphicsTextItem):
     def minFontSize(self, to_px=True):
         doc = self.document()
         block = doc.firstBlock()
-        min_font_size = self.textCursor().charFormat().fontPointSize()
+        min_font_size = 0.0
         while block.isValid():
             it = block.begin()
             while not it.atEnd():
                 fragment = it.fragment()
                 font_size = fragment.charFormat().fontPointSize()
-                min_font_size = min(min_font_size, font_size)
+                if font_size > 0:
+                    if min_font_size <= 0 or font_size < min_font_size:
+                        min_font_size = font_size
                 it += 1
             block = block.next()
+        # Fallback to stored font_size if nothing found in document
+        if min_font_size <= 0 and self.fontformat is not None:
+            return self.fontformat.font_size
         if to_px:
             min_font_size = pt2px(min_font_size)
         return min_font_size
@@ -627,7 +636,7 @@ class TextBlkItem(QGraphicsTextItem):
         if self.isEditing():
             fontformat.font_size = pt2px(font.pointSizeF())
         else:
-            fontformat.font_size = self.minFontSize()
+            fontformat.font_size = self.fontformat.font_size
         fontformat.bold = font.bold()
         fontformat.underline = font.underline()
         fontformat.italic = font.italic()

@@ -26,7 +26,7 @@ QUIET_UI = True  # Set to False for verbose UI debug logging
 
 def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
-        _debug(msg, *args, **kwargs)
+        logger.debug(msg, *args, **kwargs)
 
 def _fmt_pts(pts):
     return '[' + ', '.join(f'({p.x():.1f},{p.y():.1f})' for p in pts) + ']'
