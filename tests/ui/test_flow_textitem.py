@@ -219,7 +219,7 @@ class TestAutoGrow:
         """When _auto_grow_enabled=False, grow does not happen (shrink still runs)."""
         # Use text that fits in block — so shrink is a no-op
         item = _make_item(scene, xyxy=(0, 0, 400, 200), text="Hi", font_size=24.0)
-        item._auto_grow_enabled = False
+        item.font_adjuster._auto_grow_enabled = False
         item._update_flow_layout()
         max_font = item.layout.max_font_size()
         # At 24pt in 400x200, "Hi" should fit without shrink, and grow is disabled
@@ -599,7 +599,7 @@ class TestAutoFontAdjustFlag:
         item.setPlainText(text)
 
         assert item._auto_font_adjust is True
-        item._auto_shrink_font()
+        item.font_adjuster.shrink()
         assert item._auto_font_adjust is True, (
             "_auto_font_adjust was reset to False by _auto_shrink_font"
         )
@@ -613,7 +613,7 @@ class TestAutoFontAdjustFlag:
         item.setPlainText(text)
 
         assert item._auto_font_adjust is True
-        item._auto_grow_font()
+        item.font_adjuster.grow()
         assert item._auto_font_adjust is True, (
             "_auto_font_adjust was reset to False by _auto_grow_font"
         )
@@ -765,7 +765,7 @@ class TestEmptyBlockNoGrow:
         item.setPlainText("")
 
         font_before = item.layout.max_font_size()
-        item._auto_grow_font()
+        item.font_adjuster.grow()
         font_after = item.layout.max_font_size()
 
         assert font_before == font_after, (
@@ -780,7 +780,7 @@ class TestEmptyBlockNoGrow:
         item.setPlainText("")
 
         font_before = item.layout.max_font_size()
-        item._auto_shrink_font()
+        item.font_adjuster.shrink()
         font_after = item.layout.max_font_size()
 
         assert font_before == font_after, (
@@ -795,7 +795,7 @@ class TestEmptyBlockNoGrow:
         item.setPlainText("   ")
 
         font_before = item.layout.max_font_size()
-        item._auto_grow_font()
+        item.font_adjuster.grow()
         font_after = item.layout.max_font_size()
 
         assert font_before == font_after, (
