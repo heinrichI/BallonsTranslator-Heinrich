@@ -26,6 +26,12 @@ from utils.text_layout import layout_text
 
 from utils.logger import logger as LOGGER
 
+QUIET_UI = True  # Set to False for verbose UI debug logging
+
+def _debug(msg, *args, **kwargs):
+    if not QUIET_UI:
+        _debug(msg, *args, **kwargs)
+
 from utils.spell_check_engine import get_spellcheck_engine
 
 LAYOUT_MIN_FONT_PT = 8.0
@@ -443,13 +449,13 @@ class SceneTextManager(QObject):
         self.txtblkShapeControl.updateBoundingRect()
 
     def clearSceneTextitems(self):
-        LOGGER.debug("clearSceneTextitems: saving flow points for %d items", len(self.textblk_item_list))
+        _debug("clearSceneTextitems: saving flow points for %d items", len(self.textblk_item_list))
         self.hovering_transwidget = None
         self.txtblkShapeControl.setBlkItem(None)
         for blkitem in self.textblk_item_list:
             if hasattr(blkitem, 'save_flow_points'):
                 blkitem.save_flow_points()
-                LOGGER.debug("  saved flow points for blk id=%s left=%s",
+                _debug("  saved flow points for blk id=%s left=%s",
                              id(blkitem.blk), getattr(blkitem.blk, 'left_points', None))
         for blkitem in self.textblk_item_list:
             self.canvas.removeItem(blkitem)
@@ -465,8 +471,8 @@ class SceneTextManager(QObject):
         It should only be called safely from the event loop, not directly from
         a signal handler of a widget it is about to destroy.
         """
-        LOGGER.debug("=== updateSceneTextitems START ===")
-        LOGGER.debug("  block count in proj: %d", len(self.imgtrans_proj.current_block_list()))
+        _debug("=== updateSceneTextitems START ===")
+        _debug("  block count in proj: %d", len(self.imgtrans_proj.current_block_list()))
         self.hovering_transwidget = None
         self.txtblkShapeControl.setBlkItem(None)
         self.clearSceneTextitems()
@@ -485,31 +491,31 @@ class SceneTextManager(QObject):
         # import debugpy
         # debugpy.debug_this_thread()
         # debugpy.breakpoint()
-        LOGGER.debug("=== addTextBlock ===")
-        LOGGER.debug("  blk type=%s, idx will be %d",
+        _debug("=== addTextBlock ===")
+        _debug("  blk type=%s, idx will be %d",
                      type(blk).__name__ if blk else "None",
                      len(self.textblk_item_list))
         if isinstance(blk, TextBlkItem):
             blk_item = blk
             blk_item.idx = len(self.textblk_item_list)
-            LOGGER.debug("  existing TextBlkItem, pos=%s", blk_item.pos())
+            _debug("  existing TextBlkItem, pos=%s", blk_item.pos())
         else:
             translation = ''
             if self.auto_textlayout_flag and not blk.vertical:
                 translation = blk.translation
                 blk.translation = ''
-            LOGGER.debug("  creating FlowTextBlkItem with blk.xyxy=%s", blk.xyxy if blk else "None")
+            _debug("  creating FlowTextBlkItem with blk.xyxy=%s", blk.xyxy if blk else "None")
             blk_item = FlowTextBlkItem(blk, len(self.textblk_item_list), show_rect=self.canvas.textblock_mode)
             if translation:
                 blk.translation = translation
                 rst = self.layout_textblk(blk_item, text=translation)
                 if rst is None:
                     blk_item.setPlainText(translation)
-        LOGGER.debug("  after creation: blk_item.pos=%s", blk_item.pos())
+        _debug("  after creation: blk_item.pos=%s", blk_item.pos())
         if hasattr(blk_item, '_left_points'):
-            LOGGER.debug("  left_points=%s",
+            _debug("  left_points=%s",
                          [(p.x(), p.y()) for p in blk_item._left_points])
-            LOGGER.debug("  right_points=%s",
+            _debug("  right_points=%s",
                          [(p.x(), p.y()) for p in blk_item._right_points])
         self.addTextBlkItem(blk_item)
         # LOGGER.info(f"addTextBlock {blk_item.toPlainText()}")
@@ -813,7 +819,7 @@ class SceneTextManager(QObject):
             if len(self.pairwidget_list) > blkitem.idx:
                 widget_text = self.pairwidget_list[blkitem.idx].e_trans.toPlainText()
                 if widget_text.strip():
-                    LOGGER.debug(f"Блок {blkitem.idx}: восстановление текста из виджета")
+                    _debug(f"Блок {blkitem.idx}: восстановление текста из виджета")
                     blkitem.setPlainText(widget_text)
                     return True
         return False
@@ -1125,7 +1131,7 @@ class SceneTextManager(QObject):
                 fits = doc_h <= target_h
 
                 # if iteration < 10:
-                #     LOGGER.debug(f"[_find_best_font_size] idx={blkitem.idx} "
+                #     _debug(f"[_find_best_font_size] idx={blkitem.idx} "
                 #                  f"iter={iteration+1} mid={mid:.2f} "
                 #                  f"doc_h={doc_h:.1f} target_h={target_h:.1f} "
                 #                  f"fits={fits}")
@@ -1350,7 +1356,7 @@ class SceneTextManager(QObject):
                 blk_item.blk.translation = ''
             blk_item.blk.text = [trans_pair.e_source.toPlainText()]
             blk_item.blk._bounding_rect = blk_item.absBoundingRect()
-            # LOGGER.debug("SAVED blk idx=%d absBoundingRect=%s pos=%s _display_rect=%s left_points=%d",
+            # _debug("SAVED blk idx=%d absBoundingRect=%s pos=%s _display_rect=%s left_points=%d",
             #              blk_item.idx, blk_item.blk._bounding_rect, blk_item.pos(),
             #              blk_item._display_rect if hasattr(blk_item, '_display_rect') else 'N/A',
             #              len(getattr(blk_item, '_left_points', [])))
@@ -1447,5 +1453,5 @@ def get_words_length_list(fm: QFontMetricsF, words: List[str]) -> List[int]:
         # Округление вверх для безопасности
         lengths.append(int(np.ceil(length)))
     
-    LOGGER.debug(f"Word lengths: {lengths} for words: {words}")
+    _debug(f"Word lengths: {lengths} for words: {words}")
     return lengths

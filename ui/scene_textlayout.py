@@ -3,6 +3,8 @@ import logging
 
 LOGGER = logging.getLogger('BallonTranslator')
 
+QUIET_UI = True  # Set to False for verbose UI debug logging
+
 from qtpy.QtCore import Qt, QRectF, QPointF, Signal, QSizeF, QSize
 from qtpy.QtGui import QTextCharFormat, QTextDocument, QPixmap, QImage, QTransform, QPalette, QPainter, QTextFrame, QTextBlock, QAbstractTextDocumentLayout, QTextLayout, QFont, QFontMetricsF, QTextOption, QTextLine, QTextFormat
 
@@ -946,8 +948,9 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             new_height = doc_margin
         if new_height > self.available_height:
             _blk_txt = doc.toPlainText()[:30].replace('\n', ' ')
-            LOGGER.debug("  reLayout() [%s] expanding available_height: %.1f → %.1f",
-                           _blk_txt[:20], self.available_height, new_height)
+            if not QUIET_UI:
+                LOGGER.debug("  reLayout() [%s] expanding available_height: %.1f → %.1f",
+                               _blk_txt[:20], self.available_height, new_height)
             self.max_height = new_height + doc_margin * 2
             self.available_height = new_height
             self.size_enlarged.emit()

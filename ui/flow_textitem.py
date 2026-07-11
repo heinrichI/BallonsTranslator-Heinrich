@@ -20,6 +20,12 @@ from typing import List, Union, Tuple
 logger = logging.getLogger('BallonTranslator')
 LOGGER = logger  # alias used in _auto_shrink_font, _auto_grow_font
 
+QUIET_UI = True  # Set to False for verbose UI debug logging
+
+def _debug(msg, *args, **kwargs):
+    if not QUIET_UI:
+        _debug(msg, *args, **kwargs)
+
 # Only log shrink/grow for blocks with these text prefixes
 _LOG_PREFIXES = ("БЫСТРЕЕ", "60 МИЛЬ В ЧАС")
 
@@ -207,9 +213,9 @@ class FlowTextBlkItem(TextBlkItem):
             sync_font=self._font_adjuster_sync,
         )
 
-        logging.debug("=== FlowTextBlkItem.__init__ ===")
-        logging.debug("  idx=%d pos=%s", idx, self.pos())
-        logging.debug("  after init: left=%s right=%s",
+        if not QUIET_UI: logging.debug("=== FlowTextBlkItem.__init__ ===")
+        if not QUIET_UI: logging.debug("  idx=%d pos=%s", idx, self.pos())
+        if not QUIET_UI: logging.debug("  after init: left=%s right=%s",
                       [(p.x(), p.y()) for p in self._left_points],
                       [(p.x(), p.y()) for p in self._right_points])
 
@@ -273,26 +279,26 @@ class FlowTextBlkItem(TextBlkItem):
         rect is in scene coordinates (includes pos offset).  Skips if rect is too small
         (degenerate or not yet fully initialised).
         Also skips if flow points were already restored from blk.left_points/right_points."""
-        logging.debug("=== _init_points_from_rect ===")
-        logging.debug("  rect=%s (x=%.1f y=%.1f w=%.1f h=%.1f)",
+        if not QUIET_UI: logging.debug("=== _init_points_from_rect ===")
+        if not QUIET_UI: logging.debug("  rect=%s (x=%.1f y=%.1f w=%.1f h=%.1f)",
                       rect, rect.x() if rect else 0, rect.y() if rect else 0,
                       rect.width() if rect else 0, rect.height() if rect else 0)
         if rect is None or rect.width() < 10 or rect.height() < 10:
-            logging.debug("  rect too small, returning")
+            if not QUIET_UI: logging.debug("  rect too small, returning")
             return
         # Skip if flow points already restored from blk.left_points/right_points
         if self._left_points and self._right_points:
-            logging.debug("  flow points already set (%d left, %d right), skipping",
+            if not QUIET_UI: logging.debug("  flow points already set (%d left, %d right), skipping",
                           len(self._left_points), len(self._right_points))
             return
         pos = self.pos()
-        logging.debug("  self.pos()=%s", pos)
+        if not QUIET_UI: logging.debug("  self.pos()=%s", pos)
         # Convert to item-local coordinates
         x0 = rect.x() - pos.x()
         x1 = rect.x() + rect.width() - pos.x()
         y0 = rect.y() - pos.y()
         y1 = rect.y() + rect.height() - pos.y()
-        logging.debug("  local: x0=%.1f x1=%.1f y0=%.1f y1=%.1f", x0, x1, y0, y1)
+        if not QUIET_UI: logging.debug("  local: x0=%.1f x1=%.1f y0=%.1f y1=%.1f", x0, x1, y0, y1)
 
         self._left_points = []
         self._right_points = []
@@ -301,7 +307,7 @@ class FlowTextBlkItem(TextBlkItem):
             y = y0 + t * (y1 - y0)
             self._left_points.append(QPointF(x0, y))
             self._right_points.append(QPointF(x1, y))
-        logging.debug("  final left=%s right=%s",
+        if not QUIET_UI: logging.debug("  final left=%s right=%s",
                       [(p.x(), p.y()) for p in self._left_points],
                       [(p.x(), p.y()) for p in self._right_points])
 
@@ -359,6 +365,8 @@ class FlowTextBlkItem(TextBlkItem):
 
     def _log(self, msg: str, level: int = logging.DEBUG):
         """Log for all blocks, with block text prefix."""
+        if QUIET_UI and level <= logging.DEBUG:
+            return
         LOGGER.log(level, "[%s] %s", self._block_text()[:20], msg)
 
     def _font_adjuster_change_size(self, factor: float):
@@ -396,9 +404,10 @@ class FlowTextBlkItem(TextBlkItem):
         if not hasattr(self, 'font_adjuster'):
             return
 
-        LOGGER.debug("_update_flow_layout: _auto_font_adjust=%s max_font_before=%.1f",
-                         self._auto_font_adjust,
-                         self.layout.max_font_size() if self.layout else 0)
+        if not QUIET_UI:
+            _debug("_update_flow_layout: _auto_font_adjust=%s max_font_before=%.1f",
+                             self._auto_font_adjust,
+                             self.layout.max_font_size() if self.layout else 0)
 
         # Guard: prevent _display_rect changes from docSizeChanged during flow updates
         self._updating_flow = True
@@ -455,7 +464,7 @@ class FlowTextBlkItem(TextBlkItem):
                     if self.font_adjuster._auto_grow_enabled and not font_changed:
                         font_changed = self.font_adjuster.grow() or font_changed
                 else:
-                    LOGGER.debug("  _update_flow_layout: _auto_font_adjust=False, shrink/grow SKIPPED")
+                    _debug("  _update_flow_layout: _auto_font_adjust=False, shrink/grow SKIPPED")
                 if font_changed:
                     # Notify the text panel so it refreshes the font-size display.
                     try:
@@ -465,7 +474,7 @@ class FlowTextBlkItem(TextBlkItem):
                 # Reset flag so next handle drag will auto-adjust,
                 # even after a previous manual font change.
                 self._auto_font_adjust = True
-                LOGGER.debug("_update_flow_layout: DONE max_font_after=%.1f font_changed=%s",
+                _debug("_update_flow_layout: DONE max_font_after=%.1f font_changed=%s",
                              self.layout.max_font_size() if self.layout else 0, font_changed)
 
             elif isinstance(self.layout, VerticalTextDocumentLayout):
@@ -562,7 +571,7 @@ class FlowTextBlkItem(TextBlkItem):
             return
         self.blk.left_points = [[p.x(), p.y()] for p in self._left_points]
         self.blk.right_points = [[p.x(), p.y()] for p in self._right_points]
-        logging.debug("save_flow_points: blk=%s left=%s right=%s",
+        if not QUIET_UI: logging.debug("save_flow_points: blk=%s left=%s right=%s",
                       id(self.blk), self.blk.left_points, self.blk.right_points)
 
     # ── Override size/pos methods to prevent pos() shift ─────

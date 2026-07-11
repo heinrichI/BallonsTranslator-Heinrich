@@ -22,6 +22,12 @@ from .cursor import rotateCursorList
 
 logger = logging.getLogger('BallonTranslator')
 
+QUIET_UI = True  # Set to False for verbose UI debug logging
+
+def _debug(msg, *args, **kwargs):
+    if not QUIET_UI:
+        _debug(msg, *args, **kwargs)
+
 def _fmt_pts(pts):
     return '[' + ', '.join(f'({p.x():.1f},{p.y():.1f})' for p in pts) + ']'
 
@@ -81,7 +87,7 @@ class FlowControlHandle(QGraphicsEllipseItem):
 
         item_pos = blk_item.pos()
         item_rect = blk_item.boundingRect()
-        logger.debug(
+        _debug(
             'DRAG side=%s idx=%d | item_pos=(%.1f,%.1f) bounding=(%.1f,%.1f,%.1f,%.1f) | '
             'left=%s | right=%s',
             self.side, self.point_idx,
@@ -502,15 +508,15 @@ class FlowShapeControl(QGraphicsItem):
         return hasattr(self.blk_item, '_left_points') and bool(self.blk_item._left_points)
 
     def setBlkItem(self, blk_item):
-        logger.debug("=== setBlkItem called ===")
-        logger.debug("  new blk_item=%s (type=%s)", blk_item, type(blk_item).__name__ if blk_item else "None")
+        _debug("=== setBlkItem called ===")
+        _debug("  new blk_item=%s (type=%s)", blk_item, type(blk_item).__name__ if blk_item else "None")
         if blk_item is not None:
-            logger.debug("  new blk_item pos=%s boundingRect=%s",
+            _debug("  new blk_item pos=%s boundingRect=%s",
                          blk_item.pos(), blk_item.boundingRect())
         if self.blk_item == blk_item and self.isVisible():
             # Same item — just refresh handle positions and visibility
             # (state may have changed e.g. vertical/horizontal toggle)
-            logger.debug("  same blk_item — refreshing handles")
+            _debug("  same blk_item — refreshing handles")
             flow_visible = self._flow_handles_visible()
             if flow_visible:
                 self.rebuildHandles()
@@ -528,7 +534,7 @@ class FlowShapeControl(QGraphicsItem):
             self.show()
             return
         if self.blk_item is not None:
-            logger.debug("  old blk_item=%s type=%s pos=%s",
+            _debug("  old blk_item=%s type=%s pos=%s",
                          self.blk_item, type(self.blk_item).__name__,
                          self.blk_item.pos())
             self.blk_item.under_ctrl = False
@@ -559,13 +565,13 @@ class FlowShapeControl(QGraphicsItem):
     def rebuildHandles(self):
         """Recreate FlowControlHandle children to match current point counts."""
         blk_item = self.blk_item
-        logger.debug("=== rebuildHandles ===")
-        logger.debug("  old handle count=%d", len(self.handles))
+        _debug("=== rebuildHandles ===")
+        _debug("  old handle count=%d", len(self.handles))
         if blk_item is not None and hasattr(blk_item, '_left_points'):
-            logger.debug("  left_points count=%d, right_points count=%d",
+            _debug("  left_points count=%d, right_points count=%d",
                          len(blk_item._left_points), len(blk_item._right_points))
-            logger.debug("  left_points=%s", _fmt_pts(blk_item._left_points))
-            logger.debug("  right_points=%s", _fmt_pts(blk_item._right_points))
+            _debug("  left_points=%s", _fmt_pts(blk_item._left_points))
+            _debug("  right_points=%s", _fmt_pts(blk_item._right_points))
         for h in self.handles:
             h.setParentItem(None)
             if h.scene():
@@ -592,22 +598,22 @@ class FlowShapeControl(QGraphicsItem):
         """Sync handle positions from item's boundary points."""
         blk_item = self.blk_item
         if blk_item is None:
-            logger.debug("updateHandlePositions: blk_item is None — skipping")
+            _debug("updateHandlePositions: blk_item is None — skipping")
             return
         if not hasattr(blk_item, '_left_points') or not blk_item._left_points:
-            logger.debug("updateHandlePositions: no _left_points — skipping")
+            _debug("updateHandlePositions: no _left_points — skipping")
             return
 
-        logger.debug("=== updateHandlePositions ===")
-        logger.debug("  FlowShapeControl pos before=%s", super().pos())
-        logger.debug("  blk_item=%s pos=%s boundingRect=%s",
+        _debug("=== updateHandlePositions ===")
+        _debug("  FlowShapeControl pos before=%s", super().pos())
+        _debug("  blk_item=%s pos=%s boundingRect=%s",
                      blk_item, blk_item.pos(), blk_item.boundingRect())
-        logger.debug("  blk_item scenePos=%s", blk_item.mapToScene(QPointF(0, 0)))
-        logger.debug("  left_points=%s", _fmt_pts(blk_item._left_points))
-        logger.debug("  right_points=%s", _fmt_pts(blk_item._right_points))
+        _debug("  blk_item scenePos=%s", blk_item.mapToScene(QPointF(0, 0)))
+        _debug("  left_points=%s", _fmt_pts(blk_item._left_points))
+        _debug("  right_points=%s", _fmt_pts(blk_item._right_points))
 
         super().setPos(QPointF(0, 0))
-        logger.debug("  FlowShapeControl pos after reset=%s", super().pos())
+        _debug("  FlowShapeControl pos after reset=%s", super().pos())
 
         # Convert blk_item-local coordinates to parent (baseLayer) coordinates
         # using mapToItem which handles ALL parent transforms (scale, offset, rotation).
@@ -616,11 +622,11 @@ class FlowShapeControl(QGraphicsItem):
         parent_item = self.parentItem()
 
         all_points = blk_item._left_points + blk_item._right_points
-        logger.debug("  total handle count=%d, total points=%d",
+        _debug("  total handle count=%d, total points=%d",
                      len(self.handles), len(all_points))
         for handle, pt in zip(self.handles, all_points):
             parent_pos = blk_item.mapToItem(parent_item, pt)
-            logger.debug("    handle side=%s idx=%d: local=(%.1f,%.1f) -> parent=(%.1f,%.1f)",
+            _debug("    handle side=%s idx=%d: local=(%.1f,%.1f) -> parent=(%.1f,%.1f)",
                          handle.side, handle.point_idx,
                          pt.x(), pt.y(),
                          parent_pos.x(), parent_pos.y())
@@ -773,39 +779,39 @@ class FlowShapeControl(QGraphicsItem):
         """
         from .flow_textitem import FlowTextBlkItem
 
-        logger.debug("handleContextMenu called — scene_pos=(%.1f, %.1f)", scene_pos.x(), scene_pos.y())
+        _debug("handleContextMenu called — scene_pos=(%.1f, %.1f)", scene_pos.x(), scene_pos.y())
 
         # First check if we clicked on a control handle or a FlowTextBlkItem
         # via scene lookup (handles are high z-order, blk items may be lower).
         if self.scene() is not None:
             items_at_pos = self.scene().items(scene_pos)
-            logger.debug("  items at pos: %d", len(items_at_pos))
+            _debug("  items at pos: %d", len(items_at_pos))
             for item in items_at_pos:
-                logger.debug("    - %s (type=%s)", item, type(item).__name__)
+                _debug("    - %s (type=%s)", item, type(item).__name__)
                 if isinstance(item, FlowControlHandle):
-                    logger.debug("  -> FlowControlHandle found, showing it")
+                    _debug("  -> FlowControlHandle found, showing it")
                     item.showHandleContextMenu(screen_pos)
                     return True
                 if isinstance(item, FlowTextBlkItem):
-                    logger.debug("  -> FlowTextBlkItem found via scene.items()")
+                    _debug("  -> FlowTextBlkItem found via scene.items()")
                     item.showFlowContextMenu(scene_pos, screen_pos)
                     return True
 
         # Fallback: if blk_item is set and is a FlowTextBlkItem that was not
         # found via scene.items() (e.g. because it's below other items), use it.
         if isinstance(self.blk_item, FlowTextBlkItem):
-            logger.debug("  -> Fallback: using self.blk_item (FlowTextBlkItem)")
+            _debug("  -> Fallback: using self.blk_item (FlowTextBlkItem)")
             self.blk_item.showFlowContextMenu(scene_pos, screen_pos)
             return True
 
-        logger.debug("  -> Returning False (no flow item handled)")
+        _debug("  -> Returning False (no flow item handled)")
         return False
 
     def show(self):
-        logger.debug("=== FlowShapeControl.show ===")
-        logger.debug("  blk_item=%s", self.blk_item)
+        _debug("=== FlowShapeControl.show ===")
+        _debug("  blk_item=%s", self.blk_item)
         if self.blk_item is not None:
-            logger.debug("  blk_item pos=%s has _left_points=%s count=%d",
+            _debug("  blk_item pos=%s has _left_points=%s count=%d",
                          self.blk_item.pos(),
                          hasattr(self.blk_item, '_left_points'),
                          len(getattr(self.blk_item, '_left_points', [])))
@@ -817,7 +823,7 @@ class FlowShapeControl(QGraphicsItem):
         has_points = self.blk_item is not None and \
                      hasattr(self.blk_item, '_left_points') and \
                      bool(self.blk_item._left_points)
-        logger.debug("  flow_visible=%s, handle count=%d", flow_visible, len(self.handles))
+        _debug("  flow_visible=%s, handle count=%d", flow_visible, len(self.handles))
         for h in self.handles:
             h.setVisible(flow_visible)
         for h in self._resize_handles:

@@ -149,23 +149,25 @@ class TransGemmaTranslator(BaseTranslator):
         current_prompt_content = ""
         num_src = 0
         i_offset = 0
+        current_batch_indices = []
 
         for i, query in enumerate(queries):
             query = query.replace('\n', ' ')
             element = f"id={i + 1 - i_offset}: {query}\n"
-            # element = f"<ID>{i + 1 - i_offset}</ID>\n<TEXT>{query}</TEXT>\n<<<END>>>"
             if len(current_prompt_content) + len(element) > max_len_approx and num_src > 0:
                 self.logger.debug(f"Нарезка текста, {len(current_prompt_content) + len(element)}>{max_len_approx}")
-                yield current_prompt_content, num_src
+                yield current_prompt_content, num_src, current_batch_indices
                 current_prompt_content = element
                 num_src = 1
                 i_offset = i
+                current_batch_indices = [i]
             else:
                 current_prompt_content += element
                 num_src += 1
+                current_batch_indices.append(i)
 
         if num_src > 0:
-            yield current_prompt_content, num_src
+            yield current_prompt_content, num_src, current_batch_indices
 
     def _request_translation(self, text: str) -> Optional[TranslationResponse]:
         current_api_key = "lm-studio"
@@ -271,10 +273,29 @@ class TransGemmaTranslator(BaseTranslator):
 
     def _translate(self, src_list: List[str]) -> List[str]:
         if not src_list: return []
-        translations = []
+        # Filter out empty or trivially short texts — don't send them to the translator
+        # Strip soft hyphens (\u00AD) and check if meaningful text remains
+        def _is_meaningful(s: str) -> bool:
+            clean = s.replace('\u00AD', '').strip()
+            if not clean:
+                return False
+            # Must contain at least one letter or digit (not just punctuation/spaces)
+            return any(c.isalpha() or c.isdigit() for c in clean)
+
+        non_empty_indices = [i for i, s in enumerate(src_list) if _is_meaningful(s)]
+        self.logger.debug(f"_translate: src_list={len(src_list)} items, non_empty={len(non_empty_indices)}")
+        for i, s in enumerate(src_list):
+            if not s.strip():
+                self.logger.debug(f"  filtered out [{i}]: repr={repr(s[:50])}")
+        if not non_empty_indices:
+            return [""] * len(src_list)
+        filtered_src = [src_list[i] for i in non_empty_indices]
+
+        translations = [""] * len(src_list)
         to_lang = self.lang_map.get(self.lang_target, self.lang_target)
 
-        for text, num_src in self._assemble_prompts(src_list, to_lang=to_lang):
+        for text, num_src, batch_orig_idx in self._assemble_prompts(filtered_src, to_lang=to_lang):
+            batch_src = [filtered_src[k] for k in batch_orig_idx]
             # api_retry_attempt = 0
             # mismatch_retry_attempt = 0
             # skipped_translation_retry_attempt = 0
@@ -292,7 +313,7 @@ class TransGemmaTranslator(BaseTranslator):
             #     raise InvalidNumTranslations(f"Expected {num_src}, got {len(parsed_response.translations)}")
                 self.logger.warning(f"Translation structure mismatch: scr={num_src}/translations={len(parsed_response.translations)}. Translate separatly")
 
-                for i, src in enumerate(src_list, start=1):
+                for i, src in enumerate(batch_src, start=1):
                     separate_translate_response = self._request_translation(src)
                     tr: str = separate_translate_response.translations[0].translation
                     if (tr.strip()):
@@ -329,7 +350,7 @@ class TransGemmaTranslator(BaseTranslator):
             # debugpy.breakpoint()
             ordered_translations = [translations_dict.get(i, "") for i in range(1, num_src + 1)]
 
-            for i, (src, trans) in enumerate(zip(src_list, ordered_translations)):
+            for i, (src, trans) in enumerate(zip(batch_src, ordered_translations)):
                 # Проверка на пустой результат при непустом источнике
                 if not trans.strip() and src.strip():
                     self.logger.warning(f"Empty translation for source: '{src[:20]}...'")
@@ -410,7 +431,8 @@ class TransGemmaTranslator(BaseTranslator):
                     self.logger.warning("Удален суффикс {}.")
                     ordered_translations[i] = ordered_translations[i].removesuffix("{}")
 
-            translations.extend(ordered_translations)
+            for j, tr in enumerate(ordered_translations):
+                translations[non_empty_indices[batch_orig_idx[j]]] = tr
             self.logger.info(f"Successfully translated batch of {num_src}. Tokens used: {self.token_count_last}, max_len_approx={MAX_LEN_APPROX}")
             # break
 
