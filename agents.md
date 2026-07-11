@@ -50,12 +50,24 @@ Make one change, run tests, verify, then proceed to next change. Do not batch mu
 
 User prefers to commit uncommitted changes rather than stash before git operations.
 
+### FontFormat attribute names
+
+`FontFormat` uses `font_size` (in pixels), NOT `size`. Convert with `pt2px()` from `utils.fontformat`. The `size_pt` property returns points. Never use `fontformat.size` — it doesn't exist as a defined attribute.
+
+### QUIET_UI flag
+
+Each UI file (`flow_textitem.py`, `flow_shapecontrol.py`, `scenetext_manager.py`, `scene_textlayout.py`) has `QUIET_UI = True` at the top. Set to `False` for verbose debug logging. All `LOGGER.debug` calls go through `_debug()` wrapper that checks this flag.
+
 ### Log filtering
 
 When debugging shrink/grow issues, filter logs by block text prefix:
 ```python
 _LOG_PREFIXES = ("БЫСТРЕЕ", "60 МИЛЬ В ЧАС")
 ```
+
+### Type annotations
+
+Use type annotations wherever possible — function signatures, return types, variables with non-obvious types. Prefer `typing` module types (`List`, `Dict`, `Optional`, `Tuple`, `Union`) for compatibility with Python 3.10. Every new function MUST have type hints on parameters and return value.
 
 ## Architecture Notes
 

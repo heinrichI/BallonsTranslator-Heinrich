@@ -101,8 +101,11 @@ class ReshapeItemCommand(QUndoCommand):
         self.oldRect = item.oldRect
         self.newRect = item.absBoundingRect(qrect=True)
         self.idx = -1
-        # Save font size so Ctrl+Z restores it
-        self.old_font_size = item.fontformat.size if hasattr(item, 'fontformat') and item.fontformat else None
+        # Save font size so Ctrl+Z restores it (use font_size in px, convert via size_pt)
+        if hasattr(item, 'fontformat') and item.fontformat:
+            self.old_font_size = item.fontformat.font_size
+        else:
+            self.old_font_size = None
         self.new_font_size = self.old_font_size
         # Save flow points if item supports them
         if hasattr(item, '_left_points'):
@@ -124,9 +127,9 @@ class ReshapeItemCommand(QUndoCommand):
             return
         self.item.setRect(self.newRect)
         if hasattr(self.item, 'fontformat') and self.item.fontformat and self.new_font_size is not None:
-            self.item.fontformat.size = self.new_font_size
+            self.item.fontformat.font_size = self.new_font_size
             if self.item.blk is not None and self.item.blk.fontformat is not None:
-                self.item.blk.fontformat.size = self.new_font_size
+                self.item.blk.fontformat.font_size = self.new_font_size
         if self.new_left_points is not None and hasattr(self.item, '_left_points'):
             from copy import deepcopy
             self.item._left_points = deepcopy(self.new_left_points)
@@ -137,9 +140,9 @@ class ReshapeItemCommand(QUndoCommand):
     def undo(self):
         self.item.setRect(self.oldRect)
         if hasattr(self.item, 'fontformat') and self.item.fontformat and self.old_font_size is not None:
-            self.item.fontformat.size = self.old_font_size
+            self.item.fontformat.font_size = self.old_font_size
             if self.item.blk is not None and self.item.blk.fontformat is not None:
-                self.item.blk.fontformat.size = self.old_font_size
+                self.item.blk.fontformat.font_size = self.old_font_size
         if self.old_left_points is not None and hasattr(self.item, '_left_points'):
             from copy import deepcopy
             self.item._left_points = deepcopy(self.old_left_points)
@@ -154,7 +157,7 @@ class ReshapeItemCommand(QUndoCommand):
         self.newRect = item.rect()
         # Track the font size after shrink/grow ran
         if hasattr(item, 'fontformat') and item.fontformat:
-            self.new_font_size = item.fontformat.size
+            self.new_font_size = item.fontformat.font_size
         if hasattr(item, '_left_points') and command.new_left_points is not None:
             from copy import deepcopy
             self.new_left_points = deepcopy(command.new_left_points)

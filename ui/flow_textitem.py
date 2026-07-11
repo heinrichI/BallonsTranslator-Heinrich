@@ -380,15 +380,16 @@ class FlowTextBlkItem(TextBlkItem):
     def _font_adjuster_sync(self):
         """Called by FontAutoAdjuster after font size changes to sync fontformat/blk."""
         try:
+            from utils.fontformat import pt2px
             block = self.document().firstBlock()
             it = block.begin()
             if not it.atEnd():
                 actual_size = it.fragment().charFormat().fontPointSize()
                 if actual_size > 0:
                     if self.fontformat is not None:
-                        self.fontformat.size = actual_size
+                        self.fontformat.font_size = pt2px(actual_size)
                     if self.blk is not None and self.blk.fontformat is not None:
-                        self.blk.fontformat.size = actual_size
+                        self.blk.fontformat.font_size = pt2px(actual_size)
         except Exception:
             pass
 
