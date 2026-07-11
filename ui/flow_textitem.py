@@ -139,10 +139,9 @@ def interpolate_boundary(points: List[QPointF], y: float) -> float:
 def build_quad_path(points: List[QPointF]) -> QPainterPath:
     """
     Build a quadratic Bezier path that passes THROUGH all points.
-    For >= MIN_POINTS_PER_SIDE points, the curve passes through pts[0],
-    pts[1] (middle), and pts[-1]. To achieve this, we compute the true
-    Bezier control point C such that B(0.5) = pts[1]:
-        C = 2 * pts[1] - 0.5 * (pts[0] + pts[-1])
+    For each consecutive triple (A, B, C), compute a control point
+    so the curve passes through B at t=0.5:
+        C_ctrl = 2 * B - 0.5 * (A + C)
     """
     path = QPainterPath()
     if len(points) < 2:
@@ -153,14 +152,24 @@ def build_quad_path(points: List[QPointF]) -> QPainterPath:
     if len(pts) == 2:
         path.moveTo(pts[0])
         path.lineTo(pts[1])
-    elif len(pts) >= MIN_POINTS_PER_SIDE:
-        # Compute control point so curve passes through pts[1] at t=0.5
+    elif len(pts) == 3:
         ctrl = QPointF(
             2 * pts[1].x() - 0.5 * (pts[0].x() + pts[2].x()),
             2 * pts[1].y() - 0.5 * (pts[0].y() + pts[2].y()),
         )
         path.moveTo(pts[0])
         path.quadTo(ctrl, pts[2])
+    else:
+        # 4+ points: draw quadratic segments between consecutive triples
+        path.moveTo(pts[0])
+        for i in range(1, len(pts) - 1):
+            a, b, c = pts[i - 1], pts[i], pts[i + 1]
+            ctrl = QPointF(
+                2 * b.x() - 0.5 * (a.x() + c.x()),
+                2 * b.y() - 0.5 * (a.y() + c.y()),
+            )
+            path.quadTo(ctrl, c)
+    return path
     return path
 
 
@@ -731,6 +740,8 @@ class FlowTextBlkItem(TextBlkItem):
     def _after_add_point(self):
         """Refresh layout and rebuild shape handles after adding a point."""
         self._update_flow_layout()
+        self.prepareGeometryChange()
+        self.update()
         scene = self.scene()
         if scene is not None:
             for item in scene.items():
