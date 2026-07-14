@@ -1135,5 +1135,63 @@ class TestLargeFontNoOverflow:
         assert font_size >= 8.0, f"Font too small after binary search: {font_size:.1f}pt"
 
 
+class TestAbsBoundingRectUsesControlPoints:
+    """absBoundingRect() must use control points y-range for height, not _display_rect.
+
+    Bug: _display_rect stored width/height from setRect, but absBoundingRect()
+    returned those as [x, y, w, h]. OCR cropped by xyxy derived from this, giving
+    wrong height (e.g. 5px instead of 35px). Control points define the actual
+    visual block height.
+    """
+
+    def test_height_from_control_points(self, scene):
+        """Block with control points spanning 35px height must return h=35."""
+        text = "Test text"
+        blk = _make_blk(xyxy=(0, 0, 200, 35), text=text, font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Control points should span the block height
+        assert len(item._left_points) == 3
+        ys = [p.y() for p in item._left_points]
+        cp_height = max(ys) - min(ys)
+
+        abr = item.absBoundingRect()
+        # abr returns [x, y, w, h] with math.ceil rounding
+        assert abs(abr[3] - cp_height) <= 1.0, (
+            f"absBoundingRect height={abr[3]} != control points height={cp_height}"
+        )
+
+    def test_ocr_crop_uses_correct_height(self, scene):
+        """Simulate OCR crop — xyxy from absBoundingRect must have correct height."""
+        text = "OCR test"
+        blk = _make_blk(xyxy=(100, 200, 400, 235), text=text, font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        abr = item.absBoundingRect()
+        # abr = [x, y, w, h]
+        x, y, w, h = abr
+        xyxy = [x, y, x + w, y + h]
+
+        # OCR would crop img[y1:y2, x1:x2]
+        crop_h = xyxy[3] - xyxy[1]
+        assert crop_h == 35, f"OCR crop height={crop_h}, expected 35"
+
+    def test_height_matches_on_screen(self, scene):
+        """Two blocks with same control point height must return same absBoundingRect height."""
+        blk1 = _make_blk(xyxy=(0, 0, 200, 35), text="A", font_size=24.0)
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+
+        blk2 = _make_blk(xyxy=(300, 0, 600, 35), text="B", font_size=24.0)
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+
+        h1 = item1.absBoundingRect()[3]
+        h2 = item2.absBoundingRect()[3]
+        assert h1 == h2, f"Heights differ: block1={h1}, block2={h2}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

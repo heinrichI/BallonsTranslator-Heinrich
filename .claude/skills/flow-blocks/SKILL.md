@@ -214,6 +214,23 @@ if new_height > self.available_height:
 
 **Решение**: `FlowTextBlkItem._draw_accessories()` — override, который рисует `background_pixmap` как обычно, но подавляет отрисовку пунктирной рамки, когда `under_ctrl=True`.
 
+### #7 absBoundingRect возвращал неправильную высоту для OCR
+
+**Проблема**: OCR получал 343x5 вместо 343x35 для блока. `absBoundingRect()` возвращал высоту из `_display_rect` (5px), хотя实际控制 points определяли высоту 35px. Блок выглядел правильного размера на экране, но OCR кропил по неправильным координатам.
+
+**Причина**: `_display_rect` хранил width/height из `setRect()`. `absBoundingRect()` читал `_display_rect.height()` — но `_display_rect` не обновлялся при изменении control points. Control points (visual boundaries) и `_display_rect` (data dimensions) рассинхронизировались.
+
+**Решение**: `absBoundingRect()` теперь использует y-range control points для высоты когда они доступны:
+```python
+if self._left_points and self._right_points:
+    all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
+    cp_h = max(all_ys) - min(all_ys)
+    if cp_h > 0:
+        h = cp_h
+```
+
+**Как диагностировать**: Добавить лог в `translateBlkitemList` — `abr = blkitem.absBoundingRect()`. Если `abr[3]` (height) не совпадает с визуальной высотой блока — это этот баг.
+
 ---
 
 ## Бинарный поиск `_find_best_font_size()`
@@ -309,3 +326,5 @@ myenv\Scripts\python -m pytest -v
 - `TestUndoFontRestore` — undo восстанавливает шрифт
 - `TestAutoAdjustReset` — флаг сбрасывается после update_flow_layout
 - `TestFontPanelAfterResize` — sync шрифта после resize
+- `TestAbsBoundingRectUsesControlPoints` — absBoundingRect использует control points для высоты (OCR fix)
+- `TestLargeFontNoOverflow` — нет overflow при большом шрифте после перевода

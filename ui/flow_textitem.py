@@ -686,7 +686,8 @@ class FlowTextBlkItem(TextBlkItem):
         return rect
 
     def absBoundingRect(self, max_h=None, max_w=None, qrect=False):
-        """Override to use _display_rect for dimensions (excludes control points)."""
+        """Override to use _display_rect for dimensions (excludes control points).
+        Uses control points y-range for height when available."""
         import math
         P = 2 * self.padding()
         pos = self.pos()
@@ -698,6 +699,12 @@ class FlowTextBlkItem(TextBlkItem):
         else:
             br = super().boundingRect()
             w, h = br.width() - P, br.height() - P
+        # Use control points y-range for height when available
+        if self._left_points and self._right_points:
+            all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
+            cp_h = max(all_ys) - min(all_ys)
+            if cp_h > 0:
+                h = cp_h
         if max_h is not None:
             y = min(max(0, y), max_h)
             y1 = y + h
