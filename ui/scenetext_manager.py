@@ -966,9 +966,13 @@ class SceneTextManager(QObject):
             final_h = blkitem.document().size().height()
             # LOGGER.info(f"[layout_textblk] AUTO idx={blkitem.idx} FINAL font={optimal_size:.2f}pt "
             #              f"doc_h={final_h:.1f} target_h={target_h:.1f}")
-            # Restore auto-adjust and run one shrink/grow pass to fill available space.
+            # Restore auto-adjust and run one shrink pass to fill available space.
+            # Disable grow — binary search already found the optimal size.
             blkitem._auto_font_adjust = True
+            saved_grow = blkitem.font_adjuster._auto_grow_enabled
+            blkitem.font_adjuster._auto_grow_enabled = False
             blkitem._update_flow_layout()
+            blkitem.font_adjuster._auto_grow_enabled = saved_grow
             return True
 
         # =====================================================

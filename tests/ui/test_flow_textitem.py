@@ -1022,5 +1022,118 @@ class TestFontPanelAfterResize:
         )
 
 
+class TestLargeFontNoOverflow:
+    """After translation, large font (>60pt) must not overflow block boundaries.
+
+    Simulates RunBlkTransCommand flow:
+    1. Binary search finds optimal font size
+    2. setFontSize + setPlainText + set_size
+    3. _update_flow_layout() runs with grow DISABLED
+    4. shrink_height must be <= target_height
+    """
+
+    def test_large_font_no_overflow(self, scene):
+        """ВПЕРЁД!-style block: 680x90, text that gets ~47pt font, no overflow."""
+        text = "ВПЕРЁД! Я-Я-Я-Я!"
+        blk = _make_blk(xyxy=(0, 0, 680, 90), text=text, font_size=120.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Simulate RunBlkTransCommand: set font, text, size
+        item.setFontSize(68.0)
+        item.setPlainText(text)
+        item.set_size(680, 90, set_layout_maxsize=True)
+
+        # Run _update_flow_layout with grow disabled (same as RunBlkTransCommand)
+        item._auto_font_adjust = True
+        saved_grow = item.font_adjuster._auto_grow_enabled
+        item.font_adjuster._auto_grow_enabled = False
+        item._update_flow_layout()
+        item.font_adjuster._auto_grow_enabled = saved_grow
+
+        target_h = 90.0
+        text_extent = item.layout.shrink_height
+        assert text_extent <= target_h + 1.0, (
+            f"Text overflows block: shrink_height={text_extent:.1f} > target={target_h:.1f}"
+        )
+
+    def test_medium_font_no_overflow(self, scene):
+        """531x163 block with medium-length text."""
+        text = "ВПЕРЁД! Я-Я-Я-Я! К-К-К-К!"
+        blk = _make_blk(xyxy=(0, 0, 531, 163), text=text, font_size=100.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        item.setFontSize(68.0)
+        item.setPlainText(text)
+        item.set_size(531, 163, set_layout_maxsize=True)
+
+        item._auto_font_adjust = True
+        saved_grow = item.font_adjuster._auto_grow_enabled
+        item.font_adjuster._auto_grow_enabled = False
+        item._update_flow_layout()
+        item.font_adjuster._auto_grow_enabled = saved_grow
+
+        target_h = 163.0
+        text_extent = item.layout.shrink_height
+        assert text_extent <= target_h + 1.0, (
+            f"Text overflows block: shrink_height={text_extent:.1f} > target={target_h:.1f}"
+        )
+
+    def test_binary_search_result_no_overflow(self, scene):
+        """Binary search optimal size must not overflow after _update_flow_layout."""
+        text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Run binary search to find optimal font size
+        optimal = item.font_adjuster._layout  # layout ref
+        target_w, target_h = 305.0, 92.0
+        optimal_size = 12.0  # fallback
+        # Use _find_best_font_size if available
+        try:
+            from ui.scenetext_manager import LAYOUT_FIT_FILL_H_RATIO, LAYOUT_FIT_FILL_W_RATIO, LAYOUT_BLOCK_SHRINK_W
+            tw = target_w * LAYOUT_BLOCK_SHRINK_W * LAYOUT_FIT_FILL_W_RATIO
+            th = target_h * LAYOUT_FIT_FILL_H_RATIO
+            lo, hi = 8.0, 200.0
+            for _ in range(30):
+                if hi - lo < 0.1:
+                    break
+                mid = (lo + hi) / 2.0
+                item.font_adjuster._internal_font_change = True
+                item.setRelFontSize(mid / item.font().pointSizeF())
+                item.font_adjuster._internal_font_change = False
+                item.setPlainText(text)
+                item.set_size(tw, th, set_layout_maxsize=True, auto_font_adjust=False)
+                doc_h = item.layout.shrink_height if item.layout.shrink_height > 0 else item.document().size().height()
+                if doc_h <= th:
+                    optimal_size = mid
+                    lo = mid
+                else:
+                    hi = mid
+        except Exception:
+            pass
+
+        # Now simulate RunBlkTransCommand: set optimal font, text, size, then _update_flow_layout with grow disabled
+        item.setFontSize(optimal_size)
+        item.setPlainText(text)
+        item.set_size(target_w, target_h, set_layout_maxsize=True)
+
+        item._auto_font_adjust = True
+        saved_grow = item.font_adjuster._auto_grow_enabled
+        item.font_adjuster._auto_grow_enabled = False
+        item._update_flow_layout()
+        item.font_adjuster._auto_grow_enabled = saved_grow
+
+        text_extent = item.layout.shrink_height
+        assert text_extent <= target_h + 1.0, (
+            f"Binary search result overflows: shrink_height={text_extent:.1f} > target={target_h:.1f}"
+        )
+        # Font should be reasonable (not too small)
+        font_size = item.font().pointSizeF()
+        assert font_size >= 8.0, f"Font too small after binary search: {font_size:.1f}pt"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

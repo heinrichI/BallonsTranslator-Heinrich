@@ -21,7 +21,7 @@ General-purpose worker for multi-step tasks. Inherits parent's working directory
 **Always run tests after modifying code:**
 
 ```bash
-# Flow text item tests (40+ tests)
+# Flow text item tests (60+ tests)
 myenv\Scripts\python -m pytest tests/ui/test_flow_textitem.py -v
 
 # All UI tests
@@ -86,6 +86,7 @@ Each stage is a pluggable module registered via `Registry` pattern (`utils/regis
 - `ui/scene_textlayout.py` — HorizontalTextDocumentLayout with boundary functions
 - `ui/textitem.py` — Base TextBlkItem class
 - `ui/scenetext_manager.py` — layout_textblk, _find_best_font_size
+- **Полный справочник**: `.claude/skills/flow-blocks/SKILL.md` — все вызовы `_update_flow_layout()`, known bugs, паттерны
 
 ### Key Metrics
 

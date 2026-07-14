@@ -20,14 +20,13 @@ from typing import List, Union, Tuple
 logger = logging.getLogger('BallonTranslator')
 LOGGER = logger  # alias used in _auto_shrink_font, _auto_grow_font
 
-QUIET_UI = True  # Set to False for verbose UI debug logging
+QUIET_UI = False  # Set to False for verbose UI debug logging
 
 def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
         LOGGER.debug(msg, *args, **kwargs)
 
-# Only log shrink/grow for blocks with these text prefixes
-_LOG_PREFIXES = ("БЫСТРЕЕ", "60 МИЛЬ В ЧАС")
+from utils.shared import LOG_PREFIXES as _LOG_PREFIXES
 
 from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent, QMenu, QAction
 from qtpy.QtCore import Qt, QRectF, QPointF, Signal
@@ -373,8 +372,10 @@ class FlowTextBlkItem(TextBlkItem):
         return any(txt.startswith(p) for p in _LOG_PREFIXES)
 
     def _log(self, msg: str, level: int = logging.DEBUG):
-        """Log for all blocks, with block text prefix."""
+        """When QUIET_UI=False, log only for blocks matching _LOG_PREFIXES."""
         if QUIET_UI and level <= logging.DEBUG:
+            return
+        if level <= logging.DEBUG and not self._should_log():
             return
         LOGGER.log(level, "[%s] %s", self._block_text()[:20], msg)
 
@@ -614,7 +615,13 @@ class FlowTextBlkItem(TextBlkItem):
             saved = self._auto_font_adjust
             self._auto_font_adjust = False
         if self._left_points and self._right_points:
-            self._update_flow_layout()
+            if auto_font_adjust:
+                self._update_flow_layout()
+            else:
+                # Skip _update_flow_layout entirely — just update max size.
+                # Boundary setup and reLayout() will run later when
+                # _update_flow_layout is called with _auto_font_adjust=True.
+                pass
         if not auto_font_adjust:
             self._auto_font_adjust = saved
         self.update()

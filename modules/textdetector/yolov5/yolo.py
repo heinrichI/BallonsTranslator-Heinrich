@@ -84,6 +84,7 @@ class Model(nn.Module):
         if isinstance(m, Detect):
             s = 256  # 2x min stride
             m.inplace = self.inplace
+            self.float()  # Ensure FP32 before test forward pass
             m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
             m.anchors /= m.stride.view(-1, 1, 1)
             check_anchor_order(m)
@@ -199,9 +200,10 @@ class Model(nn.Module):
         self = super()._apply(fn)
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):
-            m.stride = fn(m.stride)
-            m.grid = list(map(fn, m.grid))
-            if isinstance(m.anchor_grid, list):
+            if m.stride is not None:
+                m.stride = fn(m.stride)
+            m.grid = list(map(fn, m.grid)) if m.grid else m.grid
+            if isinstance(m.anchor_grid, list) and m.anchor_grid and m.anchor_grid[0] is not None:
                 m.anchor_grid = list(map(fn, m.anchor_grid))
         return self
 
@@ -291,11 +293,13 @@ def load_yolov5_ckpt(weights, map_location='cpu', fuse=True, inplace=True, out_i
     
     model = Model(ckpt['cfg'])
     model.load_state_dict(ckpt['weights'], strict=True)
-    
+
+    # Ensure FP32 before test forward pass and fuse
+    model = model.float()
     if fuse:
-        model = model.float().fuse().eval()  # FP32 model
+        model = model.fuse().eval()  # FP32 model
     else:
-        model = model.float().eval()  # without layer fuse
+        model = model.eval()  # without layer fuse
 
     # Compatibility updates
     for m in model.modules():

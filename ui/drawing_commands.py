@@ -143,6 +143,41 @@ class RunBlkTransCommand(QUndoCommand):
                         blkitem.setFontSize(optimal_size)
                         blkitem.setPlainText(trs)
                         blkitem.set_size(block_w, target_h, set_layout_maxsize=True)
+                        # Restore auto-adjust for shrink safety net, but disable grow
+                        # since binary search already found the optimal size.
+                        # Grow would increase font past boundaries causing overflow.
+                        blkitem._auto_font_adjust = True
+                        saved_grow = blkitem.font_adjuster._auto_grow_enabled
+                        blkitem.font_adjuster._auto_grow_enabled = False
+                        blkitem._update_flow_layout()
+                        blkitem.font_adjuster._auto_grow_enabled = saved_grow
+
+                        # Post-layout validation: if text still exceeds target height
+                        # after the shrink pass, apply additional shrink iterations.
+                        # This handles cases where binary search optimal size doesn't
+                        # perfectly match the final layout (large fonts, hyphenation).
+                        layout = blkitem.layout
+                        if layout is not None:
+                            cur_shrink_h = getattr(layout, 'shrink_height', 0)
+                            if cur_shrink_h > target_h and target_h > 0:
+                                doc_margin = blkitem.document().documentMargin()
+                                for _ in range(10):
+                                    cur_shrink_h = getattr(layout, 'shrink_height', 0)
+                                    if cur_shrink_h <= target_h or cur_shrink_h <= 0:
+                                        break
+                                    factor = min(0.92, (target_h / cur_shrink_h) * 0.95)
+                                    if factor >= 1.0:
+                                        break
+                                    blkitem.font_adjuster._internal_font_change = True
+                                    try:
+                                        blkitem.font_adjuster._change_font_size(factor)
+                                    finally:
+                                        blkitem.font_adjuster._internal_font_change = False
+                                    layout.available_height = target_h
+                                    layout.max_height = target_h + doc_margin * 2
+                                    layout.reLayout()
+                                optimal_size = blkitem.font().pointSizeF()
+                                blkitem.font_adjuster._sync_font()
 
                         # transpairw uses undo-safe method (its own undo stack)
                         transpairw.e_trans.setPlainTextAndKeepUndoStack(trs)

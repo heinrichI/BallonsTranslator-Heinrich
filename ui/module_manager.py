@@ -523,8 +523,9 @@ class ImgtransThread(QThread):
 def unload_modules(self, module_names):
     model_deleted = False
     for module in module_names:
-        module: BaseModule = getattr(self, module)
-        model_deleted = model_deleted or module.unload_model()
+        module: BaseModule = getattr(self, module, None)
+        if module is not None:
+            model_deleted = model_deleted or module.unload_model()
     if model_deleted:
         soft_empty_cache()
 
