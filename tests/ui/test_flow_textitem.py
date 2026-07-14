@@ -26,7 +26,7 @@ from qtpy.QtCore import Qt, QRectF, QPointF
 from qtpy.QtGui import QTextCursor
 
 from utils.textblock import TextBlock
-from ui.flow_textitem import FlowTextBlkItem
+from ui.flow_textitem import FlowTextBlkItem, DEFAULT_POINTS_PER_SIDE
 from ui.scene_textlayout import HorizontalTextDocumentLayout
 
 
@@ -81,8 +81,8 @@ class TestFlowTextBlkInit:
 
     def test_init_creates_control_points(self, scene):
         item = _make_item(scene)
-        assert len(item._left_points) == 3
-        assert len(item._right_points) == 3
+        assert len(item._left_points) == DEFAULT_POINTS_PER_SIDE
+        assert len(item._right_points) == DEFAULT_POINTS_PER_SIDE
         # Points should span the block rectangle
         ys = [p.y() for p in item._left_points]
         assert min(ys) == 0
@@ -98,7 +98,7 @@ class TestFlowTextBlkInit:
         blk.fontformat.vertical = True
         item = FlowTextBlkItem(blk, idx=0)
         scene.addItem(item)
-        assert len(item._left_points) == 3
+        assert len(item._left_points) == DEFAULT_POINTS_PER_SIDE
 
 
 class TestFlowBoundaryLayout:
@@ -365,7 +365,7 @@ class TestHyphenation:
 
     def test_hyphenate_integration_with_setplaintext(self, scene, qapp):
         """FlowTextBlkItem.setPlainText should hyphenate text."""
-        from ui.flow_textitem import FlowTextBlkItem
+        from ui.flow_textitem import FlowTextBlkItem, DEFAULT_POINTS_PER_SIDE
 
         blk = _make_blk(xyxy=(0, 0, 300, 100), text="", font_size=20)
         item = FlowTextBlkItem(blk, idx=0, set_format=True, show_rect=True)
@@ -430,8 +430,8 @@ class TestFlowPointsPersistence:
         item = FlowTextBlkItem(blk, idx=0)
         scene.addItem(item)
 
-        assert len(item._left_points) == 3
-        assert len(item._right_points) == 3
+        assert len(item._left_points) == DEFAULT_POINTS_PER_SIDE
+        assert len(item._right_points) == DEFAULT_POINTS_PER_SIDE
         # Points should form a rectangle
         assert item._left_points[0].x() == item._left_points[2].x()  # same x
         assert item._right_points[0].x() == item._right_points[2].x()
@@ -1152,7 +1152,7 @@ class TestAbsBoundingRectUsesControlPoints:
         scene.addItem(item)
 
         # Control points should span the block height
-        assert len(item._left_points) == 3
+        assert len(item._left_points) == DEFAULT_POINTS_PER_SIDE
         ys = [p.y() for p in item._left_points]
         cp_height = max(ys) - min(ys)
 

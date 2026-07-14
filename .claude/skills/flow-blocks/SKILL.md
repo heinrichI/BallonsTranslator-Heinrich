@@ -32,9 +32,11 @@
 
 ### Control Points (границы)
 
-Каждый `FlowTextBlkItem` имеет **6 контрольных точек** (3 слева + 3 справа) для изогнутых границ:
-- `_left_points`: `[QPointF(0, 0), QPointF(0, h/2), QPointF(0, h)]`
-- `_right_points`: `[QPointF(w, 0), QPointF(w, h/2), QPointF(w, h)]`
+Каждый `FlowTextBlkItem` имеет **8 контрольных точек** (4 слева + 4 справа) для изогнутых границ:
+- `_left_points`: `[QPointF(0, 0), QPointF(0, h/3), QPointF(0, 2h/3), QPointF(0, h)]`
+- `_right_points`: `[QPointF(w, 0), QPointF(w, h/3), QPointF(w, 2h/3), QPointF(w, h)]`
+
+Количество точек задаётся константой `DEFAULT_POINTS_PER_SIDE = 4` в `flow_textitem.py:46`.
 
 Points хранятся в item-local coordinates.
 
@@ -253,7 +255,7 @@ if self._left_points and self._right_points:
 
 ## Ключевые особенности
 
-1. 6 контрольных точек (3 слева + 3 справа) для изогнутых границ
+1. 8 контрольных точек (4 слева + 4 справа) для изогнутых границ
 2. Quadratic Bezier — кривая проходит через ВСЕ 3 точки (не только крайние)
 3. Per-line интерполяция — каждая строка текста подстраивается под границы
 4. Перетаскивание хендлов — обновление layout'а в реальном времени
