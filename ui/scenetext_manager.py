@@ -583,6 +583,9 @@ class SceneTextManager(QObject):
         new_top = min(p.y() for p in new_item._left_points) + new_pos.y()
         new_bottom = max(p.y() for p in new_item._left_points) + new_pos.y()
 
+        new_text = new_item.toPlainText()[:30]
+        overlaps_found = 0
+
         for existing in self.textblk_item_list:
             if existing is new_item:
                 continue
@@ -601,8 +604,10 @@ class SceneTextManager(QObject):
             if overlap_x <= 0 or overlap_y <= 0:
                 continue
 
-            LOGGER.debug("[OVERLAP] Resolving overlap between '%s' and '%s'",
-                        new_item.toPlainText()[:20], existing.toPlainText()[:20])
+            overlaps_found += 1
+            existing_text = existing.toPlainText()[:30]
+            LOGGER.debug("[OVERLAP] Resolving overlap between '%s' and '%s' (overlap_x=%.1f, overlap_y=%.1f)",
+                        new_text, existing_text, overlap_x, overlap_y)
 
             # Determine which block is bigger
             new_area = (new_right - new_left) * (new_bottom - new_top)
@@ -634,9 +639,17 @@ class SceneTextManager(QObject):
             overlap_top_local = max(new_top, ex_top) - bigger_pos.y()
             overlap_bottom_local = min(new_bottom, ex_bottom) - bigger_pos.y()
 
+            # Check if smaller block is fully contained in bigger's y-range
+            bigger_top_local = min(p.y() for p in bigger._left_points)
+            bigger_bottom_local = max(p.y() for p in bigger._left_points)
+            smaller_top = min(new_top, ex_top) if bigger is existing else min(new_top, ex_top)
+            smaller_bottom = max(new_bottom, ex_bottom) if bigger is existing else max(new_bottom, ex_bottom)
+            smaller_top_local = smaller_top - bigger_pos.y()
+            smaller_bottom_local = smaller_bottom - bigger_pos.y()
+            fully_contained = smaller_top_local >= bigger_top_local and smaller_bottom_local <= bigger_bottom_local
+
             for i, pt in enumerate(points):
-                if overlap_top_local <= pt.y() <= overlap_bottom_local:
-                    # Shift point out of overlap zone
+                if fully_contained or (overlap_top_local <= pt.y() <= overlap_bottom_local):
                     if side == 'right':
                         new_pt_x = max(pt.x() - overlap_x, 10)
                     else:
@@ -645,6 +658,9 @@ class SceneTextManager(QObject):
 
             # Update layout of the bigger block
             bigger._update_flow_layout()
+
+        if overlaps_found > 0:
+            LOGGER.debug("[OVERLAP] Resolved %d overlap(s) for block '%s'", overlaps_found, new_text)
 
     def addTextBlkItem(self, textblk_item: TextBlkItem) -> TextBlkItem:
         self.textblk_item_list.append(textblk_item)
@@ -798,6 +814,16 @@ class SceneTextManager(QObject):
     def onLeftbuttonPressed(self, blk_id: int):
         blk_item = self.textblk_item_list[blk_id]
         self.txtblkShapeControl.setBlkItem(blk_item)
+
+        # Log clicked block's coordinates and flow points
+        if hasattr(blk_item, '_left_points') and blk_item._left_points:
+            txt = blk_item.toPlainText()[:30] if blk_item else ''
+            p = blk_item.pos()
+            LOGGER.debug("[CLICK] blk='%s' idx=%d pos=(%.0f,%.0f) xyxy=%s left=%s right=%s",
+                txt, blk_id, p.x(), p.y(),
+                blk_item.blk.xyxy if blk_item.blk else None,
+                [(round(pt.x(),1), round(pt.y(),1)) for pt in blk_item._left_points],
+                [(round(pt.x(),1), round(pt.y(),1)) for pt in blk_item._right_points])
         selections: List[TextBlkItem] = self.canvas.selectedItems()
         if len(selections) > 1:
             for item in selections:

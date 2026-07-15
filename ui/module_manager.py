@@ -522,11 +522,29 @@ class ImgtransThread(QThread):
 
 def unload_modules(self, module_names):
     model_deleted = False
-    for module in module_names:
-        module: BaseModule = getattr(self, module, None)
+    for module_name in module_names:
+        module: BaseModule = getattr(self, module_name, None)
         if module is not None:
-            model_deleted = model_deleted or module.unload_model()
+            deleted = module.unload_model()
+            if deleted:
+                LOGGER.info(f'[LOW_VRAM] Module {module_name} model deleted from GPU')
+            else:
+                # Diagnose why unload failed
+                reason = []
+                if module._load_model_keys is None:
+                    reason.append('_load_model_keys is None')
+                else:
+                    for k in module._load_model_keys:
+                        if not hasattr(module, k):
+                            reason.append(f'attribute "{k}" missing')
+                        elif getattr(module, k) is None:
+                            reason.append(f'"{k}" already None')
+                LOGGER.warning(f'[LOW_VRAM] Module {module_name} NOT unloaded: {", ".join(reason) or "unknown"}')
+            model_deleted = model_deleted or deleted
+        else:
+            LOGGER.debug(f'[LOW_VRAM] Module {module_name} is None, skipping')
     if model_deleted:
+        LOGGER.info('[LOW_VRAM] Calling soft_empty_cache() to free GPU memory')
         soft_empty_cache()
 
 

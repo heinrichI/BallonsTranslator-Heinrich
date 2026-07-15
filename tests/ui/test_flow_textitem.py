@@ -1571,5 +1571,81 @@ class TestOverlapResolution:
         assert new_right == orig_right, f"Points should not change: {new_right} != {orig_right}"
 
 
+class TestOverlapFromLog:
+    """Test overlap resolution with exact coordinates from overlap.txt."""
+
+    def test_case1_smaller_inside_bigger(self, scene):
+        """Case 1: smaller block (15) fully inside bigger block (14) vertically.
+        All right points of bigger block should shift."""
+        from ui.scenetext_manager import SceneTextManager
+
+        # Block 14 (bigger): pos=(910,1558), right=[525,525,525,525]
+        blk1 = _make_blk(xyxy=(910, 1558, 1435, 1816), text="Block 14")
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+        item1._left_points = [QPointF(0, 0), QPointF(0, 86), QPointF(0, 172), QPointF(0, 258)]
+        item1._right_points = [QPointF(525, 0), QPointF(525, 86), QPointF(525, 172), QPointF(525, 258)]
+
+        # Block 15 (smaller): pos=(1142,1627), right=[266,266,266,266]
+        blk2 = _make_blk(xyxy=(1142, 1627, 1408, 1700), text="Block 15")
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+        item2._left_points = [QPointF(0, 0), QPointF(0, 24.3), QPointF(0, 48.7), QPointF(0, 73)]
+        item2._right_points = [QPointF(266, 0), QPointF(266, 24.3), QPointF(266, 48.7), QPointF(266, 73)]
+
+        orig_right = [p.x() for p in item1._right_points]
+
+        class MockManager:
+            textblk_item_list = [item1, item2]
+            _resolve_overlaps = SceneTextManager._resolve_overlaps
+
+        manager = MockManager()
+        manager._resolve_overlaps(item1)
+
+        new_right = [p.x() for p in item1._right_points]
+        # All points should shift (smaller block fully inside bigger vertically)
+        # overlap_x = 266, expected: [259, 259, 259, 259]
+        assert all(new_right[i] < orig_right[i] for i in range(len(orig_right))), (
+            f"All right points should shift: orig={orig_right} new={new_right}"
+        )
+
+    def test_case2_smaller_partially_overlapping(self, scene):
+        """Case 2: smaller block (4) partially overlaps bigger block (3).
+        Only points in overlap zone should shift."""
+        from ui.scenetext_manager import SceneTextManager
+
+        # Block 3 (bigger): pos=(1093,891), right=[1014,1014,1014,1014]
+        blk1 = _make_blk(xyxy=(1093, 891, 2107, 1017), text="Block 3")
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+        item1._left_points = [QPointF(0, 0), QPointF(0, 42), QPointF(0, 84), QPointF(0, 126)]
+        item1._right_points = [QPointF(1014, 0), QPointF(1014, 42), QPointF(1014, 84), QPointF(1014, 126)]
+
+        # Block 4 (smaller): pos=(1752,965), right=[391,391,391,391]
+        blk2 = _make_blk(xyxy=(1752, 965, 2143, 1098), text="Block 4")
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+        item2._left_points = [QPointF(0, 0), QPointF(0, 44.3), QPointF(0, 88.7), QPointF(0, 133)]
+        item2._right_points = [QPointF(391, 0), QPointF(391, 44.3), QPointF(391, 88.7), QPointF(391, 133)]
+
+        orig_right = [p.x() for p in item1._right_points]
+
+        class MockManager:
+            textblk_item_list = [item1, item2]
+            _resolve_overlaps = SceneTextManager._resolve_overlaps
+
+        manager = MockManager()
+        manager._resolve_overlaps(item1)
+
+        new_right = [p.x() for p in item1._right_points]
+        # Overlap zone: Block 4 starts at y=965, Block 3 starts at y=891
+        # Overlap in Block 3 local: y=(965-891)..(1017-891) = 74..126
+        # Point 0 (y=0): NO, Point 1 (y=42): NO, Point 2 (y=84): YES, Point 3 (y=126): YES
+        assert new_right[0] == orig_right[0], f"Point 0 should not shift: {new_right[0]} != {orig_right[0]}"
+        assert new_right[1] == orig_right[1], f"Point 1 should not shift: {new_right[1]} != {orig_right[1]}"
+        assert new_right[2] < orig_right[2], f"Point 2 should shift: {new_right[2]} >= {orig_right[2]}"
+        assert new_right[3] < orig_right[3], f"Point 3 should shift: {new_right[3]} >= {orig_right[3]}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
