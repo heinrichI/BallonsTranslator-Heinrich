@@ -233,6 +233,51 @@ if self._left_points and self._right_points:
 
 **Как диагностировать**: Добавить лог в `translateBlkitemList` — `abr = blkitem.absBoundingRect()`. Если `abr[3]` (height) не совпадает с визуальной высотой блока — это этот баг.
 
+### #8 boundingRect возвращал координаты в scene space вместо item-local
+
+**Проблема**: Текст уезжал за пределы страницы. `boundingRect()` возвращал `QRectF(pos.x(), pos.y(), w, h)` — с учётом позиции элемента. Qt ожидает **item-local** координаты (относительно позиции элемента).
+
+**Причина**: `boundingRect()` добавлял `pos.x()` и `pos.y()` к координатам. Все вызывающие коды (rendering, hit-testing, layout) ожидали локальные координаты.
+
+**Решение**: `boundingRect()` теперь возвращает `QRectF(-P, -P, w, h)` — локальные координаты без `pos()`.
+
+### #9 boundingRect брал размеры из polygon вместо control points
+
+**Проблема**: При загрузке проекта polygon мог иметь экстремальные координаты (например height=20480), хотя control points были нормальными (height=120). `boundingRect()` возвращал огромные размеры → шрифт становился огромным.
+
+**Причина**: `boundingRect()` вызывал `super().boundingRect()` который читал `_display_rect`. `_display_rect` устанавливался из `bounding_rect()` блока — который брал размеры из polygon (min_rect), а не из control points.
+
+**Решение**: `boundingRect()` теперь вычисляет размеры из control points:
+```python
+if self._left_points and self._right_points:
+    all_pts = self._left_points + self._right_points
+    w = max(xs) - min(xs) + P * 2
+    h = max(ys) - min(ys) + P * 2
+    return QRectF(-P, -P, w, h)
+```
+
+### #10 get_fontformat() показывал старый размер шрифта
+
+**Проблема**: Панель показывала >100 при реальном шрифте ~30. После снятия/повторного выделения блока панель показывала первоначальный размер. Установка шрифта вручную не меняла его.
+
+**Причина**: 
+1. `get_fontformat()` читал `fontformat.font_size` (старое значение в пикселях) вместо реального размера шрифта из документа
+2. `set_cursor_cfmt()` обновлял cursor charFormat, но НЕ обновлял document defaultFont (только при пустом документе)
+
+**Решение**: 
+1. `get_fontformat()` читает из `document().defaultFont().pointSizeF()`:
+```python
+doc_font_size = self.document().defaultFont().pointSizeF()
+if doc_font_size > 0:
+    fontformat.font_size = pt2px(doc_font_size)
+```
+2. `set_cursor_cfmt()` ВСЕГДА обновляет document defaultFont:
+```python
+# Было: if doc_is_empty:
+# Стало: (всегда)
+self.document().setDefaultFont(cursor.blockCharFormat().font())
+```
+
 ---
 
 ## Бинарный поиск `_find_best_font_size()`
@@ -267,6 +312,7 @@ if self._left_points and self._right_points:
 10. `_auto_shrink_font()` — итеративное уменьшение шрифта при переполнении
 11. `_auto_grow_font()` — итеративное увеличение шрифта при пустом месте
 12. `_draw_accessories()` — подавление пунктирной рамки при `under_ctrl`
+13. Auto-resolve overlaps — при пересечении блоков, control points БОЛЬШЕГО блока сдвигаются для устранения пересечения. Вызывается только при автоматическом создании блоков (`updateSceneTextitems`), НЕ при ручном resize.
 
 ---
 
@@ -285,6 +331,12 @@ LOG_PREFIXES = ("ВПЕРЁД!",)
 - `QUIET_UI = True` → все DEBUG логи подавлены
 - `QUIET_UI = False` → DEBUG логи только для блоков с префиксом из `LOG_PREFIXES`
 - INFO/WARNING/ERROR → всегда логируются
+
+### Текущие настройки QUIET_UI:
+- `flow_textitem.py` — `False` (логи включены)
+- `flow_shapecontrol.py` — `True` (логи отключены)
+- `scenetext_manager.py` — `True` (логи отключены)
+- `scene_textlayout.py` — `False` (логи включены)
 
 ### Для смены префикса:
 Менять только `LOG_PREFIXES` в `utils/shared.py`.
@@ -330,3 +382,6 @@ myenv\Scripts\python -m pytest -v
 - `TestFontPanelAfterResize` — sync шрифта после resize
 - `TestAbsBoundingRectUsesControlPoints` — absBoundingRect использует control points для высоты (OCR fix)
 - `TestLargeFontNoOverflow` — нет overflow при большом шрифте после перевода
+- `TestOverlapResolution` — auto-resolve пересечений блоков (только при автоматическом создании)
+- `TestBoundingClientRectLocalCoords` — boundingRect возвращает item-local координаты (не scene space)
+- `TestProjectLoadFontPreservation` — шрифт сохраняется при загрузке проекта и после deselect/reselect

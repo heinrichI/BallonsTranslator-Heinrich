@@ -221,6 +221,50 @@ class FlowTextBlkItem(TextBlkItem):
             sync_font=self._font_adjuster_sync,
         )
 
+        # If loaded from project with saved points, shrink font to fit control point height
+        if self._left_points and self._right_points and self.font_adjuster:
+            # Disable grow so it doesn't re-inflate after shrink
+            self.font_adjuster._auto_grow_enabled = False
+            if not QUIET_UI:
+                _debug("  BEFORE shrink: fontformat.font_size=%.1f doc_font=%.1f",
+                       self.fontformat.font_size if self.fontformat else 0,
+                       self.document().defaultFont().pointSizeF())
+            self.font_adjuster.shrink()
+            if not QUIET_UI:
+                _debug("  AFTER shrink: fontformat.font_size=%.1f doc_font=%.1f",
+                       self.fontformat.font_size if self.fontformat else 0,
+                       self.document().defaultFont().pointSizeF())
+            self.font_adjuster._auto_grow_enabled = True
+            # Sync fontformat.font_size with actual document font after shrink
+            # Read from first fragment (actual rendered size), not document defaultFont
+            block = self.document().firstBlock()
+            it = block.begin()
+            actual_pt = 0
+            if not it.atEnd():
+                actual_pt = it.fragment().charFormat().fontPointSize()
+            if actual_pt > 0:
+                doc_font_pt = actual_pt
+            else:
+                doc_font_pt = self.document().defaultFont().pointSizeF()
+            if doc_font_pt > 0 and self.fontformat is not None:
+                from utils.fontformat import pt2px
+                self.fontformat.font_size = pt2px(doc_font_pt)
+                # Also update document default font to match
+                font = self.document().defaultFont()
+                font.setPointSizeF(doc_font_pt)
+                self.document().setDefaultFont(font)
+            # Update blk.xyxy to match control points (not polygon)
+            pos = self.pos()
+            all_pts = self._left_points + self._right_points
+            local_x = min(p.x() for p in all_pts)
+            local_y = min(p.y() for p in all_pts)
+            local_w = max(p.x() for p in all_pts) - local_x
+            local_h = max(p.y() for p in all_pts) - local_y
+            self.blk.xyxy = [
+                int(pos.x() + local_x), int(pos.y() + local_y),
+                int(pos.x() + local_x + local_w), int(pos.y() + local_y + local_h)
+            ]
+
         if not QUIET_UI: logging.debug("=== FlowTextBlkItem.__init__ ===")
         if not QUIET_UI: logging.debug("  idx=%d pos=%s", idx, self.pos())
         if not QUIET_UI: logging.debug("  after init: left=%s right=%s",
@@ -391,15 +435,16 @@ class FlowTextBlkItem(TextBlkItem):
         """Called by FontAutoAdjuster after font size changes to sync fontformat/blk."""
         try:
             from utils.fontformat import pt2px
-            block = self.document().firstBlock()
-            it = block.begin()
-            if not it.atEnd():
-                actual_size = it.fragment().charFormat().fontPointSize()
-                if actual_size > 0:
-                    if self.fontformat is not None:
-                        self.fontformat.font_size = pt2px(actual_size)
-                    if self.blk is not None and self.blk.fontformat is not None:
-                        self.blk.fontformat.font_size = pt2px(actual_size)
+            # Read from document default font (most reliable), not first fragment
+            doc_font_pt = self.document().defaultFont().pointSizeF()
+            if doc_font_pt > 0:
+                if not QUIET_UI:
+                    _debug("  _font_adjuster_sync: doc_font=%.1fpt -> font_size=%.1fpx",
+                           doc_font_pt, pt2px(doc_font_pt))
+                if self.fontformat is not None:
+                    self.fontformat.font_size = pt2px(doc_font_pt)
+                if self.blk is not None and self.blk.fontformat is not None:
+                    self.blk.fontformat.font_size = pt2px(doc_font_pt)
         except Exception:
             pass
 
@@ -594,6 +639,10 @@ class FlowTextBlkItem(TextBlkItem):
         self._old_left_points = deepcopy(self._left_points)
         self._old_right_points = deepcopy(self._right_points)
 
+    def endReshape(self):
+        """Called after handle drag — no overlap resolution here."""
+        super().endReshape()
+
     def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True, auto_font_adjust=True):
         """For flow items: update layout max size but never shift pos()."""
         self._log("set_size: w=%.1f h=%.1f auto_font_adjust=%s" %
@@ -763,6 +812,7 @@ class FlowTextBlkItem(TextBlkItem):
                 if isinstance(item, FlowShapeControl) and item.blk_item is self:
                     item.rebuildHandles()
                     break
+
 
     def injectFlowMenuItems(self, menu: QMenu, scene_pos: QPointF):
         """

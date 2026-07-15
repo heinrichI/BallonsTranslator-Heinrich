@@ -1193,5 +1193,216 @@ class TestAbsBoundingRectUsesControlPoints:
         assert h1 == h2, f"Heights differ: block1={h1}, block2={h2}"
 
 
+class TestBoundingClientRectLocalCoords:
+    """boundingRect() must return item-local coords (not scene coords) and use control points."""
+
+    def test_bounding_rect_is_local(self, scene):
+        """boundingRect() must NOT include pos() — it's item-local."""
+        blk = _make_blk(xyxy=(500, 300, 700, 400), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        br = item.boundingRect()
+        # Local coords: top-left should be near (-padding, -padding), NOT (500, 300)
+        assert br.x() <= 0, f"boundingRect x={br.x()} should be <= 0 (local coords)"
+        assert br.y() <= 0, f"boundingRect y={br.y()} should be <= 0 (local coords)"
+        # Width/height must come from control points, not polygon
+        assert br.width() > 0, f"boundingRect width={br.width()} must be positive"
+        assert br.height() > 0, f"boundingRect height={br.height()} must be positive"
+
+    def test_bounding_rect_height_from_control_points(self, scene):
+        """boundingRect height must match control points y-range, not polygon."""
+        blk = _make_blk(xyxy=(0, 0, 200, 50), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Control points span 0 to ~50 (from xyxy height)
+        all_ys = [p.y() for p in item._left_points] + [p.y() for p in item._right_points]
+        cp_height = max(all_ys) - min(all_ys)
+
+        br = item.boundingRect()
+        # height = cp_height + 2*padding
+        assert abs(br.height() - cp_height) <= 2.0, (
+            f"boundingRect height={br.height()} != control points height={cp_height}"
+        )
+
+    def test_bounding_rect_width_from_control_points(self, scene):
+        """boundingRect width must match control points x-range."""
+        blk = _make_blk(xyxy=(100, 200, 400, 250), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        all_xs = [p.x() for p in item._left_points] + [p.x() for p in item._right_points]
+        cp_width = max(all_xs) - min(all_xs)
+
+        br = item.boundingRect()
+        assert abs(br.width() - cp_width) <= 2.0, (
+            f"boundingRect width={br.width()} != control points width={cp_width}"
+        )
+
+
+class TestProjectLoadFontPreservation:
+    """When loading from project (saved left/right points), font size must be preserved."""
+
+    def test_font_not_inflated_by_grow(self, scene):
+        """Block loaded from project with saved points must NOT have grow inflate font."""
+        from utils.fontformat import FontFormat
+        blk = _make_blk(xyxy=(0, 0, 200, 100), text="Test text here", font_size=12.0)
+        # Simulate project load: set saved flow points
+        blk.left_points = [[0.0, 0.0], [0.0, 50.0], [0.0, 100.0]]
+        blk.right_points = [[200.0, 0.0], [200.0, 50.0], [200.0, 100.0]]
+        blk.fontformat.font_size = 12.0  # saved font size in pixels
+
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Font size must be close to saved value, not inflated by grow
+        actual_size = item.font().pointSizeF()
+        assert actual_size < 20.0, (
+            f"Font inflated by grow: {actual_size:.1f}pt, expected ~12pt"
+        )
+
+    def test_bounding_rect_uses_control_points_not_polygon(self, scene):
+        """When polygon has huge coordinates, boundingRect must use control points."""
+        blk = _make_blk(xyxy=(100, 200, 474, 20680), text="Huge polygon", font_size=12.0)
+        # Simulate saved control points with normal height
+        blk.left_points = [[0.0, 0.0], [0.0, 40.0], [0.0, 80.0], [0.0, 120.0]]
+        blk.right_points = [[374.0, 0.0], [374.0, 40.0], [374.0, 80.0], [374.0, 120.0]]
+
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        br = item.boundingRect()
+        # Must use control points height (120), NOT polygon height (20480)
+        assert br.height() < 200, (
+            f"boundingRect height={br.height()} uses polygon instead of control points"
+        )
+
+    def test_get_fontformat_reads_actual_document_font(self, scene):
+        """get_fontformat() must return actual font size, not stale fontformat.font_size."""
+        from utils.fontformat import pt2px
+        blk = _make_blk(xyxy=(0, 0, 200, 100), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Simulate font size change via setFontSize (updates cursor charFormat)
+        item.setFontSize(15.0)
+
+        # get_fontformat should return the actual 15pt, not the stored 24px
+        fmt = item.get_fontformat()
+        expected_px = pt2px(15.0)
+        assert abs(fmt.font_size - expected_px) < 1.0, (
+            f"get_fontformat returned font_size={fmt.font_size:.1f}px, expected {expected_px:.1f}px (15pt)"
+        )
+
+    def test_font_size_persists_after_deselect_reselect(self, scene):
+        """Font size must persist after deselecting and reselecting the block."""
+        from utils.fontformat import pt2px
+        blk = _make_blk(xyxy=(0, 0, 200, 100), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Change font size
+        item.setFontSize(15.0)
+
+        # Simulate deselect (clear selection)
+        item.setSelected(False)
+
+        # Simulate reselect
+        item.setSelected(True)
+
+        # Font size must still be 15pt
+        fmt = item.get_fontformat()
+        expected_px = pt2px(15.0)
+        assert abs(fmt.font_size - expected_px) < 1.0, (
+            f"Font size lost after deselect/reselect: {fmt.font_size:.1f}px, expected {expected_px:.1f}px"
+        )
+
+    def test_font_size_survives_save_load_cycle(self, scene):
+        """Font size must survive save/load (to_dict/from_dict) cycle."""
+        import copy
+        from utils.fontformat import pt2px
+        blk = _make_blk(xyxy=(0, 0, 200, 100), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Change font size
+        item.setFontSize(15.0)
+
+        # Simulate save: get font size from get_fontformat
+        saved_fmt = item.get_fontformat()
+        saved_font_size = saved_fmt.font_size  # pixels
+
+        # Simulate load: create new block from saved data
+        blk2 = _make_blk(xyxy=(0, 0, 200, 100), text="Test", font_size=15.0)
+        blk2.fontformat.font_size = saved_font_size
+        blk2.left_points = [[p.x(), p.y()] for p in item._left_points]
+        blk2.right_points = [[p.x(), p.y()] for p in item._right_points]
+
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+
+        # Font size must match after load
+        fmt2 = item2.get_fontformat()
+        assert abs(fmt2.font_size - saved_font_size) < 1.0, (
+            f"Font size lost after save/load: {fmt2.font_size:.1f}px, expected {saved_font_size:.1f}px"
+        )
+
+
+class TestTopEdgeTextPositioning:
+    """Text must stick to the top edge when the top diamond handle is moved."""
+
+    def test_top_handle_up_sets_negative_document_margin(self, scene):
+        """Moving top points above origin sets negative documentMargin."""
+        item = _make_item(scene, text="A" * 20)
+        item._update_flow_layout()
+        assert item.document().documentMargin() == 0
+
+        # Move all top points up by 50px (y=0 → y=-50)
+        for i in range(DEFAULT_POINTS_PER_SIDE):
+            item._left_points[i] = QPointF(item._left_points[i].x(), -50)
+            item._right_points[i] = QPointF(item._right_points[i].x(), -50)
+        item._update_flow_layout()
+
+        assert item.document().documentMargin() == -50, (
+            f"documentMargin should be -50, got {item.document().documentMargin()}"
+        )
+
+    def test_text_height_matches_control_point_range(self, scene):
+        """After moving top handle up, text height must not exceed control point range."""
+        item = _make_item(scene, text="A" * 30, font_size=24.0)
+        item._update_flow_layout()
+
+        # Move top points up by 30px
+        dy = -30
+        for i in range(DEFAULT_POINTS_PER_SIDE):
+            item._left_points[i] = QPointF(item._left_points[i].x(), item._left_points[i].y() + dy)
+            item._right_points[i] = QPointF(item._right_points[i].x(), item._right_points[i].y() + dy)
+        item._update_flow_layout()
+
+        layout = item.layout
+        all_ys = [p.y() for p in item._left_points] + [p.y() for p in item._right_points]
+        target_height = max(all_ys) - min(all_ys)
+
+        assert layout.shrink_height <= target_height + 1.0, (
+            f"Text height {layout.shrink_height:.1f} exceeds control point range {target_height:.1f}"
+        )
+
+    def test_top_handle_down_text_stays_at_top_edge(self, scene):
+        """Moving top points down sets positive documentMargin."""
+        item = _make_item(scene, text="A" * 20)
+        item._update_flow_layout()
+
+        # Move top points down by 30px (y=0 → y=30)
+        for i in range(DEFAULT_POINTS_PER_SIDE):
+            item._left_points[i] = QPointF(item._left_points[i].x(), 30)
+            item._right_points[i] = QPointF(item._right_points[i].x(), 30)
+        item._update_flow_layout()
+
+        assert item.document().documentMargin() == 30, (
+            f"documentMargin should be 30, got {item.document().documentMargin()}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

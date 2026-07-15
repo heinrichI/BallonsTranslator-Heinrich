@@ -487,6 +487,7 @@ class SceneTextManager(QObject):
 
         self.updateTextBlkList()
 
+
     def addTextBlock(self, blk: Union[TextBlock, TextBlkItem] = None) -> TextBlkItem:
         # import debugpy
         # debugpy.debug_this_thread()
@@ -495,6 +496,14 @@ class SceneTextManager(QObject):
         _debug("  blk type=%s, idx will be %d",
                      type(blk).__name__ if blk else "None",
                      len(self.textblk_item_list))
+        # Log specific blocks for overlap testing
+        if blk is not None and hasattr(blk, 'translation'):
+            txt = blk.translation or ''
+            if txt.startswith('В ЭТОЙ ВОЙ') or txt.startswith('ДА!'):
+                LOGGER.debug("[TRACK] addTextBlock: blk='%s' xyxy=%s left=%s right=%s",
+                       txt[:20], blk.xyxy,
+                       getattr(blk, 'left_points', None),
+                       getattr(blk, 'right_points', None))
         if isinstance(blk, TextBlkItem):
             blk_item = blk
             blk_item.idx = len(self.textblk_item_list)
@@ -517,6 +526,13 @@ class SceneTextManager(QObject):
                          [(p.x(), p.y()) for p in blk_item._left_points])
             _debug("  right_points=%s",
                          [(p.x(), p.y()) for p in blk_item._right_points])
+            # Log tracked blocks after flow points are set
+            txt = blk_item.toPlainText() if blk_item else ''
+            if txt.startswith('В ЭТОЙ ВОЙ') or txt.startswith('ДА!'):
+                LOGGER.debug("[TRACK] after_flow: blk='%s' pos=%s left=%s right=%s",
+                       txt[:20], blk_item.pos(),
+                       [(p.x(), p.y()) for p in blk_item._left_points],
+                       [(p.x(), p.y()) for p in blk_item._right_points])
         self.addTextBlkItem(blk_item)
         # LOGGER.info(f"addTextBlock {blk_item.toPlainText()}")
 

@@ -633,8 +633,10 @@ class TextBlkItem(QGraphicsTextItem):
         fontformat.frgb = [color.red(), color.green(), color.blue()]
         fontformat.font_weight = font.weight()
         fontformat.font_family = font.family()
-        if self.isEditing():
-            fontformat.font_size = pt2px(font.pointSizeF())
+        # Read actual font size from document default font (most reliable source)
+        doc_font_size = self.document().defaultFont().pointSizeF()
+        if doc_font_size > 0:
+            fontformat.font_size = pt2px(doc_font_size)
         else:
             fontformat.font_size = self.fontformat.font_size
         fontformat.bold = font.bold()
@@ -739,8 +741,8 @@ class TextBlkItem(QGraphicsTextItem):
         cursor.mergeBlockCharFormat(cfmt)
         cursor.clearSelection()
         self.setTextCursor(cursor)
-        if doc_is_empty:
-            self.document().setDefaultFont(cursor.blockCharFormat().font())
+        # Always update document default font to match the cursor font
+        self.document().setDefaultFont(cursor.blockCharFormat().font())
 
     def _before_set_ffmt(self, set_selected: bool, restore_cursor: bool):
         self.is_formatting = True
