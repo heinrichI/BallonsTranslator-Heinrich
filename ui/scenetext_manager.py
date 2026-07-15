@@ -496,11 +496,11 @@ class SceneTextManager(QObject):
         _debug("  blk type=%s, idx will be %d",
                      type(blk).__name__ if blk else "None",
                      len(self.textblk_item_list))
-        # Log specific blocks for overlap testing
+        # Log specific blocks on page load
         if blk is not None and hasattr(blk, 'translation'):
             txt = blk.translation or ''
-            if txt.startswith('В ЭТОЙ ВОЙ') or txt.startswith('ДА!'):
-                LOGGER.debug("[TRACK] addTextBlock: blk='%s' xyxy=%s left=%s right=%s",
+            if txt.startswith('В ЭТОЙ') or txt.startswith('ДА!... НО ОН'):
+                LOGGER.debug("[TRACK] LOAD blk='%s' xyxy=%s left=%s right=%s",
                        txt[:20], blk.xyxy,
                        getattr(blk, 'left_points', None),
                        getattr(blk, 'right_points', None))
@@ -528,12 +528,16 @@ class SceneTextManager(QObject):
                          [(p.x(), p.y()) for p in blk_item._right_points])
             # Log tracked blocks after flow points are set
             txt = blk_item.toPlainText() if blk_item else ''
-            if txt.startswith('В ЭТОЙ ВОЙ') or txt.startswith('ДА!'):
-                LOGGER.debug("[TRACK] after_flow: blk='%s' pos=%s left=%s right=%s",
+            if txt.startswith('В ЭТОЙ') or txt.startswith('ДА!... НО ОН'):
+                LOGGER.debug("[TRACK] LOAD_FLOW blk='%s' pos=%s left=%s right=%s",
                        txt[:20], blk_item.pos(),
                        [(p.x(), p.y()) for p in blk_item._left_points],
                        [(p.x(), p.y()) for p in blk_item._right_points])
         self.addTextBlkItem(blk_item)
+
+        # Resolve overlaps with existing blocks
+        if hasattr(blk_item, '_left_points') and hasattr(blk_item, '_right_points'):
+            self._resolve_overlaps(blk_item)
         # LOGGER.info(f"addTextBlock {blk_item.toPlainText()}")
 
         pair_widget = TransPairWidget(blk, len(self.pairwidget_list), pcfg.fold_textarea)
@@ -565,6 +569,82 @@ class SceneTextManager(QObject):
 
         self.new_textblk.emit(blk_item.idx)
         return blk_item
+
+    def _resolve_overlaps(self, new_item):
+        """Resolve overlaps between new_item and existing blocks by narrowing control points."""
+        if not hasattr(new_item, '_left_points') or not new_item._left_points:
+            return
+        if not hasattr(new_item, '_right_points') or not new_item._right_points:
+            return
+
+        new_pos = new_item.pos()
+        new_left = min(p.x() for p in new_item._left_points) + new_pos.x()
+        new_right = max(p.x() for p in new_item._right_points) + new_pos.x()
+        new_top = min(p.y() for p in new_item._left_points) + new_pos.y()
+        new_bottom = max(p.y() for p in new_item._left_points) + new_pos.y()
+
+        for existing in self.textblk_item_list:
+            if existing is new_item:
+                continue
+            if not hasattr(existing, '_left_points') or not existing._left_points:
+                continue
+
+            ex_pos = existing.pos()
+            ex_left = min(p.x() for p in existing._left_points) + ex_pos.x()
+            ex_right = max(p.x() for p in existing._right_points) + ex_pos.x()
+            ex_top = min(p.y() for p in existing._left_points) + ex_pos.y()
+            ex_bottom = max(p.y() for p in existing._left_points) + ex_pos.y()
+
+            # Check overlap
+            overlap_x = max(0, min(new_right, ex_right) - max(new_left, ex_left))
+            overlap_y = max(0, min(new_bottom, ex_bottom) - max(new_top, ex_top))
+            if overlap_x <= 0 or overlap_y <= 0:
+                continue
+
+            LOGGER.debug("[OVERLAP] Resolving overlap between '%s' and '%s'",
+                        new_item.toPlainText()[:20], existing.toPlainText()[:20])
+
+            # Determine which block is bigger
+            new_area = (new_right - new_left) * (new_bottom - new_top)
+            ex_area = (ex_right - ex_left) * (ex_bottom - ex_top)
+
+            if new_area >= ex_area:
+                bigger = new_item
+                bigger_pos = new_pos
+                smaller_center_x = (ex_left + ex_right) / 2
+            else:
+                bigger = existing
+                bigger_pos = ex_pos
+                smaller_center_x = (new_left + new_right) / 2
+
+            bigger_center_x = (min(p.x() for p in bigger._left_points) + bigger_pos.x() +
+                               max(p.x() for p in bigger._right_points) + bigger_pos.x()) / 2
+
+            # Narrow bigger block's side closest to the smaller block
+            if smaller_center_x > bigger_center_x:
+                # Smaller is to the right → narrow bigger's RIGHT side
+                side = 'right'
+                points = bigger._right_points
+            else:
+                # Smaller is to the left → narrow bigger's LEFT side
+                side = 'left'
+                points = bigger._left_points
+
+            # Overlap zone in bigger block's local y coordinates
+            overlap_top_local = max(new_top, ex_top) - bigger_pos.y()
+            overlap_bottom_local = min(new_bottom, ex_bottom) - bigger_pos.y()
+
+            for i, pt in enumerate(points):
+                if overlap_top_local <= pt.y() <= overlap_bottom_local:
+                    # Shift point out of overlap zone
+                    if side == 'right':
+                        new_pt_x = max(pt.x() - overlap_x, 10)
+                    else:
+                        new_pt_x = min(pt.x() + overlap_x, bigger._right_points[i].x() - 10)
+                    points[i] = QPointF(new_pt_x, pt.y())
+
+            # Update layout of the bigger block
+            bigger._update_flow_layout()
 
     def addTextBlkItem(self, textblk_item: TextBlkItem) -> TextBlkItem:
         self.textblk_item_list.append(textblk_item)

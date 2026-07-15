@@ -30,11 +30,14 @@ class ColoredFormatter(logging.Formatter):
         if self.use_color and levelname in COLORS:
 
             def colored(text):
-                return termcolor.colored(
-                    text,
-                    color=COLORS[levelname],
-                    attrs={"bold": True},
-                )
+                try:
+                    return termcolor.colored(
+                        text,
+                        color=COLORS[levelname],
+                        attrs={"bold": True},
+                    )
+                except (ValueError, OSError):
+                    return text
 
             record.levelname2 = colored("{:<7}".format(record.levelname))
             record.message2 = colored(record.getMessage())
@@ -97,3 +100,46 @@ logging.setLoggerClass(ColoredLogger)
 logger = logging.getLogger('BallonTranslator')
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
+
+
+# Suppress noisy third-party loggers globally via LogRecordFactory.
+# transformers creates its own StreamHandler → stderr which bypasses
+# per-logger filters. The factory intercepts ALL records at creation time.
+_NOISY_NAMES = (
+    'transformers', 'paddle', 'ppocr', 'Paddle',
+    'huggingface_hub', 'filelock', 'urllib3', 'asyncio',
+    'configuration_utils', 'processing_utils', 'image_processing_base',
+    'image_processing_utils', 'tokenization_utils_base', 'tokenization_auto',
+    'modeling_utils', 'feature_extraction_utils',
+)
+
+_original_log_record = logging.LogRecord
+
+
+class _FilteredLogRecord(_original_log_record):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        name = self.name
+        mod = self.module
+        for prefix in _NOISY_NAMES:
+            if name == prefix or name.startswith(prefix + '.') or mod == prefix:
+                self.levelno = logging.CRITICAL + 1
+                self.msg = ''
+                self.args = ()
+                return
+
+
+logging.setLogRecordFactory(_FilteredLogRecord)
+
+
+# Add _SuppressFiltered to ALL StreamHandlers so silenced records are dropped.
+class _SuppressFiltered(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno <= logging.CRITICAL
+
+
+_orig_sh_init = logging.StreamHandler.__init__
+def _patched_sh_init(self, *args, **kwargs):
+    _orig_sh_init(self, *args, **kwargs)
+    self.addFilter(_SuppressFiltered())
+logging.StreamHandler.__init__ = _patched_sh_init

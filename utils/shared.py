@@ -16,7 +16,7 @@ THEME_PATH = osp.join(PROGRAM_PATH, 'config/themes.json')
 CONFIG_PATH = osp.join(PROGRAM_PATH, 'config/config.json')
 
 # Only log shrink/grow for blocks with these text prefixes (when QUIET_UI=False)
-LOG_PREFIXES = ("ВПЕРЁД!",)
+LOG_PREFIXES = ("В ЭТОЙ", "ДА!... НО ОН")
 
 DEFAULT_TEXTSTYLE_DIR = osp.join(PROGRAM_PATH, 'config/textstyles')
 if not osp.exists(DEFAULT_TEXTSTYLE_DIR):

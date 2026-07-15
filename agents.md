@@ -62,7 +62,7 @@ Each UI file (`flow_textitem.py`, `flow_shapecontrol.py`, `scenetext_manager.py`
 
 When debugging shrink/grow issues, filter logs by block text prefix:
 ```python
-_LOG_PREFIXES = ("БЫСТРЕЕ", "60 МИЛЬ В ЧАС")
+_LOG_PREFIXES = ("В ЭТОЙ", "ДА!... НО ОН")
 ```
 
 ### Type annotations
@@ -85,8 +85,16 @@ Each stage is a pluggable module registered via `Registry` pattern (`utils/regis
 - `ui/flow_textitem.py` — FlowTextBlkItem with auto-shrink/grow
 - `ui/scene_textlayout.py` — HorizontalTextDocumentLayout with boundary functions
 - `ui/textitem.py` — Base TextBlkItem class
-- `ui/scenetext_manager.py` — layout_textblk, _find_best_font_size
+- `ui/scenetext_manager.py` — layout_textblk, _find_best_font_size, _resolve_overlaps
 - **Полный справочник**: `.claude/skills/flow-blocks/SKILL.md` — все вызовы `_update_flow_layout()`, known bugs, паттерны
+
+### Overlap Resolution (`_resolve_overlaps`)
+
+При добавлении нового блока (`addTextBlock`), проверяется пересечение с существующими блоками:
+1. Определяется площадь каждого блока
+2. Сужается сторона **большего** блока, ближайшая к меньшему
+3. Control points с y в зоне пересечения сдвигаются на `overlap_x`
+4. Точки вне зоны пересечения не трогаются
 
 ### Key Metrics
 

@@ -312,7 +312,12 @@ self.document().setDefaultFont(cursor.blockCharFormat().font())
 10. `_auto_shrink_font()` — итеративное уменьшение шрифта при переполнении
 11. `_auto_grow_font()` — итеративное увеличение шрифта при пустом месте
 12. `_draw_accessories()` — подавление пунктирной рамки при `under_ctrl`
-13. Auto-resolve overlaps — при пересечении блоков, control points БОЛЬШЕГО блока сдвигаются для устранения пересечения. Вызывается только при автоматическом создании блоков (`updateSceneTextitems`), НЕ при ручном resize.
+13. Auto-resolve overlaps (`_resolve_overlaps` в `scenetext_manager.py`) — при пересечении блоков:
+    - Определяется какой блок больше (по площади)
+    - Сужается сторона большего блока, ближайшая к меньшему
+    - Точки control points с y в зоне пересечения сдвигаются на `overlap_x`
+    - Точки вне зоны пересечения не трогаются
+    - Вызывается при добавлении нового блока (`addTextBlock`), НЕ при ручном resize
 
 ---
 
@@ -320,7 +325,7 @@ self.document().setDefaultFont(cursor.blockCharFormat().font())
 
 Определено в `utils/shared.py`:
 ```python
-LOG_PREFIXES = ("ВПЕРЁД!",)
+LOG_PREFIXES = ("В ЭТОЙ", "ДА!... НО ОН")
 ```
 
 Используется в:

@@ -225,15 +225,15 @@ class FlowTextBlkItem(TextBlkItem):
         if self._left_points and self._right_points and self.font_adjuster:
             # Disable grow so it doesn't re-inflate after shrink
             self.font_adjuster._auto_grow_enabled = False
-            if not QUIET_UI:
-                _debug("  BEFORE shrink: fontformat.font_size=%.1f doc_font=%.1f",
-                       self.fontformat.font_size if self.fontformat else 0,
-                       self.document().defaultFont().pointSizeF())
+            # if not QUIET_UI:
+            #     _debug("  BEFORE shrink: fontformat.font_size=%.1f doc_font=%.1f",
+            #            self.fontformat.font_size if self.fontformat else 0,
+            #            self.document().defaultFont().pointSizeF())
             self.font_adjuster.shrink()
-            if not QUIET_UI:
-                _debug("  AFTER shrink: fontformat.font_size=%.1f doc_font=%.1f",
-                       self.fontformat.font_size if self.fontformat else 0,
-                       self.document().defaultFont().pointSizeF())
+            # if not QUIET_UI:
+            #     _debug("  AFTER shrink: fontformat.font_size=%.1f doc_font=%.1f",
+            #            self.fontformat.font_size if self.fontformat else 0,
+            #            self.document().defaultFont().pointSizeF())
             self.font_adjuster._auto_grow_enabled = True
             # Sync fontformat.font_size with actual document font after shrink
             # Read from first fragment (actual rendered size), not document defaultFont
@@ -270,6 +270,15 @@ class FlowTextBlkItem(TextBlkItem):
         if not QUIET_UI: logging.debug("  after init: left=%s right=%s",
                       [(p.x(), p.y()) for p in self._left_points],
                       [(p.x(), p.y()) for p in self._right_points])
+
+        # Log tracked blocks: initial coordinates on load
+        if self._left_points and self._right_points:
+            self._log("INIT xyxy=%s pos=%s left=%s right=%s" % (
+                self.blk.xyxy if self.blk else None,
+                (self.pos().x(), self.pos().y()),
+                [(p.x(), p.y()) for p in self._left_points],
+                [(p.x(), p.y()) for p in self._right_points],
+            ))
 
     # ── Text change overrides ────────────────────────────────
 
@@ -460,10 +469,10 @@ class FlowTextBlkItem(TextBlkItem):
         if not hasattr(self, 'font_adjuster'):
             return
 
-        if not QUIET_UI:
-            _debug("_update_flow_layout: _auto_font_adjust=%s max_font_before=%.1f",
-                             self._auto_font_adjust,
-                             self.layout.max_font_size() if self.layout else 0)
+        # if not QUIET_UI:
+        #     _debug("_update_flow_layout: _auto_font_adjust=%s max_font_before=%.1f",
+        #                      self._auto_font_adjust,
+        #                      self.layout.max_font_size() if self.layout else 0)
 
         # Guard: prevent _display_rect changes from docSizeChanged during flow updates
         self._updating_flow = True
@@ -530,8 +539,8 @@ class FlowTextBlkItem(TextBlkItem):
                 # Reset flag so next handle drag will auto-adjust,
                 # even after a previous manual font change.
                 self._auto_font_adjust = True
-                _debug("_update_flow_layout: DONE max_font_after=%.1f font_changed=%s",
-                             self.layout.max_font_size() if self.layout else 0, font_changed)
+                # _debug("_update_flow_layout: DONE max_font_after=%.1f font_changed=%s",
+                #              self.layout.max_font_size() if self.layout else 0, font_changed)
 
             elif isinstance(self.layout, VerticalTextDocumentLayout):
                 # Vertical mode: reduce available_height when left handle moves right.
@@ -572,6 +581,15 @@ class FlowTextBlkItem(TextBlkItem):
         # Update _display_rect AFTER flow layout completes.
         self._update_display_rect_from_control_points()
         self.save_flow_points()
+
+        # Log tracked blocks after flow layout update
+        if self._left_points and self._right_points:
+            self._log("UPDATE xyxy=%s pos=%s left=%s right=%s" % (
+                self.blk.xyxy if self.blk else None,
+                (self.pos().x(), self.pos().y()),
+                [(p.x(), p.y()) for p in self._left_points],
+                [(p.x(), p.y()) for p in self._right_points],
+            ))
 
     # ── Vertical mode override ────────────────────────────────
 
@@ -640,8 +658,16 @@ class FlowTextBlkItem(TextBlkItem):
         self._old_right_points = deepcopy(self._right_points)
 
     def endReshape(self):
-        """Called after handle drag — no overlap resolution here."""
+        """Called after handle drag"""
         super().endReshape()
+        # Log tracked blocks after handle drag
+        if self._left_points and self._right_points:
+            self._log("RESHAPE xyxy=%s pos=%s left=%s right=%s" % (
+                self.blk.xyxy if self.blk else None,
+                (self.pos().x(), self.pos().y()),
+                [(p.x(), p.y()) for p in self._left_points],
+                [(p.x(), p.y()) for p in self._right_points],
+            ))
 
     def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True, auto_font_adjust=True):
         """For flow items: update layout max size but never shift pos()."""

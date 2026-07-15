@@ -1404,5 +1404,172 @@ class TestTopEdgeTextPositioning:
         )
 
 
+class TestRealBlockOverlap:
+    """Test overlap detection using real coordinates from log.txt."""
+
+    def test_two_blocks_from_log_overlap(self, scene):
+        """Two blocks loaded from project that overlap in scene coords."""
+        # Block 1: xyxy=[1093, 891, 2107, 1017], left/right straight
+        blk1 = _make_blk(xyxy=(1093, 891, 2107, 1017), text="В ЭТОЙ ВОЙНЕ ВСЕ ПР")
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+
+        # Block 2: overlapping block to the right
+        blk2 = _make_blk(xyxy=(1752, 965, 2143, 1098), text="ДА!... НО ОН")
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+
+        # Control points from log (Block 1 straight, Block 2 straight)
+        item1._left_points = [QPointF(0, 0), QPointF(0, 42), QPointF(0, 84), QPointF(0, 126)]
+        item1._right_points = [QPointF(1014, 0), QPointF(1014, 42), QPointF(1014, 84), QPointF(1014, 126)]
+        item2._left_points = [QPointF(0, 0), QPointF(0, 44.33), QPointF(0, 88.67), QPointF(0, 133)]
+        item2._right_points = [QPointF(391, 0), QPointF(391, 44.33), QPointF(391, 88.67), QPointF(391, 133)]
+
+        # Compute scene-space bounding boxes
+        p1 = item1.pos()
+        p2 = item2.pos()
+
+        # Block 1 scene rect: pos + control point range
+        b1_left = min(p.x() for p in item1._left_points) + p1.x()
+        b1_right = max(p.x() for p in item1._right_points) + p1.x()
+        b1_top = min(p.y() for p in item1._left_points) + p1.y()
+        b1_bottom = max(p.y() for p in item1._left_points) + p1.y()
+
+        # Block 2 scene rect
+        b2_left = min(p.x() for p in item2._left_points) + p2.x()
+        b2_right = max(p.x() for p in item2._right_points) + p2.x()
+        b2_top = min(p.y() for p in item2._left_points) + p2.y()
+        b2_bottom = max(p.y() for p in item2._left_points) + p2.y()
+
+        # Check overlap
+        overlap_x = max(0, min(b1_right, b2_right) - max(b1_left, b2_left))
+        overlap_y = max(0, min(b1_bottom, b2_bottom) - max(b1_top, b2_top))
+        has_overlap = overlap_x > 0 and overlap_y > 0
+
+        assert has_overlap, (
+            f"Blocks should overlap: "
+            f"B1=({b1_left:.0f},{b1_top:.0f})-({b1_right:.0f},{b1_bottom:.0f}) "
+            f"B2=({b2_left:.0f},{b2_top:.0f})-({b2_right:.0f},{b2_bottom:.0f})"
+        )
+
+    def test_single_block_no_self_overlap(self, scene):
+        """A single block should not overlap with itself."""
+        blk = _make_blk(xyxy=(1093, 891, 2107, 1017), text="Test")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        item._left_points = [QPointF(0, 0), QPointF(0, 42), QPointF(0, 84), QPointF(0, 126)]
+        item._right_points = [QPointF(1014, 0), QPointF(1014, 42), QPointF(1014, 84), QPointF(1014, 126)]
+
+        # A block doesn't overlap with itself
+        p = item.pos()
+        left = min(pt.x() for pt in item._left_points) + p.x()
+        right = max(pt.x() for pt in item._right_points) + p.x()
+        top = min(pt.y() for pt in item._left_points) + p.y()
+        bottom = max(pt.y() for pt in item._left_points) + p.y()
+
+        width = right - left
+        height = bottom - top
+        assert width > 0 and height > 0, "Block should have positive dimensions"
+
+
+class TestOverlapResolution:
+    """Test that overlap resolution narrows control points."""
+
+    def test_resolve_narrows_bigger_block(self, scene):
+        """Bigger block's side closest to smaller block should be narrowed."""
+        from ui.scenetext_manager import SceneTextManager
+
+        # Block 1 (bigger): xyxy=[1093, 891, 2107, 1017], area=1014*126=127764
+        blk1 = _make_blk(xyxy=(1093, 891, 2107, 1017), text="В ЭТОЙ ВОЙНЕ ВСЕ ПР")
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+        item1._left_points = [QPointF(0, 0), QPointF(0, 42), QPointF(0, 84), QPointF(0, 126)]
+        item1._right_points = [QPointF(1014, 0), QPointF(1014, 42), QPointF(1014, 84), QPointF(1014, 126)]
+
+        # Block 2 (smaller, to the right): xyxy=[1752, 965, 2143, 1098], area=391*133=52003
+        blk2 = _make_blk(xyxy=(1752, 965, 2143, 1098), text="ДА!... НО ОН")
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+        item2._left_points = [QPointF(0, 0), QPointF(0, 44.33), QPointF(0, 88.67), QPointF(0, 133)]
+        item2._right_points = [QPointF(391, 0), QPointF(391, 44.33), QPointF(391, 88.67), QPointF(391, 133)]
+
+        # Store original right points of bigger block
+        orig_right_x = [p.x() for p in item1._right_points]
+
+        # Create a minimal manager-like object for testing
+        class MockManager:
+            textblk_item_list = [item1, item2]
+            _resolve_overlaps = SceneTextManager._resolve_overlaps
+
+        manager = MockManager()
+        manager._resolve_overlaps(item1)
+
+        # Right points of bigger block (item1) should be narrowed
+        new_right_x = [p.x() for p in item1._right_points]
+        assert any(new_right_x[i] < orig_right_x[i] for i in range(len(orig_right_x))), (
+            f"Bigger block right side should be narrowed: orig={orig_right_x} new={new_right_x}"
+        )
+
+    def test_resolve_narrows_left_when_smaller_is_left(self, scene):
+        """When smaller block is to the left, bigger block's left side narrows."""
+        from ui.scenetext_manager import SceneTextManager
+
+        # Block 1 (smaller, to the left): xyxy=[100, 100, 300, 250], area=200*150=30000
+        blk1 = _make_blk(xyxy=(100, 100, 300, 250), text="Small left")
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+        item1._left_points = [QPointF(0, 0), QPointF(0, 50), QPointF(0, 100), QPointF(0, 150)]
+        item1._right_points = [QPointF(200, 0), QPointF(200, 50), QPointF(200, 100), QPointF(200, 150)]
+
+        # Block 2 (bigger, to the right): xyxy=(250, 100, 700, 250), area=450*150=67500
+        blk2 = _make_blk(xyxy=(250, 100, 700, 250), text="Big right block")
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+        item2._left_points = [QPointF(0, 0), QPointF(0, 50), QPointF(0, 100), QPointF(0, 150)]
+        item2._right_points = [QPointF(450, 0), QPointF(450, 50), QPointF(450, 100), QPointF(450, 150)]
+
+        # Store original left points of bigger block
+        orig_left_x = [p.x() for p in item2._left_points]
+
+        class MockManager:
+            textblk_item_list = [item1, item2]
+            _resolve_overlaps = SceneTextManager._resolve_overlaps
+
+        manager = MockManager()
+        manager._resolve_overlaps(item1)
+
+        # Left points of bigger block (item2) should be narrowed (x increased)
+        new_left_x = [p.x() for p in item2._left_points]
+        assert any(new_left_x[i] > orig_left_x[i] for i in range(len(orig_left_x))), (
+            f"Bigger block left side should be narrowed: orig={orig_left_x} new={new_left_x}"
+        )
+
+    def test_no_resolution_when_no_overlap(self, scene):
+        """When blocks don't overlap, control points stay the same."""
+        from ui.scenetext_manager import SceneTextManager
+
+        # Two non-overlapping blocks
+        blk1 = _make_blk(xyxy=(100, 100, 300, 250), text="Block A")
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+
+        blk2 = _make_blk(xyxy=(500, 100, 700, 250), text="Block B")
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+
+        orig_right = [(p.x(), p.y()) for p in item2._right_points]
+
+        class MockManager:
+            textblk_item_list = [item1, item2]
+            _resolve_overlaps = SceneTextManager._resolve_overlaps
+
+        manager = MockManager()
+        manager._resolve_overlaps(item2)
+
+        new_right = [(p.x(), p.y()) for p in item2._right_points]
+        assert new_right == orig_right, f"Points should not change: {new_right} != {orig_right}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

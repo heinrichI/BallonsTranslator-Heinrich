@@ -85,17 +85,15 @@ class FlowControlHandle(QGraphicsEllipseItem):
         blk_item._update_flow_layout()
         self.ctrl.updateHandlePositions()
 
-        item_pos = blk_item.pos()
-        item_rect = blk_item.boundingRect()
-        _debug(
-            'DRAG side=%s idx=%d | item_pos=(%.1f,%.1f) bounding=(%.1f,%.1f,%.1f,%.1f) | '
-            'left=%s | right=%s',
-            self.side, self.point_idx,
-            item_pos.x(), item_pos.y(),
-            item_rect.x(), item_rect.y(), item_rect.width(), item_rect.height(),
-            _fmt_pts(blk_item._left_points),
-            _fmt_pts(blk_item._right_points),
-        )
+        # Log tracked blocks on round control drag
+        txt = blk_item.toPlainText()[:20] if blk_item else ''
+        if any(txt.startswith(p) for p in ("В ЭТОЙ", "ДА!... НО ОН")):
+            logger.debug("[TRACK] ROUND_DRAG side=%s idx=%d pos=%s left=%s right=%s",
+                self.side, self.point_idx,
+                (blk_item.pos().x(), blk_item.pos().y()),
+                [(p.x(), p.y()) for p in blk_item._left_points],
+                [(p.x(), p.y()) for p in blk_item._right_points])
+
         event.accept()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
@@ -201,6 +199,16 @@ class FlowHResizeHandle(QGraphicsItem):
         # _update_flow_layout() now handles both Horizontal and Vertical layouts
         blk_item._update_flow_layout()
         self.ctrl.updateHandlePositions()
+
+        # Log tracked blocks on horizontal resize
+        txt = blk_item.toPlainText()[:20] if blk_item else ''
+        if any(txt.startswith(p) for p in ("В ЭТОЙ", "ДА!... НО ОН")):
+            logger.debug("[TRACK] H_RESIZE edge=%s pos=%s left=%s right=%s",
+                self.edge,
+                (blk_item.pos().x(), blk_item.pos().y()),
+                [(p.x(), p.y()) for p in blk_item._left_points],
+                [(p.x(), p.y()) for p in blk_item._right_points])
+
         event.accept()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
@@ -292,6 +300,16 @@ class FlowResizeHandle(QGraphicsItem):
         # _update_flow_layout() now handles both Horizontal and Vertical layouts
         blk_item._update_flow_layout()
         self.ctrl.updateHandlePositions()
+
+        # Log tracked blocks on top/bottom diamond resize
+        txt = blk_item.toPlainText()[:20] if blk_item else ''
+        if any(txt.startswith(p) for p in ("В ЭТОЙ", "ДА!... НО ОН")):
+            logger.debug("[TRACK] DIAMOND_DRAG edge=%s pos=%s left=%s right=%s",
+                self.edge,
+                (blk_item.pos().x(), blk_item.pos().y()),
+                [(p.x(), p.y()) for p in blk_item._left_points],
+                [(p.x(), p.y()) for p in blk_item._right_points])
+
         event.accept()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):

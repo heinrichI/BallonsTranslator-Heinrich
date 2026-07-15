@@ -3,6 +3,7 @@ import sys
 import argparse
 import os.path as osp
 import os
+os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'error')
 import importlib
 import subprocess
 from platform import platform
