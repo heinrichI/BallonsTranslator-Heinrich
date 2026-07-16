@@ -1,4 +1,5 @@
 from typing import List, Union, Tuple
+import logging
 
 from qtpy.QtGui import QTextCursor
 from qtpy.QtCore import QPointF
@@ -16,6 +17,8 @@ from .texteditshapecontrol import TextBlkShapeControl
 from .page_search_widget import PageSearchWidget, Matched
 from utils.proj_imgtrans import ProjImgTrans
 from .scene_textlayout import PUNSET_HALF
+
+LOGGER = logging.getLogger('BallonTranslator')
 
 
 def propagate_user_edit(src_edit: Union[TransTextEdit, TextBlkItem], target_edit: Union[TransTextEdit, TextBlkItem], pos: int, added_text: str, joint_previous: bool = False):
@@ -42,29 +45,36 @@ class MoveBlkItemsCommand(QUndoCommand):
         self.items = items
         self.old_pos_lst: List[QPointF] = []
         self.new_pos_lst: List[QPointF] = []
+        self.padding_lst: List[QPointF] = []  # Save padding at creation time
         self.shape_ctrl = shape_ctrl
         for item in items:
             padding = item.padding()
-            padding = QPointF(padding, padding)
-            self.old_pos_lst.append(item.oldPos + padding)
-            self.new_pos_lst.append(item.pos() + padding)
+            padding_qt = QPointF(padding, padding)
+            self.old_pos_lst.append(item.oldPos + padding_qt)
+            self.new_pos_lst.append(item.pos() + padding_qt)
+            self.padding_lst.append(padding_qt)
+            LOGGER.debug("[MOVE_CMD] init: idx=%d oldPos=(%.1f,%.1f) newPos=(%.1f,%.1f) padding=%.1f",
+                        item.idx, item.oldPos.x(), item.oldPos.y(),
+                        item.pos().x(), item.pos().y(), padding)
             item.oldPos = item.pos()
 
     def redo(self):
-        for item, new_pos in zip(self.items, self.new_pos_lst):
-            padding = item.padding()
-            padding = QPointF(padding, padding)
+        for item, new_pos, padding in zip(self.items, self.new_pos_lst, self.padding_lst):
+            LOGGER.debug("[MOVE_CMD] redo: idx=%d setPos=(%.1f,%.1f) padding=%.1f",
+                        item.idx, new_pos.x() - padding.x(), new_pos.y() - padding.y(), padding.x())
             item.setPos(new_pos - padding)
-            if self.shape_ctrl.blk_item == item and self.shape_ctrl.pos() != new_pos:
-                self.shape_ctrl.setPos(new_pos)
+        # Update shape control without triggering blk_item.setPos again
+        if self.items and self.shape_ctrl.blk_item in self.items:
+            self.shape_ctrl.updateBoundingRect()
 
     def undo(self):
-        for item, old_pos in zip(self.items, self.old_pos_lst):
-            padding = item.padding()
-            padding = QPointF(padding, padding)
+        for item, old_pos, padding in zip(self.items, self.old_pos_lst, self.padding_lst):
+            LOGGER.debug("[MOVE_CMD] undo: idx=%d setPos=(%.1f,%.1f) padding=%.1f",
+                        item.idx, old_pos.x() - padding.x(), old_pos.y() - padding.y(), padding.x())
             item.setPos(old_pos - padding)
-            if self.shape_ctrl.blk_item == item and self.shape_ctrl.pos() != old_pos:
-                self.shape_ctrl.setPos(old_pos)
+        # Update shape control without triggering blk_item.setPos again
+        if self.items and self.shape_ctrl.blk_item in self.items:
+            self.shape_ctrl.updateBoundingRect()
 
 
 class ApplyFontformatCommand(QUndoCommand):

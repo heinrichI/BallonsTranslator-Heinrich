@@ -1,0 +1,117 @@
+Пример реализации MVP (Пассивный вид / Passive View)В подходе MVP View становится абсолютно «глупым» (пассивным). Он умеет только отрисовывать то, что ему скажут, и сообщать Презентеру о кликах. Presenter полностью забирает на себя принятие решений.
+
+import sys
+from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtCore import Signal, QObject
+
+# 1. MODEL (Модель) — Чистая бизнес-логика. Никакого Qt.
+class HeavyMathModel:
+    def init(self):
+        self.result = 0
+
+    def multiply_by_two(self, number):
+        self.result = number * 2
+        return self.result
+        
+
+# 2. VIEW INTERFACE (Интерфейс Вида) — Описывает, что умеет делать экран.
+# Позволяет подменить реальное окно "заглушкой" для юнит-тестов.
+class CalculatorViewInterface(QObject):
+    calculate_requested = Signal(int)  # Сигнал отправки числа на расчет
+
+    def display_result(self, text: str):
+        raise NotImplementedError
+
+
+# Реальный GUI на Qt, реализующий интерфейс
+class CalculatorWindow(QMainWindow, CalculatorViewInterface):
+    def init(self):
+        # Инициализируем оба родительских класса
+        QMainWindow.init(self)
+        CalculatorViewInterface.init(self)
+        
+        self.setWindowTitle("MVP Шаблон")
+        self.resize(250, 150)
+
+        # Компоненты UI
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.layout = QVBoxLayout(self.central_widget)
+
+        self.label = QLabel("Результат: 0")
+        self.layout.addWidget(self.label)
+
+        self.button = QPushButton("Умножить 5 на 2")
+        self.layout.addWidget(self.button)
+
+        # Связываем физический клик с логическим сигналом интерфейса
+        self.button.clicked.connect(self._on_button_clicked)
+
+    def _on_button_clicked(self):
+        # Передаем действие во внешний мир (Презентеру)
+        self.calculate_requested.emit(5)
+
+    def display_result(self, text: str):
+        # Пассивное изменение UI по команде Презентера
+        self.label.setText(f"Результат: {text}")
+
+
+# 3. PRESENTER (Презентер) — Оркестратор. Связывает всё воедино.
+class CalculatorPresenter:
+    def init(self, model: HeavyMathModel, view: CalculatorViewInterface):
+        self.model = model
+        self.view = view
+
+        # Подписываемся на сигналы Вида
+        self.view.calculate_requested.connect(self.handle_calculation)
+
+    def handle_calculation(self, number: int):
+        # 1. Берем данные от Вида, отдаем Модели
+        math_result = self.model.multiply_by_two(number)
+        
+        # 2. Форматируем результат для вывода
+        display_string = f"Успешно ({math_result})"
+        
+        # 3. Приказываем Виду обновиться
+        self.view.display_result(display_string)
+
+
+# ТОЧКА ВХОДА
+if name == "main":
+    app = QApplication(sys.argv)
+
+    # Инициализация компонентов
+    app_model = HeavyMathModel()
+    app_view = CalculatorWindow()
+    app_presenter = CalculatorPresenter(app_model, app_view)
+
+    app_view.show()
+    sys.exit(app.exec())
+
+Архитектурные правила для MVP в Qt
+
+Никакого импорта PySide6 / PyQt6 в Модели и Презентере. Презентер должен оперировать стандартными типами данных Python (строки, числа, словари), чтобы его можно было протестировать через обычный unittest без создания окон. Исключение — использование Signal для связки. 
+
+Отношение 1:1. Один Презентер управляет ровно одним Видом (экраном/виджетом). Если ваше приложение разрастается до 5 окон, у вас должно быть 5 Видов и 5 соответствующих Презентеров. 
+
+Вид не знает о Модели. Архитектурная ошибка в MVP — это передать объект Модели внутрь класса Вида. 
+
+Паттерн MVP (Model-View-Presenter) делит приложение на три части для удобства тестирования и разделения кода.
+ В Python Qt (PyQt или PySide) главное правило MVP — сделать Presenter независимым от интерфейса.
+ Рассмотрим зависимости в этой связке:
+ 1. Модель (Model)Что это: Данные и логика (например, загрузка файла, база данных).Зависимости: Ничего не знает о Presenter и View.Пример: Базовый класс Python для вычислений.
+ 2. Представление (View)Что это: Окно, кнопки, поля ввода (виджеты Qt).Зависимости: Знает о Presenter, но не управляет логикой напрямую.Правило: View не должно содержать сложных вычислений. Оно лишь передает сигналы (например, нажатие кнопки) в Presenter и получает от него команды обновить текст на экране.
+ 3. Презентер (Presenter)Что это: Посредник между Model и View.Зависимости: Знает о Model и View.Правило: Не импортирует элементы Qt напрямую. Это нужно для тестирования логики без запуска самого окна.
+ Как это выглядит на практике: 
+ Инверсия зависимостей Чтобы Presenter не зависел от PyQt, используют интерфейс (абстрактный класс):
+ Интерфейс Вью (IView): Класс, описывающий команды для окна (например, метод show_error()). Находится в слое Presenter.
+ Реализация Вью (View): Класс окна на PyQt. Он наследуется от QWidget и интерфейса IView.python
+ # Псевдокод независимого Presenter
+class MainPresenter:
+    def __init__(self, model, view):
+        self.model = model
+        self.view = view # Зависит от интерфейса, а не от PyQt-окна
+        
+        # Подписка на сигналы вью
+        self.view.button_clicked.connect(self.on_button_click)
+В итоге направление зависимостей выглядит так:Model < Presenter > View (Interface) < View (PyQt)

@@ -28,6 +28,7 @@ from qtpy.QtGui import QTextCursor
 from utils.textblock import TextBlock
 from ui.flow_textitem import FlowTextBlkItem, DEFAULT_POINTS_PER_SIDE
 from ui.scene_textlayout import HorizontalTextDocumentLayout
+from ui.overlap_resolver import OverlapResolver
 
 
 # ── Session-scoped QApplication ───────────────────────────────
@@ -1498,9 +1499,12 @@ class TestOverlapResolution:
         orig_right_x = [p.x() for p in item1._right_points]
 
         # Create a minimal manager-like object for testing
+        from ui.overlap_resolver import OverlapResolver
         class MockManager:
             textblk_item_list = [item1, item2]
-            _resolve_overlaps = SceneTextManager._resolve_overlaps
+            overlap_resolver = OverlapResolver()
+            def _resolve_overlaps(self, new_item):
+                self.overlap_resolver.resolve_overlaps(new_item, self.textblk_item_list)
 
         manager = MockManager()
         manager._resolve_overlaps(item1)
@@ -1534,7 +1538,9 @@ class TestOverlapResolution:
 
         class MockManager:
             textblk_item_list = [item1, item2]
-            _resolve_overlaps = SceneTextManager._resolve_overlaps
+            overlap_resolver = OverlapResolver()
+            def _resolve_overlaps(self, new_item):
+                self.overlap_resolver.resolve_overlaps(new_item, self.textblk_item_list)
 
         manager = MockManager()
         manager._resolve_overlaps(item1)
@@ -1562,7 +1568,9 @@ class TestOverlapResolution:
 
         class MockManager:
             textblk_item_list = [item1, item2]
-            _resolve_overlaps = SceneTextManager._resolve_overlaps
+            overlap_resolver = OverlapResolver()
+            def _resolve_overlaps(self, new_item):
+                self.overlap_resolver.resolve_overlaps(new_item, self.textblk_item_list)
 
         manager = MockManager()
         manager._resolve_overlaps(item2)
@@ -1597,7 +1605,9 @@ class TestOverlapFromLog:
 
         class MockManager:
             textblk_item_list = [item1, item2]
-            _resolve_overlaps = SceneTextManager._resolve_overlaps
+            overlap_resolver = OverlapResolver()
+            def _resolve_overlaps(self, new_item):
+                self.overlap_resolver.resolve_overlaps(new_item, self.textblk_item_list)
 
         manager = MockManager()
         manager._resolve_overlaps(item1)
@@ -1632,7 +1642,9 @@ class TestOverlapFromLog:
 
         class MockManager:
             textblk_item_list = [item1, item2]
-            _resolve_overlaps = SceneTextManager._resolve_overlaps
+            overlap_resolver = OverlapResolver()
+            def _resolve_overlaps(self, new_item):
+                self.overlap_resolver.resolve_overlaps(new_item, self.textblk_item_list)
 
         manager = MockManager()
         manager._resolve_overlaps(item1)
@@ -1645,6 +1657,97 @@ class TestOverlapFromLog:
         assert new_right[1] == orig_right[1], f"Point 1 should not shift: {new_right[1]} != {orig_right[1]}"
         assert new_right[2] < orig_right[2], f"Point 2 should shift: {new_right[2]} >= {orig_right[2]}"
         assert new_right[3] < orig_right[3], f"Point 3 should shift: {new_right[3]} >= {orig_right[3]}"
+
+
+class TestMoveAfterControlPointChange:
+    """Test that moving a block after changing control points doesn't cause position jump."""
+
+    def test_move_after_control_points_no_jump(self, scene):
+        """After changing control points, moving block should not cause position jump.
+
+        Bug: FlowShapeControl.setPos() was calling blk_item.setPos() again,
+        causing the position to be set twice with different padding values.
+        """
+        from ui.textedit_commands import MoveBlkItemsCommand
+        from ui.texteditshapecontrol import TextBlkShapeControl
+
+        # Create a block with control points
+        blk = _make_blk(xyxy=(100, 100, 400, 250), text="Test block")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item._left_points = [QPointF(0, 0), QPointF(0, 50), QPointF(0, 100), QPointF(0, 150)]
+        item._right_points = [QPointF(300, 0), QPointF(300, 50), QPointF(300, 100), QPointF(300, 150)]
+
+        # Create shape control with parent
+        shape_ctrl = TextBlkShapeControl(None)
+
+        # Set initial position
+        item.setPos(200, 200)
+        initial_pos = item.pos()
+
+        # Move the block (simulate mouse drag)
+        item.oldPos = initial_pos
+        item.setPos(300, 300)
+        final_pos = item.pos()
+
+        # Create and execute move command
+        cmd = MoveBlkItemsCommand([item], shape_ctrl)
+        cmd.redo()
+
+        # Position after redo should match final_pos
+        pos_after_redo = item.pos()
+        assert abs(pos_after_redo.x() - final_pos.x()) < 0.1, \
+            f"Position X should match: {pos_after_redo.x()} != {final_pos.x()}"
+        assert abs(pos_after_redo.y() - final_pos.y()) < 0.1, \
+            f"Position Y should match: {pos_after_redo.y()} != {final_pos.y()}"
+
+        # Undo should restore to initial_pos
+        cmd.undo()
+        pos_after_undo = item.pos()
+        assert abs(pos_after_undo.x() - initial_pos.x()) < 0.1, \
+            f"Position X after undo should match: {pos_after_undo.x()} != {initial_pos.x()}"
+        assert abs(pos_after_undo.y() - initial_pos.y()) < 0.1, \
+            f"Position Y after undo should match: {pos_after_undo.y()} != {initial_pos.y()}"
+
+    def test_move_preserves_padding_consistency(self, scene):
+        """Padding should be consistent between redo and undo."""
+        from ui.textedit_commands import MoveBlkItemsCommand
+        from ui.texteditshapecontrol import TextBlkShapeControl
+
+        blk = _make_blk(xyxy=(100, 100, 400, 250), text="Test block")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        shape_ctrl = TextBlkShapeControl(None)
+
+        # Set position
+        item.setPos(200, 200)
+        item.oldPos = item.pos()
+
+        # Move
+        item.setPos(350, 350)
+
+        # Create command (saves padding at creation time)
+        cmd = MoveBlkItemsCommand([item], shape_ctrl)
+        padding_at_creation = cmd.padding_lst[0]
+
+        # Redo
+        cmd.redo()
+        pos_after_redo = item.pos()
+
+        # Undo
+        cmd.undo()
+        pos_after_undo = item.pos()
+
+        # Position should be consistent
+        assert abs(pos_after_redo.x() - 350) < 0.1, \
+            f"After redo X should be 350: {pos_after_redo.x()}"
+        assert abs(pos_after_redo.y() - 350) < 0.1, \
+            f"After redo Y should be 350: {pos_after_redo.y()}"
+        assert abs(pos_after_undo.x() - 200) < 0.1, \
+            f"After undo X should be 200: {pos_after_undo.x()}"
+        assert abs(pos_after_undo.y() - 200) < 0.1, \
+            f"After undo Y should be 200: {pos_after_undo.y()}"
 
 
 if __name__ == "__main__":

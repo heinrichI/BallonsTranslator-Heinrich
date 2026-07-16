@@ -1,11 +1,12 @@
 import math, re
+import logging
 import numpy as np
 from typing import List, Union, Tuple
 
 from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent
 from qtpy.QtCore import Qt, QRect, QRectF, QPointF, Signal, QSizeF
-from qtpy.QtGui import (QGradient, QKeyEvent, QFont, QTextCursor, QPixmap, QPainterPath, QTextDocument, 
-                       QInputMethodEvent, QPainter, QPen, QColor, QTextCharFormat, QTextDocument, QLinearGradient, 
+from qtpy.QtGui import (QGradient, QKeyEvent, QFont, QTextCursor, QPixmap, QPainterPath, QTextDocument,
+                       QInputMethodEvent, QPainter, QPen, QColor, QTextCharFormat, QTextDocument, QLinearGradient,
                        QBrush, QPalette, QAbstractTextDocumentLayout)
 
 from utils.textblock import TextBlock, FontFormat, TextAlignment, LineSpacingType
@@ -14,6 +15,8 @@ from utils.fontformat import FontFormat, px2pt, pt2px
 from .misc import td_pattern, table_pattern
 from .scene_textlayout import VerticalTextDocumentLayout, HorizontalTextDocumentLayout, SceneTextLayout
 from .text_graphical_effect import apply_shadow_effect
+
+LOGGER = logging.getLogger('BallonTranslator')
 
 TEXTRECT_SHOW_COLOR = QColor(30, 147, 229, 170)
 TEXTRECT_SELECTED_COLOR = QColor(248, 64, 147, 170)
@@ -255,6 +258,19 @@ class TextBlkItem(QGraphicsTextItem):
         center = self.boundingRect().center()
         self.setTransformOriginPoint(center)
 
+    # Override setPos to track position changes
+    def setPos(self, *args, **kwargs):
+        import traceback
+        old_pos = self.pos()
+        super().setPos(*args, **kwargs)
+        new_pos = self.pos()
+        if old_pos != new_pos:
+            LOGGER.debug("[SETPOS] idx=%d old=(%.1f,%.1f) new=(%.1f,%.1f) diff=(%.1f,%.1f)\n%s",
+                        self.idx if hasattr(self, 'idx') else -1,
+                        old_pos.x(), old_pos.y(), new_pos.x(), new_pos.y(),
+                        new_pos.x() - old_pos.x(), new_pos.y() - old_pos.y(),
+                        ''.join(traceback.format_stack()[-5:-1]))
+
     def rect(self) -> QRectF:
         return QRectF(self.pos(), self.boundingRect().size())
 
@@ -283,14 +299,18 @@ class TextBlkItem(QGraphicsTextItem):
                     x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
             else:
                 # Fallback for list/tuple inputs
-                x, y, w, h = rect[0], rect[1], rect[2], rect[3]            
+                x, y, w, h = rect[0], rect[1], rect[2], rect[3]
             return [x, y, x + w, y + h]
-        
+
         if isinstance(rect, List):
             rect = QRectF(*rect)
         if padding:
             rect = self.padRect(rect)
-        self.setPos(rect.topLeft())
+        new_pos = rect.topLeft()
+        old_pos = self.pos()
+        LOGGER.debug("[SETRECT] idx=%d oldPos=(%.1f,%.1f) newPos=(%.1f,%.1f) padding=%.1f",
+                    self.idx, old_pos.x(), old_pos.y(), new_pos.x(), new_pos.y(), self.padding())
+        self.setPos(new_pos)
         self.prepareGeometryChange()
         self._display_rect = rect
         self.layout.setMaxSize(rect.width(), rect.height())
@@ -589,12 +609,18 @@ class TextBlkItem(QGraphicsTextItem):
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            LOGGER.debug("[MOUSE] press: idx=%d pos=(%.1f,%.1f) padding=%.1f",
+                        self.idx, self.pos().x(), self.pos().y(), self.padding())
             self.oldPos = self.pos()
             self.leftbutton_pressed.emit(self.idx)
         return super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            LOGGER.debug("[MOUSE] release: idx=%d oldPos=(%.1f,%.1f) pos=(%.1f,%.1f) padding=%.1f moved=%s",
+                        self.idx, self.oldPos.x(), self.oldPos.y(),
+                        self.pos().x(), self.pos().y(), self.padding(),
+                        self.oldPos != self.pos())
             if self.oldPos != self.pos():
                 self.moved.emit()
         super().mouseReleaseEvent(event)
@@ -635,10 +661,14 @@ class TextBlkItem(QGraphicsTextItem):
         fontformat.font_family = font.family()
         # Read actual font size from document default font (most reliable source)
         doc_font_size = self.document().defaultFont().pointSizeF()
+        old_font_size = fontformat.font_size
         if doc_font_size > 0:
             fontformat.font_size = pt2px(doc_font_size)
         else:
             fontformat.font_size = self.fontformat.font_size
+        LOGGER.debug("[FONT] get_fontformat: idx=%d doc_font_size=%.1f old=%.1f new=%.1f",
+                    self.idx if hasattr(self, 'idx') else -1,
+                    doc_font_size, old_font_size, fontformat.font_size)
         fontformat.bold = font.bold()
         fontformat.underline = font.underline()
         fontformat.italic = font.italic()
@@ -964,7 +994,14 @@ class TextBlkItem(QGraphicsTextItem):
         '''
         value should be point size
         '''
-        
+        # Update fontformat.font_size so it persists when saving
+        if self.fontformat is not None:
+            old_size = self.fontformat.font_size
+            self.fontformat.font_size = pt2px(value)
+            LOGGER.debug("[FONT] setFontSize: idx=%d old=%.1f new=%.1f value_pt=%.1f",
+                        self.idx if hasattr(self, 'idx') else -1,
+                        old_size, self.fontformat.font_size, value)
+
         cursor, after_kwargs = self._before_set_ffmt(set_selected=set_selected, restore_cursor=restore_cursor)
         self.layout.relayout_on_changed = False
         if self.fontformat.stroke_width != 0:
