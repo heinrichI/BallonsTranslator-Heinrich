@@ -28,6 +28,8 @@ from qtpy.QtGui import QTextCursor
 from utils.textblock import TextBlock
 from ui.flow_textitem import FlowTextBlkItem, DEFAULT_POINTS_PER_SIDE
 from ui.scene_textlayout import HorizontalTextDocumentLayout
+from utils.fontformat import pt2px
+from unittest.mock import MagicMock
 from ui.overlap_resolver import OverlapResolver
 
 
@@ -1750,5 +1752,410 @@ class TestMoveAfterControlPointChange:
             f"After undo Y should be 200: {pos_after_undo.y()}"
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+class TestTextFormatManager:
+    """Tests for TextFormatManager — extracted formatting logic."""
+
+    def test_format_manager_initialized(self, scene):
+        """TextFormatManager is initialized during initTextBlock."""
+        blk = _make_blk(xyxy=(100, 100, 400, 250), text="Test")
+        item = FlowTextBlkItem(blk, idx=0)
+        assert hasattr(item, 'format_manager')
+        assert item.format_manager is not None
+
+    def test_set_fontformat_updates_font(self, scene):
+        """set_fontformat applies font family to the document."""
+        from utils.fontformat import FontFormat
+        blk = _make_blk(xyxy=(100, 100, 400, 250), text="Test text")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        fmt = FontFormat()
+        fmt.font_family = "Arial"
+        fmt.font_size = pt2px(16)
+        item.format_manager.set_fontformat(fmt)
+
+        doc_font = item.document().defaultFont()
+        assert doc_font.family() == "Arial"
+
+    def test_set_opacity(self, scene):
+        """set_opacity changes item opacity."""
+        blk = _make_blk(xyxy=(100, 100, 400, 250), text="Test")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        item.format_manager.set_opacity(0.5)
+        assert abs(item.opacity() - 0.5) < 0.01
+
+    def test_set_stroke_width(self, scene):
+        """set_stroke_width updates fontformat."""
+        blk = _make_blk(xyxy=(100, 100, 400, 250), text="Test")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        item.format_manager.set_stroke_width(2.0, padding=False, repaint_background=False)
+        assert item.fontformat.stroke_width == 2.0
+
+    def test_set_shadow(self, scene):
+        """set_shadow updates shadow properties."""
+        from utils.fontformat import FontFormat
+        blk = _make_blk(xyxy=(100, 100, 400, 250), text="Test")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        fmt = FontFormat()
+        fmt.shadow_radius = 5.0
+        fmt.shadow_strength = 0.8
+        item.format_manager.set_shadow(fmt, repaint=False)
+
+        assert item.fontformat.shadow_radius == 5.0
+        assert item.fontformat.shadow_strength == 0.8
+
+    def test_get_text_gradient(self, scene):
+        """get_text_gradient returns a valid gradient."""
+        blk = _make_blk(xyxy=(100, 100, 400, 250), text="Test")
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        gradient = item.format_manager.get_text_gradient()
+        assert gradient is not None
+        # Check that start and end colors are different
+        assert gradient.start().x() != gradient.finalStop().x() or \
+               gradient.start().y() != gradient.finalStop().y()
+
+
+class TestFlowBoundaryManager:
+    """Tests for FlowBoundaryManager — extracted boundary logic."""
+
+    def test_init_from_rect(self):
+        """init_from_rect creates control points from rect."""
+        from ui.flow_boundary_manager import FlowBoundaryManager
+        mgr = FlowBoundaryManager()
+        rect = QRectF(0, 0, 300, 200)
+        result = mgr.init_from_rect(rect)
+        assert result is True
+        assert len(mgr.left_points) == DEFAULT_POINTS_PER_SIDE
+        assert len(mgr.right_points) == DEFAULT_POINTS_PER_SIDE
+        # Left points should be at x=0, right at x=300
+        assert mgr.left_points[0].x() == 0
+        assert mgr.right_points[0].x() == 300
+
+    def test_init_from_rect_too_small(self):
+        """init_from_rect returns False for too-small rect."""
+        from ui.flow_boundary_manager import FlowBoundaryManager
+        mgr = FlowBoundaryManager()
+        rect = QRectF(0, 0, 5, 5)
+        result = mgr.init_from_rect(rect)
+        assert result is False
+        assert len(mgr.left_points) == 0
+
+    def test_interpolate_at_y(self):
+        """interpolate_at_y returns correct x for given y."""
+        from ui.flow_boundary_manager import FlowBoundaryManager
+        mgr = FlowBoundaryManager()
+        mgr.init_from_rect(QRectF(0, 0, 200, 100))
+        # At y=50, left should be 0, right should be 200
+        assert mgr.interpolate_at_y(50, 'left') == 0
+        assert mgr.interpolate_at_y(50, 'right') == 200
+
+    def test_add_point(self):
+        """add_point adds a new control point."""
+        from ui.flow_boundary_manager import FlowBoundaryManager
+        mgr = FlowBoundaryManager()
+        mgr.init_from_rect(QRectF(0, 0, 200, 100))
+        initial_count = len(mgr.left_points)
+        result = mgr.add_point(50, 'left')
+        assert result is True
+        assert len(mgr.left_points) == initial_count + 1
+
+    def test_save_and_load_from_block(self):
+        """save_to_block and load_from_block round-trip correctly."""
+        from ui.flow_boundary_manager import FlowBoundaryManager
+        mgr = FlowBoundaryManager()
+        mgr.init_from_rect(QRectF(0, 0, 200, 100))
+
+        # Create a mock block
+        class MockBlock:
+            left_points = None
+            right_points = None
+
+        block = MockBlock()
+        mgr.save_to_block(block)
+
+        # Load into new manager
+        mgr2 = FlowBoundaryManager()
+        mgr2.load_from_block(block)
+        assert len(mgr2.left_points) == len(mgr.left_points)
+        assert mgr2.left_points[0].x() == mgr.left_points[0].x()
+
+    def test_snapshot_restore(self):
+        """snapshot and restore undo point modifications."""
+        from ui.flow_boundary_manager import FlowBoundaryManager
+        mgr = FlowBoundaryManager()
+        mgr.init_from_rect(QRectF(0, 0, 200, 100))
+
+        mgr.snapshot()
+        orig_x = mgr.left_points[0].x()
+
+        # Modify
+        mgr.left_points[0] = QPointF(50, 0)
+        assert mgr.left_points[0].x() == 50
+
+        # Restore
+        mgr.restore()
+        assert mgr.left_points[0].x() == orig_x
+
+    def test_get_y_range(self):
+        """get_y_range returns min and max y of points."""
+        from ui.flow_boundary_manager import FlowBoundaryManager
+        mgr = FlowBoundaryManager()
+        mgr.init_from_rect(QRectF(0, 100, 200, 200))
+        min_y, max_y = mgr.get_y_range()
+        assert min_y == 100
+        assert max_y == 300
+
+
+class TestPageManager:
+    """Tests for PageManager — extracted page management."""
+
+    def test_page_manager_init(self):
+        """PageManager initializes correctly."""
+        from ui.page_manager import PageManager
+        from utils.proj_imgtrans import ProjImgTrans
+        proj = ProjImgTrans()
+        mgr = PageManager(proj)
+        assert mgr.current_page is None
+        assert mgr.num_pages == 0
+
+    def test_page_manager_change_page(self):
+        """change_page updates current page."""
+        from ui.page_manager import PageManager
+        from unittest.mock import MagicMock
+        
+        # Create a mock ProjImgTrans that doesn't fail on set_current_img
+        proj = MagicMock()
+        proj.current_img = 'page0'
+        proj.pages = {'page1': [], 'page2': []}
+        proj.set_current_img = MagicMock()
+        
+        mgr = PageManager(proj)
+        mgr.change_page('page1')
+        
+        proj.set_current_img.assert_called_once_with('page1')
+
+    def test_page_manager_get_page_index(self):
+        """get_page_index returns correct index."""
+        from ui.page_manager import PageManager
+        from utils.proj_imgtrans import ProjImgTrans
+        proj = ProjImgTrans()
+        proj.pages = {'page1': [], 'page2': [], 'page3': []}
+        mgr = PageManager(proj)
+        assert mgr.get_page_index('page1') == 0
+        assert mgr.get_page_index('page3') == 2
+        assert mgr.get_page_index('missing') == -1
+
+    def test_page_manager_should_save(self):
+        """should_save_on_change respects flags."""
+        from ui.page_manager import PageManager
+        from utils.proj_imgtrans import ProjImgTrans
+        proj = ProjImgTrans()
+        mgr = PageManager(proj)
+        assert mgr.should_save_on_change() is True
+        mgr.set_save_on_page_changed(False)
+        assert mgr.should_save_on_change() is False
+        mgr.set_opening_dir(True)
+        assert mgr.should_save_on_change() is False
+
+
+class TestPipelineCoordinator:
+    """Tests for PipelineCoordinator — extracted pipeline logic."""
+
+    def test_pipeline_coordinator_init(self):
+        """PipelineCoordinator initializes correctly."""
+        from ui.pipeline_coordinator import PipelineCoordinator
+        from utils.proj_imgtrans import ProjImgTrans
+        proj = ProjImgTrans()
+        coordinator = PipelineCoordinator(proj, None)
+        assert coordinator._postprocess_mt_toggle is True
+
+    def test_postprocess_translations_uppercase(self):
+        """postprocess_translations with uppercase flag."""
+        from ui.pipeline_coordinator import PipelineCoordinator
+        from utils.proj_imgtrans import ProjImgTrans
+        from utils.textblock import TextBlock
+        proj = ProjImgTrans()
+        coordinator = PipelineCoordinator(proj, None)
+        
+        blk = TextBlock([0, 0, 100, 50])
+        blk.translation = "hello"
+        blk.vertical = False
+        
+        coordinator.postprocess_translations([blk], upper_case=True)
+        # Note: full_len converts to full-width, then upper() makes it UPPER
+        # The test verifies the uppercase flag is applied
+        assert blk.translation.isupper() or 'Ｈ' in blk.translation
+
+    def test_clear_backup_blkstyles(self):
+        """clear_backup_blkstyles empties the list."""
+        from ui.pipeline_coordinator import PipelineCoordinator
+        from utils.proj_imgtrans import ProjImgTrans
+        proj = ProjImgTrans()
+        coordinator = PipelineCoordinator(proj, None)
+        coordinator._backup_blkstyles = [1, 2, 3]
+        coordinator.clear_backup_blkstyles()
+        assert len(coordinator._backup_blkstyles) == 0
+
+
+class TestFileIOManager:
+    """Tests for FileIOManager — extracted I/O logic."""
+
+    def test_file_io_manager_init(self):
+        """FileIOManager initializes correctly."""
+        from ui.file_io_manager import FileIOManager
+        from utils.proj_imgtrans import ProjImgTrans
+        proj = ProjImgTrans()
+        mgr = FileIOManager(proj, None, None, None)
+        assert mgr._proj is proj
+
+    def test_is_saving_false(self):
+        """is_saving returns False when no thread."""
+        from ui.file_io_manager import FileIOManager
+        from utils.proj_imgtrans import ProjImgTrans
+        from unittest.mock import MagicMock
+        proj = ProjImgTrans()
+        mock_thread = MagicMock()
+        mock_thread.isRunning.return_value = False
+        mgr = FileIOManager(proj, mock_thread, None, None)
+        assert mgr.is_saving() is False
+
+
+class TestTextBlockPresenter:
+    """Tests for TextBlockPresenter — MVP Presenter."""
+
+    def test_presenter_init(self):
+        """TextBlockPresenter initializes correctly."""
+        from ui.text_block_presenter import TextBlockPresenter
+        from utils.textblock import TextBlock
+        model = TextBlock([0, 0, 100, 50])
+        view = MagicMock()
+        presenter = TextBlockPresenter(model, view)
+        assert presenter._model is model
+        assert presenter._view is view
+
+    def test_load_from_model(self):
+        """load_from_model sets view from model."""
+        from ui.text_block_presenter import TextBlockPresenter
+        from utils.textblock import TextBlock
+        model = TextBlock([0, 0, 100, 50])
+        model.translation = "Hello World"
+        view = MagicMock()
+        presenter = TextBlockPresenter(model, view)
+        presenter.load_from_model()
+        view.setPlainText.assert_called_with("Hello World")
+
+    def test_set_font_size(self):
+        """set_font_size updates model and view."""
+        from ui.text_block_presenter import TextBlockPresenter
+        from utils.textblock import TextBlock
+        from utils.fontformat import FontFormat
+        model = TextBlock([0, 0, 100, 50])
+        model.fontformat = FontFormat()
+        view = MagicMock()
+        presenter = TextBlockPresenter(model, view)
+        presenter.set_font_size(16.0)
+        view.setFontSize.assert_called_with(16.0)
+
+    def test_select_calls_view(self):
+        """select calls view.setSelected."""
+        from ui.text_block_presenter import TextBlockPresenter
+        model = MagicMock()
+        view = MagicMock()
+        presenter = TextBlockPresenter(model, view)
+        presenter.select()
+        view.setSelected.assert_called_with(True)
+
+
+class TestScenePresenter:
+    """Tests for ScenePresenter — MVP Presenter."""
+
+    def test_presenter_init(self):
+        """ScenePresenter initializes correctly."""
+        from ui.scene_presenter import ScenePresenter
+        model_list = []
+        view = MagicMock()
+        presenter = ScenePresenter(model_list, view)
+        assert presenter._model_list is model_list
+        assert presenter._view is view
+
+    def test_get_block_count(self):
+        """get_block_count returns correct count."""
+        from ui.scene_presenter import ScenePresenter
+        from utils.textblock import TextBlock
+        model_list = [TextBlock([0, 0, 100, 50]), TextBlock([0, 0, 200, 100])]
+        view = MagicMock()
+        presenter = ScenePresenter(model_list, view)
+        assert presenter.get_block_count() == 2
+
+    def test_add_block(self):
+        """add_block adds to model and view."""
+        from ui.scene_presenter import ScenePresenter
+        model_list = []
+        view = MagicMock()
+        presenter = ScenePresenter(model_list, view)
+        idx = presenter.add_block()
+        assert len(model_list) == 1
+        assert idx == 0
+        view.add_block_view.assert_called_with(0)
+
+    def test_delete_block(self):
+        """delete_block removes from model and view."""
+        from ui.scene_presenter import ScenePresenter
+        from utils.textblock import TextBlock
+        model_list = [TextBlock([0, 0, 100, 50])]
+        view = MagicMock()
+        presenter = ScenePresenter(model_list, view)
+        presenter.delete_block(0)
+        assert len(model_list) == 0
+        view.remove_block_view.assert_called_with(0)
+
+
+class TestFlowPresenter:
+    """Tests for FlowPresenter — MVP Presenter."""
+
+    def test_presenter_init(self):
+        """FlowPresenter initializes correctly."""
+        from ui.flow_presenter import FlowPresenter
+        model = MagicMock()
+        view = MagicMock()
+        boundary_manager = MagicMock()
+        presenter = FlowPresenter(model, view, boundary_manager)
+        assert presenter._model is model
+        assert presenter._view is view
+        assert presenter._boundary_manager is boundary_manager
+
+    def test_get_control_points(self):
+        """get_control_points returns from boundary_manager."""
+        from ui.flow_presenter import FlowPresenter
+        from qtpy.QtCore import QPointF
+        model = MagicMock()
+        view = MagicMock()
+        boundary_manager = MagicMock()
+        boundary_manager.left_points = [QPointF(0, 0), QPointF(0, 100)]
+        boundary_manager.right_points = [QPointF(200, 0), QPointF(200, 100)]
+        presenter = FlowPresenter(model, view, boundary_manager)
+        left, right = presenter.get_control_points()
+        assert len(left) == 2
+        assert len(right) == 2
+
+    def test_set_control_points(self):
+        """set_control_points updates boundary_manager."""
+        from ui.flow_presenter import FlowPresenter
+        from qtpy.QtCore import QPointF
+        model = MagicMock()
+        view = MagicMock()
+        boundary_manager = MagicMock()
+        presenter = FlowPresenter(model, view, boundary_manager)
+        left = [QPointF(0, 0), QPointF(0, 100)]
+        right = [QPointF(200, 0), QPointF(200, 100)]
+        presenter.set_control_points(left, right)
+        assert boundary_manager.left_points == left
+        assert boundary_manager.right_points == right

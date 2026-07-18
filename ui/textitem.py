@@ -15,6 +15,7 @@ from utils.fontformat import FontFormat, px2pt, pt2px
 from .misc import td_pattern, table_pattern
 from .scene_textlayout import VerticalTextDocumentLayout, HorizontalTextDocumentLayout, SceneTextLayout
 from .text_graphical_effect import apply_shadow_effect
+from .text_format_manager import TextFormatManager
 
 LOGGER = logging.getLogger('BallonTranslator')
 
@@ -45,13 +46,15 @@ class TextBlkItem(QGraphicsTextItem):
         self.pre_editing = False
         self.blk: TextBlock = None
         self.fontformat: FontFormat = None
+        self._user_font_size: float = None  # User's chosen font size (preserved across auto-layout)
+        self.format_manager: TextFormatManager = None  # Will be initialized in initTextBlock
         self.repainting = False
         self.reshaping = False
         self.under_ctrl = False
         self.draw_rect = show_rect
         self._display_rect: QRectF = QRectF(0, 0, 1, 1)
         self.old_ffmt_values = None
-        
+
         self.idx = idx
         
         self.background_pixmap: QPixmap = None
@@ -209,7 +212,15 @@ class TextBlkItem(QGraphicsTextItem):
 
     def initTextBlock(self, blk: TextBlock = None, set_format=True):
         self.blk = blk
-        self.fontformat = blk.fontformat
+        self.fontformat = blk.fontformat.deepcopy() if blk and blk.fontformat else blk.fontformat
+        # Initialize TextFormatManager
+        self.format_manager = TextFormatManager(self)
+        # Save the font size explicitly — deepcopy may share internal state with blk.fontformat
+        self._saved_font_size = self.fontformat.font_size if self.fontformat else 0
+        LOGGER.debug("[FONT] initTextBlock: idx=%d blk_font_size=%.1f fontformat_size=%.1f saved=%.1f",
+                    self.idx if hasattr(self, 'idx') else -1,
+                    blk.fontformat.font_size if blk and blk.fontformat else -1,
+                    self.fontformat.font_size if self.fontformat else -1, self._saved_font_size)
         if blk is None:
             xyxy = [0, 0, 0, 0]
             blk = TextBlock(xyxy)
@@ -250,26 +261,17 @@ class TextBlkItem(QGraphicsTextItem):
         self.setStrokeWidth(font_fmt.stroke_width, repaint_background=False)
         # Sync font_size from document — detector/OCR may have set fontformat.font_size=0
         doc_font_size = self.document().defaultFont().pointSizeF()
+        old_font_size = self.fontformat.font_size
         if doc_font_size > 0:
             self.fontformat.font_size = pt2px(doc_font_size)
+        LOGGER.debug("[FONT] initTextBlock sync: idx=%d doc_size=%.1f old=%.1f new=%.1f",
+                    self.idx if hasattr(self, 'idx') else -1,
+                    doc_font_size, old_font_size, self.fontformat.font_size)
         self.repaint_background()
 
     def setCenterTransform(self):
         center = self.boundingRect().center()
         self.setTransformOriginPoint(center)
-
-    # Override setPos to track position changes
-    def setPos(self, *args, **kwargs):
-        import traceback
-        old_pos = self.pos()
-        super().setPos(*args, **kwargs)
-        new_pos = self.pos()
-        if old_pos != new_pos:
-            LOGGER.debug("[SETPOS] idx=%d old=(%.1f,%.1f) new=(%.1f,%.1f) diff=(%.1f,%.1f)\n%s",
-                        self.idx if hasattr(self, 'idx') else -1,
-                        old_pos.x(), old_pos.y(), new_pos.x(), new_pos.y(),
-                        new_pos.x() - old_pos.x(), new_pos.y() - old_pos.y(),
-                        ''.join(traceback.format_stack()[-5:-1]))
 
     def rect(self) -> QRectF:
         return QRectF(self.pos(), self.boundingRect().size())
@@ -306,11 +308,7 @@ class TextBlkItem(QGraphicsTextItem):
             rect = QRectF(*rect)
         if padding:
             rect = self.padRect(rect)
-        new_pos = rect.topLeft()
-        old_pos = self.pos()
-        LOGGER.debug("[SETRECT] idx=%d oldPos=(%.1f,%.1f) newPos=(%.1f,%.1f) padding=%.1f",
-                    self.idx, old_pos.x(), old_pos.y(), new_pos.x(), new_pos.y(), self.padding())
-        self.setPos(new_pos)
+        self.setPos(rect.topLeft())
         self.prepareGeometryChange()
         self._display_rect = rect
         self.layout.setMaxSize(rect.width(), rect.height())
@@ -609,18 +607,12 @@ class TextBlkItem(QGraphicsTextItem):
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            LOGGER.debug("[MOUSE] press: idx=%d pos=(%.1f,%.1f) padding=%.1f",
-                        self.idx, self.pos().x(), self.pos().y(), self.padding())
             self.oldPos = self.pos()
             self.leftbutton_pressed.emit(self.idx)
         return super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            LOGGER.debug("[MOUSE] release: idx=%d oldPos=(%.1f,%.1f) pos=(%.1f,%.1f) padding=%.1f moved=%s",
-                        self.idx, self.oldPos.x(), self.oldPos.y(),
-                        self.pos().x(), self.pos().y(), self.padding(),
-                        self.oldPos != self.pos())
             if self.oldPos != self.pos():
                 self.moved.emit()
         super().mouseReleaseEvent(event)
@@ -659,19 +651,8 @@ class TextBlkItem(QGraphicsTextItem):
         fontformat.frgb = [color.red(), color.green(), color.blue()]
         fontformat.font_weight = font.weight()
         fontformat.font_family = font.family()
-        # Read actual font size from document default font (most reliable source)
-        doc_font_size = self.document().defaultFont().pointSizeF()
-        old_font_size = fontformat.font_size
-        if doc_font_size > 0:
-            fontformat.font_size = pt2px(doc_font_size)
-        else:
-            fontformat.font_size = self.fontformat.font_size
-        LOGGER.debug("[FONT] get_fontformat: idx=%d doc_font_size=%.1f old=%.1f new=%.1f",
-                    self.idx if hasattr(self, 'idx') else -1,
-                    doc_font_size, old_font_size, fontformat.font_size)
-        fontformat.bold = font.bold()
-        fontformat.underline = font.underline()
-        fontformat.italic = font.italic()
+        # Always use self.fontformat.font_size (user's choice, set by setFontSize)
+        # This preserves the user's choice across auto-layout
         # Preserve gradient settings
         fontformat.gradient_enabled = self.fontformat.gradient_enabled
         fontformat.gradient_start_color = self.fontformat.gradient_start_color
@@ -748,8 +729,13 @@ class TextBlkItem(QGraphicsTextItem):
         self.fontformat.gradient_end_color = ffmat.gradient_end_color
         self.fontformat.gradient_angle = ffmat.gradient_angle
         self.fontformat.gradient_size = ffmat.gradient_size
-        
+
+        old_font_size = self.fontformat.font_size
         self.fontformat.merge(ffmat)
+        LOGGER.debug("[FONT] set_fontformat merge: idx=%d old=%.1f new=%.1f ffmat=%.1f doc_size=%.1f",
+                    self.idx if hasattr(self, 'idx') else -1,
+                    old_font_size, self.fontformat.font_size, ffmat.font_size,
+                    self.document().defaultFont().pointSizeF())
         
         if self.fontformat.gradient_enabled:
             self.update()
@@ -760,7 +746,23 @@ class TextBlkItem(QGraphicsTextItem):
 
     def updateBlkFormat(self):
         fmt = self.get_fontformat()
+        # Use blk.fontformat.font_size as the source of truth — it was set by
+        # _font_adjuster_sync during layout to the auto-adjusted value.
+        # Do NOT read from document font — the document font has been modified
+        # by the layout pass and no longer reflects the correct value.
+        if self.blk is not None and self.blk.fontformat is not None:
+            fmt.font_size = self.blk.fontformat.font_size
+            self.fontformat.font_size = self.blk.fontformat.font_size
+        old_blk_size = self.blk.fontformat.font_size
         self.blk.fontformat.merge(fmt)
+        # DEBUG: verify object identity
+        _is_same = self.fontformat is self.blk.fontformat
+        if _is_same:
+            LOGGER.debug("[FONT] WARNING: self.fontformat IS self.blk.fontformat! idx=%d", self.idx)
+        LOGGER.debug("[FONT] updateBlkFormat: idx=%d old_blk=%.1f new_blk=%.1f fmt_size=%.1f fontformat_size=%.1f same=%s",
+                    self.idx if hasattr(self, 'idx') else -1,
+                    old_blk_size, self.blk.fontformat.font_size, fmt.font_size,
+                    self.fontformat.font_size if self.fontformat else -1, _is_same)
 
     def set_cursor_cfmt(self, cursor: QTextCursor, cfmt: QTextCharFormat, merge_char: bool = False):
         doc_is_empty = self.document().isEmpty()
@@ -990,17 +992,16 @@ class TextBlkItem(QGraphicsTextItem):
         self.setFontSize(new_size, repaint_background, set_selected, restore_cursor, clip_size, **kwargs)
         
 
-    def setFontSize(self, value: float, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, clip_size: bool = False, **kwargs):
+    def setFontSize(self, value: float, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, clip_size: bool = False, _is_auto_layout: bool = False, **kwargs):
         '''
         value should be point size
         '''
         # Update fontformat.font_size so it persists when saving
+        # But only if NOT called from auto-layout (which should not overwrite user's choice)
         if self.fontformat is not None:
-            old_size = self.fontformat.font_size
-            self.fontformat.font_size = pt2px(value)
-            LOGGER.debug("[FONT] setFontSize: idx=%d old=%.1f new=%.1f value_pt=%.1f",
-                        self.idx if hasattr(self, 'idx') else -1,
-                        old_size, self.fontformat.font_size, value)
+            if not _is_auto_layout:
+                self.fontformat.font_size = pt2px(value)
+                self._user_font_size = pt2px(value)  # Save user's choice
 
         cursor, after_kwargs = self._before_set_ffmt(set_selected=set_selected, restore_cursor=restore_cursor)
         self.layout.relayout_on_changed = False

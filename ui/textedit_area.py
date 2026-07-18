@@ -792,16 +792,18 @@ class TextEditListScrollArea(QScrollArea):
         self.sel_anchor_widget = None
 
         for idx in to_remove:
-            pw = self.pairwidget_list[idx]
-            pw._set_checked_state(False)
-            self.checked_list.remove(pw)
+            if 0 <= idx < len(self.pairwidget_list):
+                pw = self.pairwidget_list[idx]
+                pw._set_checked_state(False)
+                self.checked_list.remove(pw)
 
         for ii, idx in enumerate(to_add):
-            pw = self.pairwidget_list[idx]
-            pw._set_checked_state(True)
-            self.checked_list.append(pw)
-            if ii == 0:
-                self.sel_anchor_widget = pw
+            if 0 <= idx < len(self.pairwidget_list):
+                pw = self.pairwidget_list[idx]
+                pw._set_checked_state(True)
+                self.checked_list.append(pw)
+                if ii == 0:
+                    self.sel_anchor_widget = pw
 
     def clearAllSelected(self, emit_signal=True):
         self.sel_anchor_widget = None

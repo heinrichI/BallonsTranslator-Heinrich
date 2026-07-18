@@ -118,65 +118,74 @@ class TextLayoutManager:
         # AUTO MODE: binary search for max font fitting in block
         # =====================================================
         if self.auto_textlayout_flag and self.pcfg.let_fntsize_flag == 0 and self.pcfg.let_autolayout_flag:
-            return self._auto_layout(blkitem, text, img_array, old_br, restore_charfmts)
+            result = self._auto_layout(blkitem, text, img_array, old_br, restore_charfmts)
+        else:
+            # =====================================================
+            # ORIGINAL MODE: mask-based layout with global font size
+            # =====================================================
+            result = self._mask_layout(blkitem, text, img_array, old_br, 
+                                     src_is_cjk, tgt_is_cjk, mask, bounding_rect, 
+                                     region_rect, restore_charfmts)
         
-        # =====================================================
-        # ORIGINAL MODE: mask-based layout with global font size
-        # =====================================================
-        return self._mask_layout(blkitem, text, img_array, old_br, 
-                                 src_is_cjk, tgt_is_cjk, mask, bounding_rect, 
-                                 region_rect, restore_charfmts)
+        return result
     
     def _auto_layout(self, blkitem, text: str, img_array: np.ndarray,
                      old_br: List, restore_charfmts: bool) -> Optional[str]:
         """
         AUTO MODE: binary search for max font size fitting in block.
-        
+
         Returns:
             str: Text after layout or None
         """
         orig_rect = blkitem.absBoundingRect(qrect=True)
         target_w = orig_rect.width()
         target_h = orig_rect.height()
-        
+
         blk_br = blkitem.blk.bounding_rect()
         if len(blk_br) >= 4:
             target_w = max(target_w, blk_br[2])
             target_h = max(target_h, blk_br[3])
-        
+
         if target_w < 2 or target_h < 2:
             LOGGER.warning(f"[layout_textblk] idx={blkitem.idx} target too small: "
                            f"{target_w:.1f}x{target_h:.1f}")
             return None
-        
+
         if restore_charfmts:
             char_fmts = blkitem.get_char_fmts()
-        
+
         original_size = blkitem.font().pointSizeF()
         if original_size < 1:
             original_size = 12.0
-        
+
         optimal_size = self._find_best_font_size(
             blkitem, text, target_w, target_h, original_size
         )
-        
+
         block_w = target_w * LAYOUT_BLOCK_SHRINK_W
-        blkitem.setFontSize(optimal_size)
+        # Pass _is_auto_layout=True to prevent overwriting user's font size
+        blkitem.setFontSize(optimal_size, _is_auto_layout=True)
         blkitem.setPlainText(text)
         blkitem.set_size(block_w, target_h, set_layout_maxsize=True, auto_font_adjust=False)
-        
+
         if restore_charfmts:
             for cf in char_fmts:
                 cf.setFontPointSize(optimal_size)
             self._restore_charfmts(blkitem, text, text, char_fmts)
-        
+
         # Restore auto-adjust and run one shrink pass
         blkitem._auto_font_adjust = True
         saved_grow = blkitem.font_adjuster._auto_grow_enabled
         blkitem.font_adjuster._auto_grow_enabled = False
         blkitem._update_flow_layout()
         blkitem.font_adjuster._auto_grow_enabled = saved_grow
-        
+
+        # Restore font size — _font_adjuster_sync corrupts self.fontformat.font_size
+        # through shared state in FontFormat. Restore from the value set by initTextBlock
+        # (which reads from blk.fontformat — the canonical source of truth).
+        if hasattr(blkitem, '_saved_font_size') and blkitem.fontformat is not None:
+            blkitem.fontformat.font_size = blkitem._saved_font_size
+
         return text
     
     def _mask_layout(self, blkitem, text: str, img_array: np.ndarray,
@@ -324,7 +333,8 @@ class TextLayoutManager:
                     blkitem.layout.max_height = orig_max_h
                 
                 # Set font size and text
-                blkitem.setFontSize(mid)
+                # Pass _is_auto_layout=True to prevent overwriting user's font size
+                blkitem.setFontSize(mid, _is_auto_layout=True)
                 blkitem.setPlainText(text)
                 blkitem.set_size(target_w, target_h, set_layout_maxsize=True, auto_font_adjust=False)
                 

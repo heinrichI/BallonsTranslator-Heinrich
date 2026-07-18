@@ -441,7 +441,11 @@ class FlowTextBlkItem(TextBlkItem):
             self.font_adjuster._internal_font_change = False
 
     def _font_adjuster_sync(self):
-        """Called by FontAutoAdjuster after font size changes to sync fontformat/blk."""
+        """Called by FontAutoAdjuster after font size changes to sync fontformat/blk.
+        
+        NOTE: Do NOT update self.fontformat.font_size or self._user_font_size here —
+        that should preserve the user's original font size choice.
+        """
         try:
             from utils.fontformat import pt2px
             # Read from document default font (most reliable), not first fragment
@@ -450,8 +454,7 @@ class FlowTextBlkItem(TextBlkItem):
                 if not QUIET_UI:
                     _debug("  _font_adjuster_sync: doc_font=%.1fpt -> font_size=%.1fpx",
                            doc_font_pt, pt2px(doc_font_pt))
-                if self.fontformat is not None:
-                    self.fontformat.font_size = pt2px(doc_font_pt)
+                # Do NOT update self.fontformat.font_size — preserve user's choice
                 if self.blk is not None and self.blk.fontformat is not None:
                     self.blk.fontformat.font_size = pt2px(doc_font_pt)
         except Exception:
@@ -468,9 +471,6 @@ class FlowTextBlkItem(TextBlkItem):
         # Guard: font_adjuster not yet created during super().__init__() → setVertical()
         if not hasattr(self, 'font_adjuster'):
             return
-
-        LOGGER.debug("[FLOW] _update_flow_layout START: idx=%d pos=(%.1f,%.1f) padding=%.1f",
-                    self.idx, self.pos().x(), self.pos().y(), self.padding())
 
         # if not QUIET_UI:
         #     _debug("_update_flow_layout: _auto_font_adjust=%s max_font_before=%.1f",
@@ -497,11 +497,7 @@ class FlowTextBlkItem(TextBlkItem):
 
                     # Set documentMargin = min_y so text STARTS at the new top edge.
                     # This is the ONLY way to make text move vertically with the handles.
-                    old_margin = self.document().documentMargin()
                     self.document().setDocumentMargin(min_y)
-                    if abs(old_margin - min_y) > 0.1:
-                        LOGGER.debug("[FLOW] docMargin changed: idx=%d old=%.1f new=%.1f min_y=%.1f",
-                                    self.idx, old_margin, min_y, min_y)
 
                     # Compensate max_width so available_width stays correct:
                     # available_width = max_width - 2*doc_margin => max_width = target_width + 2*min_y
@@ -588,9 +584,6 @@ class FlowTextBlkItem(TextBlkItem):
         # Update _display_rect AFTER flow layout completes.
         self._update_display_rect_from_control_points()
         self.save_flow_points()
-
-        LOGGER.debug("[FLOW] _update_flow_layout END: idx=%d pos=(%.1f,%.1f) padding=%.1f",
-                    self.idx, self.pos().x(), self.pos().y(), self.padding())
 
         # Log tracked blocks after flow layout update
         if self._left_points and self._right_points:

@@ -351,10 +351,12 @@ class ComicTextAndBubbleDetector(TextDetectorBase):
         device_id = 0 if device == "cuda" else -1
 
         try:
+            pipe_dtype = torch.bfloat16 if device == "cuda" else torch.float32
             self.pipe = pipeline(
                 "object-detection",
                 model=model_ref,
                 device=device_id,
+                torch_dtype=pipe_dtype,
             )
             self._model_id = model_id
             self._device = device

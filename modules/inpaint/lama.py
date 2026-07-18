@@ -124,9 +124,10 @@ class FFCResNetGenerator(nn.Module):
         if rel_pos is None:
             return self.model(masked_img)
         else:
-            
+
             x_l, x_g = self.model[:2](masked_img)
             x_l = x_l.to(torch.float32)
+            x_g = x_g.to(torch.float32)  # Fix BFloat16 vs Float mismatch
             x_l += rel_pos
             x_l += direct
             return self.model[2:]((x_l, x_g))

@@ -258,8 +258,10 @@ def get_base_det_models(model_path, device='cpu', half=False, act='leaky'):
     blk_det = load_yolov5_ckpt(textdetector_dict['blk_det'])
     text_seg = UnetHead(act=act)
     text_seg.load_state_dict(textdetector_dict['text_seg'])
+    text_seg.float()  # Ensure Float32 — checkpoint may contain BFloat16 tensors
     text_det = DBHead(64, act=act)
     text_det.load_state_dict(textdetector_dict['text_det'])
+    text_det.float()  # Ensure Float32 — checkpoint may contain BFloat16 tensors
     if half:
         return blk_det.eval().half(), text_seg.eval().half(), text_det.eval().half()
     return blk_det.eval().to(device), text_seg.eval().to(device), text_det.eval().to(device)

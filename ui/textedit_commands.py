@@ -53,15 +53,10 @@ class MoveBlkItemsCommand(QUndoCommand):
             self.old_pos_lst.append(item.oldPos + padding_qt)
             self.new_pos_lst.append(item.pos() + padding_qt)
             self.padding_lst.append(padding_qt)
-            LOGGER.debug("[MOVE_CMD] init: idx=%d oldPos=(%.1f,%.1f) newPos=(%.1f,%.1f) padding=%.1f",
-                        item.idx, item.oldPos.x(), item.oldPos.y(),
-                        item.pos().x(), item.pos().y(), padding)
             item.oldPos = item.pos()
 
     def redo(self):
         for item, new_pos, padding in zip(self.items, self.new_pos_lst, self.padding_lst):
-            LOGGER.debug("[MOVE_CMD] redo: idx=%d setPos=(%.1f,%.1f) padding=%.1f",
-                        item.idx, new_pos.x() - padding.x(), new_pos.y() - padding.y(), padding.x())
             item.setPos(new_pos - padding)
         # Update shape control without triggering blk_item.setPos again
         if self.items and self.shape_ctrl.blk_item in self.items:
@@ -69,8 +64,6 @@ class MoveBlkItemsCommand(QUndoCommand):
 
     def undo(self):
         for item, old_pos, padding in zip(self.items, self.old_pos_lst, self.padding_lst):
-            LOGGER.debug("[MOVE_CMD] undo: idx=%d setPos=(%.1f,%.1f) padding=%.1f",
-                        item.idx, old_pos.x() - padding.x(), old_pos.y() - padding.y(), padding.x())
             item.setPos(old_pos - padding)
         # Update shape control without triggering blk_item.setPos again
         if self.items and self.shape_ctrl.blk_item in self.items:

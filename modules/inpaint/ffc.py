@@ -271,7 +271,9 @@ class FFC_BN_ACT(nn.Module):
     def forward(self, x):
         x_l, x_g = self.ffc(x)
         x_l = self.act_l(self.bn_l(x_l))
-        x_g = self.act_g(self.bn_g(x_g))
+        if torch.is_tensor(x_g):
+            x_g = x_g.to(torch.float32)  # Fix BFloat16 vs Float mismatch in BatchNorm
+            x_g = self.act_g(self.bn_g(x_g))
         return x_l, x_g
 
 

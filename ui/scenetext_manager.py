@@ -35,6 +35,10 @@ def _debug(msg, *args, **kwargs):
 from utils.spell_check_engine import get_spellcheck_engine
 from .text_layout_manager import TextLayoutManager, get_text_size, get_words_length_list
 from .overlap_resolver import OverlapResolver
+from .transpair_wiring import TransPairWiring
+from .block_manager import BlockManager
+from .clipboard_manager import ClipboardManager
+from .selection_manager import SelectionManager
 
 # Keep old constants for backward compatibility
 LAYOUT_MIN_FONT_PT = 8.0
@@ -368,8 +372,6 @@ class SceneTextManager(QObject):
         self.formatpanel.textstyle_panel.apply_fontfmt.connect(self.onFormatTextblks)
 
         self.imgtrans_proj = self.canvas.imgtrans_proj
-        self.textblk_item_list: List[TextBlkItem] = []
-        self.pairwidget_list: List[TransPairWidget] = self.textEditList.pairwidget_list
 
         self._auto_textlayout_flag = False
         self.hovering_transwidget : TransTextEdit = None
@@ -386,6 +388,23 @@ class SceneTextManager(QObject):
 
         # Initialize OverlapResolver (extracted business logic)
         self.overlap_resolver = OverlapResolver()
+
+        # Initialize TransPairWiring (extracted signal wiring)
+        self.pair_wiring = TransPairWiring(self)
+
+        # Initialize BlockManager (extracted block list management)
+        self.block_manager = BlockManager(canvas, self.textEditList)
+
+        # Initialize ClipboardManager (extracted clipboard operations)
+        self.clipboard_manager = ClipboardManager(app, canvas, self.block_manager)
+
+        # Initialize SelectionManager (extracted selection state management)
+        self.selection_manager = SelectionManager(canvas, self.textEditList, self.block_manager, self.formatpanel)
+
+        # Delegate lists to block_manager (maintained for backward compatibility)
+        # The block_manager now owns these lists
+        self.textblk_item_list = self.block_manager.textblk_item_list
+        self.pairwidget_list = self.block_manager.pairwidget_list
 
     @property
     def auto_textlayout_flag(self) -> bool:
@@ -468,21 +487,11 @@ class SceneTextManager(QObject):
         self.txtblkShapeControl.updateBoundingRect()
 
     def clearSceneTextitems(self):
+        """Delegate to block_manager."""
         _debug("clearSceneTextitems: saving flow points for %d items", len(self.textblk_item_list))
         self.hovering_transwidget = None
         self.txtblkShapeControl.setBlkItem(None)
-        for blkitem in self.textblk_item_list:
-            if hasattr(blkitem, 'save_flow_points'):
-                blkitem.save_flow_points()
-                _debug("  saved flow points for blk id=%s left=%s",
-                             id(blkitem.blk), getattr(blkitem.blk, 'left_points', None))
-        for blkitem in self.textblk_item_list:
-            self.canvas.removeItem(blkitem)
-        self.textblk_item_list.clear()
-        self.textEditList.clearAllSelected()
-        for textwidget in self.pairwidget_list:
-            self.textEditList.removeWidget(textwidget)
-        self.pairwidget_list.clear()
+        self.block_manager.clear_all()
 
     def updateSceneTextitems(self):
         """
@@ -562,29 +571,9 @@ class SceneTextManager(QObject):
         pair_widget = TransPairWidget(blk, len(self.pairwidget_list), pcfg.fold_textarea)
         self.pairwidget_list.append(pair_widget)
         self.textEditList.addPairWidget(pair_widget)
-        pair_widget.e_source.setPlainText(blk_item.blk.get_text())
-        pair_widget.e_source.focus_in.connect(self.on_transwidget_focus_in)
-        pair_widget.e_source.ensure_scene_visible.connect(self.on_ensure_textitem_svisible)
-        pair_widget.e_source.push_undo_stack.connect(self.on_push_edit_stack)
-        pair_widget.e_source.redo_signal.connect(self.on_textedit_redo)
-        pair_widget.e_source.undo_signal.connect(self.on_textedit_undo)
-        pair_widget.e_source.show_select_menu.connect(self.on_show_select_menu)
-        pair_widget.e_source.focus_out.connect(self.on_pairw_focusout)
-        pair_widget.e_source.text_changed.connect(self._on_source_text_changed)
-        # pair_widget.e_source.propagate_user_edited.connect(self.on_propagate_transwidget_edit_source)
 
-        pair_widget.e_trans.setPlainText(blk_item.toPlainText())
-        pair_widget.e_trans.focus_in.connect(self.on_transwidget_focus_in)
-        pair_widget.e_trans.propagate_user_edited.connect(self.on_propagate_transwidget_edit)
-        pair_widget.e_trans.ensure_scene_visible.connect(self.on_ensure_textitem_svisible)
-        pair_widget.e_trans.push_undo_stack.connect(self.on_push_edit_stack)
-        pair_widget.e_trans.redo_signal.connect(self.on_textedit_redo)
-        pair_widget.e_trans.undo_signal.connect(self.on_textedit_undo)
-        pair_widget.e_trans.show_select_menu.connect(self.on_show_select_menu)
-        pair_widget.e_trans.focus_out.connect(self.on_pairw_focusout)
-        pair_widget.drag_move.connect(self.textEditList.handle_drag_pos)
-        pair_widget.pw_drop.connect(self.textEditList.on_pw_dropped)
-        pair_widget.idx_edited.connect(self.textEditList.on_idx_edited)
+        # Wire signals using TransPairWiring
+        self.pair_wiring.wire_signals(pair_widget, blk_item)
 
         self.new_textblk.emit(blk_item.idx)
         return blk_item
@@ -677,32 +666,21 @@ class SceneTextManager(QObject):
 
 
     def deleteTextblkItemList(self, blkitem_list: List[TextBlkItem], p_widget_list: List[TransPairWidget]):
-        selection_changed = False
-        for blkitem, p_widget in zip(blkitem_list, p_widget_list):
-            if blkitem.isSelected():
-                selection_changed = True
-            self.canvas.removeItem(blkitem) # removeItem itself will block incanvas_selection_changed
-            self.textblk_item_list.remove(blkitem)
-            self.pairwidget_list.remove(p_widget)
-            self.textEditList.removeWidget(p_widget)
-        self.updateTextBlkItemIdx()
+        """Delegate to block_manager and handle selection."""
+        selection_changed = self.block_manager.delete_textblk_item_list(blkitem_list, p_widget_list)
         self.txtblkShapeControl.setBlkItem(None)
         if selection_changed:
-            # it must be called after updateTextBlkItemIdx if blk.idx changed
             self.on_incanvas_selection_changed()
 
     def recoverTextblkItemList(self, blkitem_list: List[TextBlkItem], p_widget_list: List[TransPairWidget]):
-        self.canvas.block_selection_signal = True
-        for blkitem, p_widget in zip(blkitem_list, p_widget_list):
-            self.textblk_item_list.insert(blkitem.idx, blkitem)
-            blkitem.setParentItem(self.canvas.textLayer)
-            self.pairwidget_list.insert(p_widget.idx, p_widget)
-            self.textEditList.insertPairWidget(p_widget, p_widget.idx)
-            if self.txtblkShapeControl.blk_item is not None and blkitem.isSelected():
-                blkitem.setSelected(False)
-        self.updateTextBlkItemIdx()
+        """Delegate to block_manager and handle selection."""
+        self.block_manager.recover_textblk_item_list(blkitem_list, p_widget_list)
+        # Handle shape control selection
+        if self.txtblkShapeControl.blk_item is not None:
+            for blkitem in blkitem_list:
+                if blkitem.isSelected():
+                    blkitem.setSelected(False)
         self.on_incanvas_selection_changed()
-        self.canvas.block_selection_signal = False
         
     def onTextBlkItemSizeChanged(self, idx: int):
         blk_item = self.textblk_item_list[idx]
@@ -712,7 +690,8 @@ class SceneTextManager(QObject):
 
     @property
     def app_clipborad(self) -> QClipboard:
-        return self.app.clipboard()
+        """Delegate to clipboard_manager."""
+        return self.clipboard_manager.app_clipboard
 
     def onBlkitemPaste(self, idx: int):
         blk_item = self.textblk_item_list[idx]
@@ -730,17 +709,8 @@ class SceneTextManager(QObject):
         self.changeHoveringWidget(e_trans)
 
     def changeHoveringWidget(self, edit: SourceTextEdit):
-        if self.hovering_transwidget is not None and self.hovering_transwidget != edit:
-            self.hovering_transwidget.setHoverEffect(False)
-        self.hovering_transwidget = edit
-        if edit is not None:
-            pw = self.pairwidget_list[edit.idx]
-            h = pw.height()
-            if shared.USE_PYSIDE6:
-                self.textEditList.ensureWidgetVisible(pw, ymargin=h)
-            else:
-                self.textEditList.ensureWidgetVisible(pw, yMargin=h)
-            edit.setHoverEffect(True)
+        """Delegate to selection_manager."""
+        self.selection_manager.change_hovering_widget(edit)
 
     def onLeftbuttonPressed(self, blk_id: int):
         blk_item = self.textblk_item_list[blk_id]
@@ -791,10 +761,6 @@ class SceneTextManager(QObject):
 
     def onTextBlkItemMoved(self):
         selected_blks = self.canvas.selected_text_items()
-        LOGGER.debug("[SCENE] onTextBlkItemMoved: count=%d", len(selected_blks))
-        for blk in selected_blks:
-            LOGGER.debug("[SCENE]   idx=%d pos=(%.1f,%.1f) padding=%.1f",
-                        blk.idx, blk.pos().x(), blk.pos().y(), blk.padding())
         if len(selected_blks) > 0:
             self.canvas.push_undo_command(MoveBlkItemsCommand(selected_blks, self.txtblkShapeControl))
         
@@ -814,45 +780,26 @@ class SceneTextManager(QObject):
             self.canvas.push_undo_command(DeleteBlkItemsCommand(selected_blks, mode, self))
 
     def onCopyBlkItems(self):
+        """Delegate to clipboard_manager."""
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) == 0 and self.txtblkShapeControl.blk_item is not None:
             selected_blks.append(self.txtblkShapeControl.blk_item)
 
-        if len(selected_blks) == 0:            
-            return
-
-        self.canvas.clipboard_blks.clear()
-        if self.canvas.text_change_unsaved():
-            self.updateTextBlkList()
-
-        pos = selected_blks[0].blk.bounding_rect()
-        pos_x = int(pos[0] + pos[2] / 2)
-        pos_y = int(pos[1] + pos[3] / 2)
-
-        textlist = []
-        for blkitem in selected_blks:
-            blk = copy.deepcopy(blkitem.blk)
-            blk.adjust_pos(-pos_x, -pos_y)
-            self.canvas.clipboard_blks.append(blk)
-            textlist.append(blkitem.toPlainText().strip())
-        textlist = '\n'.join(textlist)
-        self.app_clipborad.setText(textlist, QClipboard.Mode.Clipboard)
+        self.clipboard_manager.copy_blocks(selected_blks)
 
     def onPasteBlkItems(self, pos: QPointF):
-        if pos is None:
-            pos_x, pos_y = 0, 0
-        else:
-            pos_x, pos_y = pos.x(), pos.y()
-            pos_x = int(pos_x / self.canvas.scale_factor)
-            pos_y = int(pos_y / self.canvas.scale_factor)
-        blkitem_list, pair_widget_list = [], []
-        for blk in self.canvas.clipboard_blks:
-            blk = copy.deepcopy(blk)
-            blk.adjust_pos(pos_x, pos_y)
+        """Delegate to clipboard_manager and handle undo."""
+        blocks_to_paste = self.clipboard_manager.paste_blocks(pos)
+
+        blkitem_list = []
+        pair_widget_list = []
+
+        for blk, pos_x, pos_y in blocks_to_paste:
             blkitem = self.addTextBlock(blk)
             pairw = self.pairwidget_list[-1]
             blkitem_list.append(blkitem)
             pair_widget_list.append(pairw)
+
         if len(blkitem_list) > 0:
             self.canvas.clearSelection()
             self.canvas.push_undo_command(PasteBlkItemsCommand(blkitem_list, pair_widget_list, self))
@@ -937,13 +884,8 @@ class SceneTextManager(QObject):
 
 
     def on_incanvas_selection_changed(self):
-        if self.canvas.textEditMode():
-            textitems = self.canvas.selected_text_items()
-            self.textEditList.set_selected_list([t.idx for t in textitems])
-            if len(textitems) == 1:
-                self.formatpanel.set_textblk_item(textitems[-1])
-            else:
-                self.formatpanel.set_textblk_item(multi_select=bool(textitems))
+        """Delegate to selection_manager."""
+        self.selection_manager.on_incanvas_selection_changed()
 
     def layout_textblk(self, blkitem: TextBlkItem, text: str = None, mask: np.ndarray = None,
                        bounding_rect: List = None, region_rect: List = None):
@@ -1093,17 +1035,8 @@ class SceneTextManager(QObject):
                 self.formatpanel.set_active_format(fontformat)
 
     def on_transwidget_selection_changed(self):
-        selitems = self.canvas.selected_text_items()
-        selset = {pw.idx: pw for pw in self.textEditList.checked_list}
-        self.canvas.block_selection_signal = True
-        for blkitem in selitems:
-            if blkitem.idx not in selset:
-                blkitem.setSelected(False)
-            else:
-                selset.pop(blkitem.idx)
-        for idx in selset:
-            self.textblk_item_list[idx].setSelected(True)
-        self.canvas.block_selection_signal = False
+        """Delegate to selection_manager."""
+        self.selection_manager.on_transwidget_selection_changed()
 
     def on_textedit_list_focusout(self):
         fw = self.app.focusWidget()
@@ -1117,38 +1050,12 @@ class SceneTextManager(QObject):
         self.canvas.push_undo_command(RearrangeBlksCommand(mv_map, self))
 
     def updateTextBlkItemIdx(self, sel_ids: set = None):
-        for ii, blk_item in enumerate(self.textblk_item_list):
-            if sel_ids is not None and ii not in sel_ids:
-                continue
-            blk_item.idx = ii
-            self.pairwidget_list[ii].updateIndex(ii)
-        cl = self.textEditList.checked_list
-        if len(cl) != 0:
-            cl.sort(key=lambda x: x.idx)
+        """Delegate to block_manager."""
+        self.block_manager.update_textblk_item_idx(sel_ids)
 
     def updateTextBlkList(self):
-        cbl = self.imgtrans_proj.current_block_list()
-        if cbl is None:
-            return
-        cbl.clear()
-        for blk_item, trans_pair in zip(self.textblk_item_list, self.pairwidget_list):
-            if not blk_item.document().isEmpty():
-                blk_item.blk.rich_text = blk_item.toHtml()
-                blk_item.blk.translation = blk_item.toPlainText()
-            else:
-                blk_item.blk.rich_text = ''
-                blk_item.blk.translation = ''
-            blk_item.blk.text = [trans_pair.e_source.toPlainText()]
-            blk_item.blk._bounding_rect = blk_item.absBoundingRect()
-            # _debug("SAVED blk idx=%d absBoundingRect=%s pos=%s _display_rect=%s left_points=%d",
-            #              blk_item.idx, blk_item.blk._bounding_rect, blk_item.pos(),
-            #              blk_item._display_rect if hasattr(blk_item, '_display_rect') else 'N/A',
-            #              len(getattr(blk_item, '_left_points', [])))
-            blk_item.updateBlkFormat()
-            # Save flow points if supported
-            if hasattr(blk_item, 'save_flow_points'):
-                blk_item.save_flow_points()
-            cbl.append(blk_item.blk)
+        """Delegate to block_manager."""
+        self.block_manager.update_textblk_list(self.imgtrans_proj)
 
     def updateTranslation(self):
         for blk_item, transwidget in zip(self.textblk_item_list, self.pairwidget_list):
@@ -1162,13 +1069,8 @@ class SceneTextManager(QObject):
             blk_item.update()
 
     def set_blkitems_selection(self, selected: bool, blk_items: List[TextBlkItem] = None):
-        self.canvas.block_selection_signal = True
-        if blk_items is None:
-            blk_items = self.textblk_item_list
-        for blk_item in blk_items:
-            blk_item.setSelected(selected)
-        self.canvas.block_selection_signal = False
-        self.on_incanvas_selection_changed()
+        """Delegate to selection_manager."""
+        self.selection_manager.set_blkitems_selection(selected, blk_items)
 
     def on_ensure_textitem_svisible(self):
         edit: Union[TransTextEdit, SourceTextEdit] = self.sender()
