@@ -1,4 +1,5 @@
 import math, re
+import inspect
 import logging
 import numpy as np
 from typing import List, Union, Tuple
@@ -18,6 +19,21 @@ from .text_graphical_effect import apply_shadow_effect
 from .text_format_manager import TextFormatManager
 
 LOGGER = logging.getLogger('BallonTranslator')
+
+DEBUG_FONTSIZE = False  # Set to True for font size debug logging
+
+_LOG_TARGET = "BUT OF COURSE!"
+
+def _is_log_target(blk):
+    if not DEBUG_FONTSIZE:
+        return False
+    if blk is None:
+        return False
+    try:
+        text = blk.get_text() if hasattr(blk, 'get_text') else ''
+        return text.startswith(_LOG_TARGET)
+    except Exception:
+        return False
 
 TEXTRECT_SHOW_COLOR = QColor(30, 147, 229, 170)
 TEXTRECT_SELECTED_COLOR = QColor(248, 64, 147, 170)
@@ -217,10 +233,11 @@ class TextBlkItem(QGraphicsTextItem):
         self.format_manager = TextFormatManager(self)
         # Save the font size explicitly — deepcopy may share internal state with blk.fontformat
         self._saved_font_size = self.fontformat.font_size if self.fontformat else 0
-        LOGGER.debug("[FONT] initTextBlock: idx=%d blk_font_size=%.1f fontformat_size=%.1f saved=%.1f",
+        if _is_log_target(self.blk):
+            LOGGER.debug("[FONT] initTextBlock: idx=%d blk_font_size=%.1fpt fontformat_size=%.1fpt saved=%.1fpt",
                     self.idx if hasattr(self, 'idx') else -1,
-                    blk.fontformat.font_size if blk and blk.fontformat else -1,
-                    self.fontformat.font_size if self.fontformat else -1, self._saved_font_size)
+                    px2pt(blk.fontformat.font_size) if blk and blk.fontformat else -1,
+                    px2pt(self.fontformat.font_size) if self.fontformat else -1, px2pt(self._saved_font_size))
         if blk is None:
             xyxy = [0, 0, 0, 0]
             blk = TextBlock(xyxy)
@@ -264,9 +281,10 @@ class TextBlkItem(QGraphicsTextItem):
         old_font_size = self.fontformat.font_size
         if doc_font_size > 0:
             self.fontformat.font_size = pt2px(doc_font_size)
-        LOGGER.debug("[FONT] initTextBlock sync: idx=%d doc_size=%.1f old=%.1f new=%.1f",
-                    self.idx if hasattr(self, 'idx') else -1,
-                    doc_font_size, old_font_size, self.fontformat.font_size)
+        if _is_log_target(self.blk):
+            LOGGER.debug("[FONT] initTextBlock sync: idx=%d doc_size=%.1fpt old=%.1fpt new=%.1fpt",
+                        self.idx if hasattr(self, 'idx') else -1,
+                        doc_font_size, px2pt(old_font_size), px2pt(self.fontformat.font_size))
         self.repaint_background()
 
     def setCenterTransform(self):
@@ -484,6 +502,12 @@ class TextBlkItem(QGraphicsTextItem):
             return self.scale()
 
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget) -> None:
+        if _is_log_target(self.blk):
+            LOGGER.debug("[FONTSIZE] BASE paint: idx=%d doc_font=%.1fpt fontformat=%.1fpx size_pt=%.1fpt",
+                self.idx if hasattr(self, 'idx') else -1,
+                self.document().defaultFont().pointSizeF(),
+                self.fontformat.font_size if self.fontformat else 0,
+                self.fontformat.size_pt if self.fontformat else 0)
         # subpixel antialiasing is enabled for super().paint upon drawing on some non-transparent background https://github.com/dmMaze/BallonsTranslator/issues/919
         # which can be avoided by calling super().paint first, but it results in disappeared background in editting mode
         # so the checking logic lies here
@@ -659,6 +683,10 @@ class TextBlkItem(QGraphicsTextItem):
         fontformat.gradient_end_color = self.fontformat.gradient_end_color
         fontformat.gradient_angle = self.fontformat.gradient_angle
         fontformat.gradient_size = self.fontformat.gradient_size
+        caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else '?'
+        if _is_log_target(self.blk):
+            LOGGER.debug("[FONTSIZE] TEXTITEM get_fontformat: idx=%d font_size=%.1fpx size_pt=%.1fpt caller=%s",
+                self.idx, fontformat.font_size, fontformat.size_pt, caller)
         return fontformat
 
     def set_fontformat(self, ffmat: FontFormat, set_char_format=False, set_stroke_width=True, set_effect=True):
@@ -673,6 +701,10 @@ class TextBlkItem(QGraphicsTextItem):
         
         font.setFamily(ffmat.font_family)
         font.setPointSizeF(ffmat.size_pt)
+        caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else '?'
+        if _is_log_target(self.blk):
+            LOGGER.debug("[FONTSIZE] TEXTITEM set_fontformat: size_pt=%.1fpt from font_size=%.1fpx caller=%s",
+                ffmat.size_pt, ffmat.font_size, caller)
         font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias | QFont.StyleStrategy.NoSubpixelAntialias)
 
@@ -682,7 +714,12 @@ class TextBlkItem(QGraphicsTextItem):
             ffmat.font_weight = fweight
         font.setBold(ffmat.bold)
 
+        old_doc_font = self.document().defaultFont().pointSizeF()
         self.document().setDefaultFont(font)
+        if _is_log_target(self.blk):
+            LOGGER.debug("[FONTSIZE] TEXTITEM set_fontformat setDocFont: idx=%d doc_font %.1fpt -> %.1fpt (ffmat.size_pt=%.1f)",
+                self.idx if hasattr(self, 'idx') else -1,
+                old_doc_font, font.pointSizeF(), ffmat.size_pt)
         format.setFont(font)
         if ffmat.gradient_enabled:
             gradient = self.get_text_gradient(ffmat)
@@ -732,10 +769,11 @@ class TextBlkItem(QGraphicsTextItem):
 
         old_font_size = self.fontformat.font_size
         self.fontformat.merge(ffmat)
-        LOGGER.debug("[FONT] set_fontformat merge: idx=%d old=%.1f new=%.1f ffmat=%.1f doc_size=%.1f",
-                    self.idx if hasattr(self, 'idx') else -1,
-                    old_font_size, self.fontformat.font_size, ffmat.font_size,
-                    self.document().defaultFont().pointSizeF())
+        if _is_log_target(self.blk):
+            LOGGER.debug("[FONT] set_fontformat merge: idx=%d old=%.1fpt new=%.1fpt ffmat=%.1fpt doc_size=%.1fpt",
+                        self.idx if hasattr(self, 'idx') else -1,
+                        px2pt(old_font_size), px2pt(self.fontformat.font_size), px2pt(ffmat.font_size),
+                        self.document().defaultFont().pointSizeF())
         
         if self.fontformat.gradient_enabled:
             self.update()
@@ -746,23 +784,26 @@ class TextBlkItem(QGraphicsTextItem):
 
     def updateBlkFormat(self):
         fmt = self.get_fontformat()
-        # Use blk.fontformat.font_size as the source of truth — it was set by
-        # _font_adjuster_sync during layout to the auto-adjusted value.
-        # Do NOT read from document font — the document font has been modified
-        # by the layout pass and no longer reflects the correct value.
-        if self.blk is not None and self.blk.fontformat is not None:
-            fmt.font_size = self.blk.fontformat.font_size
-            self.fontformat.font_size = self.blk.fontformat.font_size
+        # Use self.fontformat.font_size as the source of truth.
+        # It is updated by setFontSize() (user changes) and _font_adjuster_sync() (auto-shrink).
+        # Do NOT read from document defaultFont — it can be stale after initTextBlock()
+        # sets it to the original blk.fontformat value before auto-shrink runs.
+        if self.fontformat is not None:
+            fmt.font_size = self.fontformat.font_size
+            if self.blk is not None and self.blk.fontformat is not None:
+                self.blk.fontformat.font_size = self.fontformat.font_size
         old_blk_size = self.blk.fontformat.font_size
         self.blk.fontformat.merge(fmt)
         # DEBUG: verify object identity
         _is_same = self.fontformat is self.blk.fontformat
         if _is_same:
             LOGGER.debug("[FONT] WARNING: self.fontformat IS self.blk.fontformat! idx=%d", self.idx)
-        LOGGER.debug("[FONT] updateBlkFormat: idx=%d old_blk=%.1f new_blk=%.1f fmt_size=%.1f fontformat_size=%.1f same=%s",
+        if _is_log_target(self.blk):
+             LOGGER.debug("[FONT] updateBlkFormat: idx=%d old_blk=%.1fpt new_blk=%.1fpt fmt_size=%.1fpt fontformat_size=%.1fpt same=%s",
                     self.idx if hasattr(self, 'idx') else -1,
-                    old_blk_size, self.blk.fontformat.font_size, fmt.font_size,
-                    self.fontformat.font_size if self.fontformat else -1, _is_same)
+                    px2pt(old_blk_size), px2pt(self.blk.fontformat.font_size), px2pt(fmt.font_size),
+                    px2pt(self.fontformat.font_size) if self.fontformat else -1, _is_same)
+
 
     def set_cursor_cfmt(self, cursor: QTextCursor, cfmt: QTextCharFormat, merge_char: bool = False):
         doc_is_empty = self.document().isEmpty()
@@ -774,7 +815,13 @@ class TextBlkItem(QGraphicsTextItem):
         cursor.clearSelection()
         self.setTextCursor(cursor)
         # Always update document default font to match the cursor font
-        self.document().setDefaultFont(cursor.blockCharFormat().font())
+        old_doc_font = self.document().defaultFont().pointSizeF()
+        new_font = cursor.blockCharFormat().font()
+        self.document().setDefaultFont(new_font)
+        if _is_log_target(self.blk):
+            LOGGER.debug("[FONTSIZE] TEXTITEM set_cursor_cfmt: idx=%d doc_font %.1fpt -> %.1fpt",
+                self.idx if hasattr(self, 'idx') else -1,
+                old_doc_font, new_font.pointSizeF())
 
     def _before_set_ffmt(self, set_selected: bool, restore_cursor: bool):
         self.is_formatting = True
@@ -1000,8 +1047,16 @@ class TextBlkItem(QGraphicsTextItem):
         # But only if NOT called from auto-layout (which should not overwrite user's choice)
         if self.fontformat is not None:
             if not _is_auto_layout:
-                self.fontformat.font_size = pt2px(value)
-                self._user_font_size = pt2px(value)  # Save user's choice
+                new_px = pt2px(value)
+                self.fontformat.font_size = new_px
+                self._user_font_size = new_px  # Save user's choice
+                # Also update model immediately — otherwise page switch loses user's change
+                if self.blk is not None and self.blk.fontformat is not None:
+                    self.blk.fontformat.font_size = new_px
+                caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else '?'
+                if _is_log_target(self.blk):
+                    LOGGER.debug("[FONTSIZE] TEXTITEM setFontSize: idx=%d input_pt=%.1f -> font_size_px=%.1f _auto_font_adjust=%s caller=%s",
+                        self.idx, value, new_px, self._auto_font_adjust, caller)
 
         cursor, after_kwargs = self._before_set_ffmt(set_selected=set_selected, restore_cursor=restore_cursor)
         self.layout.relayout_on_changed = False

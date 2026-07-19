@@ -180,12 +180,6 @@ class ISceneView(ABC):
         """Get image translation project."""
         pass
 
-    @property
-    @abstractmethod
-    def clipboard_blks(self) -> list:
-        """Get clipboard blocks."""
-        pass
-
     @abstractmethod
     def removeItem(self, item):
         """Remove item from scene."""

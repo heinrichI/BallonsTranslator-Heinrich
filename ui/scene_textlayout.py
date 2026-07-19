@@ -4,6 +4,7 @@ import logging
 LOGGER = logging.getLogger('BallonTranslator')
 
 QUIET_UI = False  # Set to False for verbose UI debug logging
+VERTICAL_CENTER = False  # True = center text vertically in bubble; False = top-align
 
 from utils.shared import LOG_PREFIXES as _LOG_PREFIXES
 
@@ -957,7 +958,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             self.available_height = new_height
             self.size_enlarged.emit()
 
-        if doc.defaultTextOption().alignment() == Qt.AlignmentFlag.AlignCenter:
+        if VERTICAL_CENTER and doc.defaultTextOption().alignment() == Qt.AlignmentFlag.AlignCenter:
             block = doc.firstBlock()
             y_offset = (self.max_height - new_height) / 2 - doc_margin
             while block.isValid():

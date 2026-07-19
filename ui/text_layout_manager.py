@@ -15,6 +15,7 @@ from typing import List, Tuple, Optional
 import numpy as np
 from qtpy.QtGui import QFont, QFontMetricsF, QTextCharFormat
 
+from utils.fontformat import pt2px
 from utils.logger import logger as LOGGER
 from utils.text_processing import seg_text, is_cjk
 from utils.text_layout import layout_text
@@ -158,9 +159,24 @@ class TextLayoutManager:
         if original_size < 1:
             original_size = 12.0
 
-        optimal_size = self._find_best_font_size(
-            blkitem, text, target_w, target_h, original_size
-        )
+        # If font is already a reasonable user-set size (< 50pt), preserve it.
+        # Binary search finds the LARGEST font that fits, which overrides
+        # the user's manually-set size. Only run binary search for large
+        # detector fonts (> 50pt) or when font is suspiciously small.
+        if original_size < 50.0:
+            optimal_size = original_size
+        else:
+            optimal_size = self._find_best_font_size(
+                blkitem, text, target_w, target_h, original_size
+            )
+
+        # Sync fontformat to optimal size found by binary search.
+        # _find_best_font_size uses _is_auto_layout=True which skips
+        # the fontformat update in setFontSize(), so we must do it here.
+        if blkitem.fontformat is not None:
+            blkitem.fontformat.font_size = pt2px(optimal_size)
+        if blkitem.blk is not None and blkitem.blk.fontformat is not None:
+            blkitem.blk.fontformat.font_size = pt2px(optimal_size)
 
         block_w = target_w * LAYOUT_BLOCK_SHRINK_W
         # Pass _is_auto_layout=True to prevent overwriting user's font size
@@ -174,17 +190,10 @@ class TextLayoutManager:
             self._restore_charfmts(blkitem, text, text, char_fmts)
 
         # Restore auto-adjust and run one shrink pass
-        blkitem._auto_font_adjust = True
         saved_grow = blkitem.font_adjuster._auto_grow_enabled
         blkitem.font_adjuster._auto_grow_enabled = False
         blkitem._update_flow_layout()
         blkitem.font_adjuster._auto_grow_enabled = saved_grow
-
-        # Restore font size — _font_adjuster_sync corrupts self.fontformat.font_size
-        # through shared state in FontFormat. Restore from the value set by initTextBlock
-        # (which reads from blk.fontformat — the canonical source of truth).
-        if hasattr(blkitem, '_saved_font_size') and blkitem.fontformat is not None:
-            blkitem.fontformat.font_size = blkitem._saved_font_size
 
         return text
     

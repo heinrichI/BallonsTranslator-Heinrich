@@ -1,6 +1,25 @@
 import copy
+import inspect
+import logging
 import sys
 from typing import List
+
+LOGGER = logging.getLogger('BallonTranslator')
+
+DEBUG_FONTSIZE = False  # Set to True for font size debug logging
+
+_LOG_TARGET = "BUT OF COURSE!"
+
+def _is_log_target(blk):
+    if not DEBUG_FONTSIZE:
+        return False
+    if blk is None:
+        return False
+    try:
+        text = blk.get_text() if hasattr(blk, 'get_text') else ''
+        return text.startswith(_LOG_TARGET)
+    except Exception:
+        return False
 
 from qtpy.QtWidgets import QLineEdit, QSizePolicy, QHBoxLayout, QVBoxLayout, QFrame, QFontComboBox, QApplication, QPushButton, QLabel, QGroupBox, QCheckBox, QSlider, QListWidget
 from qtpy.QtCore import Signal, Qt
@@ -453,6 +472,10 @@ class FontFormatPanel(Widget):
             return None
 
     def on_param_changed(self, param_name: str, value):
+        if param_name == 'font_size':
+            if _is_log_target(getattr(self, 'textblk_item', None)):
+                LOGGER.debug("[FONTSIZE] PANEL on_param_changed: param=%s value=%.1fpt",
+                    param_name, value)
         func = FM.handle_ffmt_change.get(param_name)
         func_kwargs = {}
         if param_name in {'font_size', 'rel_font_size'}:
@@ -492,13 +515,18 @@ class FontFormatPanel(Widget):
     def set_active_format(self, font_format: FontFormat, multi_size=False):
         C.active_format = font_format
         self.familybox.blockSignals(True)
-        font_size = round(font_format.font_size, 1)
+        # Display as points, not pixels — font_format.font_size is in px, size_pt converts to pt
+        font_size = round(font_format.size_pt, 1)
         if int(font_size) == font_size:
             font_size = str(int(font_size))
         else:
             font_size = f'{font_size:.1f}'
         if multi_size:
             font_size += "+"
+        caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else '?'
+        if _is_log_target(getattr(self, 'textblk_item', None)):
+            LOGGER.debug("[FONTSIZE] PANEL set_active_format: display_val=%s pt (font_size=%.1fpx, size_pt=%.1fpt) multi_size=%s caller=%s",
+                font_size, font_format.font_size, font_format.size_pt, multi_size, caller)
         self.fontsizebox.fcombobox.setCurrentText(font_size)
         self.familybox.setCurrentText(font_format.font_family)
         self.colorPicker.setPickerColor(font_format.foreground_color())
@@ -570,6 +598,9 @@ class FontFormatPanel(Widget):
         else:
             if not self.restoring_textblk:
                 blk_fmt = textblk_item.get_fontformat()
+                if _is_log_target(textblk_item.blk if hasattr(textblk_item, 'blk') else None):
+                    LOGGER.debug("[FONTSIZE] PANEL set_textblk_item: idx=%d fontformat.font_size=%.1fpx size_pt=%.1fpt",
+                        textblk_item.idx, textblk_item.fontformat.font_size, textblk_item.fontformat.size_pt)
                 # Preserve gradient properties from the text block's format
                 if hasattr(textblk_item.fontformat, 'gradient_enabled'):
                     blk_fmt.gradient_enabled = textblk_item.fontformat.gradient_enabled

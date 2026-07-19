@@ -32,6 +32,8 @@ def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
         LOGGER.debug(msg, *args, **kwargs)
 
+_LOG_TARGET = "BUT OF COURSE!"
+
 from utils.spell_check_engine import get_spellcheck_engine
 from .text_layout_manager import TextLayoutManager, get_text_size, get_words_length_list
 from .overlap_resolver import OverlapResolver
@@ -39,6 +41,7 @@ from .transpair_wiring import TransPairWiring
 from .block_manager import BlockManager
 from .clipboard_manager import ClipboardManager
 from .selection_manager import SelectionManager
+from .event_bus import EventBus, Events
 
 # Keep old constants for backward compatibility
 LAYOUT_MIN_FONT_PT = 8.0
@@ -88,9 +91,9 @@ class DeleteBlkItemsCommand(QUndoCommand):
         self.redo_img_list = []
         self.inpaint_rect_lst = []
         self.mask_pnts = []
-        img_array = self.canvas.imgtrans_proj.inpainted_array
-        mask_array = self.canvas.imgtrans_proj.mask_array
-        original_array = self.canvas.imgtrans_proj.img_array
+        img_array = self.canvas.get_inpainted_array()
+        mask_array = self.canvas.get_mask_array()
+        original_array = self.canvas.get_image_array()
 
         self.search_rstedit_list: List[SourceTextEdit] = []
         self.search_counter_list = []
@@ -168,8 +171,8 @@ class DeleteBlkItemsCommand(QUndoCommand):
 
         if self.mode == 1:
             self.canvas.saved_drawundo_step -= 1
-            img_array = self.canvas.imgtrans_proj.inpainted_array
-            mask_array = self.canvas.imgtrans_proj.mask_array
+            img_array = self.canvas.get_inpainted_array()
+            mask_array = self.canvas.get_mask_array()
             for mskpnt, inpaint_rect, redo_img in zip(self.mask_pnts, self.inpaint_rect_lst, self.redo_img_list):
                 if mskpnt == None:
                     continue
@@ -204,8 +207,8 @@ class DeleteBlkItemsCommand(QUndoCommand):
 
         if self.mode == 1:
             self.canvas.saved_drawundo_step += 1
-            img_array = self.canvas.imgtrans_proj.inpainted_array
-            mask_array = self.canvas.imgtrans_proj.mask_array
+            img_array = self.canvas.get_inpainted_array()
+            mask_array = self.canvas.get_mask_array()
             for mskpnt, inpaint_rect, undo_img in zip(self.mask_pnts, self.inpaint_rect_lst, self.undo_img_list):
                 if mskpnt == None:
                     continue
@@ -371,7 +374,7 @@ class SceneTextManager(QObject):
         self.formatpanel = textpanel.formatpanel
         self.formatpanel.textstyle_panel.apply_fontfmt.connect(self.onFormatTextblks)
 
-        self.imgtrans_proj = self.canvas.imgtrans_proj
+        self.imgtrans_proj = self.canvas.imgtrans
 
         self._auto_textlayout_flag = False
         self.hovering_transwidget : TransTextEdit = None
@@ -406,6 +409,13 @@ class SceneTextManager(QObject):
         self.textblk_item_list = self.block_manager.textblk_item_list
         self.pairwidget_list = self.block_manager.pairwidget_list
 
+        # Initialize EventBus and subscribe to events
+        self._event_bus = EventBus.get_instance()
+        self._subscribe_to_events()
+
+        # DI services (set by CompositionRoot after creation)
+        self._undo_mgr = None
+
     @property
     def auto_textlayout_flag(self) -> bool:
         return self._auto_textlayout_flag
@@ -414,6 +424,48 @@ class SceneTextManager(QObject):
     def auto_textlayout_flag(self, value: bool):
         self._auto_textlayout_flag = value
         self.layout_manager.auto_textlayout_flag = value
+
+    def push_undo_command(self, command, update_pushed_step=True):
+        """Proxy: добавляет команду в стек undo через DI UndoManager."""
+        if self._undo_mgr:
+            self._undo_mgr.push_command(command)
+        else:
+            self.canvas.push_undo_command(command, update_pushed_step)
+
+    def _subscribe_to_events(self):
+        """Подписывается на события EventBus."""
+        # Навигация
+        self._event_bus.subscribe(Events.NAVIGATE_NEXT, lambda d=None: self.on_switch_textitem(1))
+        self._event_bus.subscribe(Events.NAVIGATE_PREV, lambda d=None: self.on_switch_textitem(-1))
+
+        # Блоки
+        self._event_bus.subscribe(Events.DELETE_TEXT_BLOCKS, self.onDeleteBlkItems)
+        self._event_bus.subscribe(Events.COPY_TEXT_BLOCKS, self.onCopyBlkItems)
+        self._event_bus.subscribe(Events.PASTE_TEXT_BLOCKS, self.onPasteBlkItems)
+        self._event_bus.subscribe(Events.FORMAT_TEXT_BLOCKS, self.onFormatTextblks)
+        self._event_bus.subscribe(Events.LAYOUT_TEXT_BLOCKS, self.onAutoLayoutTextblks)
+
+        # Выделение
+        self._event_bus.subscribe(Events.SELECTION_CHANGED, self.on_incanvas_selection_changed)
+
+        # Undo/Redo
+        self._event_bus.subscribe(Events.UNDO, lambda d=None: self.canvas.undo())
+        self._event_bus.subscribe(Events.REDO, lambda d=None: self.canvas.redo())
+
+        # Масштаб
+        self._event_bus.subscribe(Events.SCALE_CHANGED, self.adjustSceneTextRect)
+
+    def _unsubscribe_from_events(self):
+        """Отписывается от событий EventBus."""
+        self._event_bus.unsubscribe(Events.NAVIGATE_NEXT, lambda: self.on_switch_textitem(1))
+        self._event_bus.unsubscribe(Events.NAVIGATE_PREV, lambda: self.on_switch_textitem(-1))
+        self._event_bus.unsubscribe(Events.DELETE_TEXT_BLOCKS, self.onDeleteBlkItems)
+        self._event_bus.unsubscribe(Events.COPY_TEXT_BLOCKS, self.onCopyBlkItems)
+        self._event_bus.unsubscribe(Events.PASTE_TEXT_BLOCKS, self.onPasteBlkItems)
+        self._event_bus.unsubscribe(Events.FORMAT_TEXT_BLOCKS, self.onFormatTextblks)
+        self._event_bus.unsubscribe(Events.LAYOUT_TEXT_BLOCKS, self.onAutoLayoutTextblks)
+        self._event_bus.unsubscribe(Events.SELECTION_CHANGED, self.on_incanvas_selection_changed)
+        self._event_bus.unsubscribe(Events.SCALE_CHANGED, self.adjustSceneTextRect)
 
     def on_switch_textitem(self, switch_delta: int, key_event: QKeyEvent = None, current_editing_widget: Union[SourceTextEdit, TransTextEdit] = None):
         n_blk = len(self.textblk_item_list)
@@ -446,7 +498,7 @@ class SceneTextManager(QObject):
                 self.canvas.clearSelection()
                 blk.setSelected(True)
                 self.canvas.block_selection_signal = False
-                self.canvas.gv.ensureVisible(blk)
+                self.canvas.ensure_visible(blk)
                 self.txtblkShapeControl.setBlkItem(blk)
                 edit = self.pairwidget_list[tgt_idx].e_trans
                 self.changeHoveringWidget(edit)
@@ -457,7 +509,7 @@ class SceneTextManager(QObject):
                 self.txtblkShapeControl.setBlkItem(blk)
                 blk.setSelected(True)
                 blk.startEdit()
-                self.canvas.gv.ensureVisible(blk)
+                self.canvas.ensure_visible(blk)
         else:
             self.textblk_item_list[current_editing_widget.idx].setSelected(False)
             current_pw = self.pairwidget_list[tgt_idx]
@@ -476,14 +528,14 @@ class SceneTextManager(QObject):
     def setTextEditMode(self, edit: bool = False):
         if edit:
             self.textpanel.show()
-            self.canvas.textLayer.show()
+            self.canvas.set_text_layer_visible(True)
         else:
             self.txtblkShapeControl.setBlkItem(None)
             self.textpanel.hide()
             self.textpanel.formatpanel.set_textblk_item()
-            self.canvas.textLayer.hide()
+            self.canvas.set_text_layer_visible(False)
 
-    def adjustSceneTextRect(self):
+    def adjustSceneTextRect(self, data=None):
         self.txtblkShapeControl.updateBoundingRect()
 
     def clearSceneTextitems(self):
@@ -505,7 +557,15 @@ class SceneTextManager(QObject):
         self.txtblkShapeControl.setBlkItem(None)
         self.clearSceneTextitems()
 
-        for textblock in self.imgtrans_proj.current_block_list():
+        block_list = self.imgtrans_proj.current_block_list()
+        target_count = sum(1 for b in block_list if hasattr(b, 'get_text') and b.get_text().startswith(_LOG_TARGET))
+        if target_count > 0:
+            LOGGER.debug("[FONTSIZE] PAGE updateSceneTextitems: block_count=%d (target_blocks=%d)", len(block_list), target_count)
+        for i, textblock in enumerate(block_list):
+            if hasattr(textblock, 'get_text') and textblock.get_text().startswith(_LOG_TARGET):
+                LOGGER.debug("[FONTSIZE] PAGE block[%d]: font_size=%.1fpx", i, textblock.fontformat.font_size)
+
+        for textblock in block_list:
             if textblock.font_family is None or textblock.font_family.strip() == '':
                 textblock.font_family = self.formatpanel.familybox.currentText()
             blk_item = self.addTextBlock(textblock)
@@ -584,7 +644,7 @@ class SceneTextManager(QObject):
 
     def addTextBlkItem(self, textblk_item: TextBlkItem) -> TextBlkItem:
         self.textblk_item_list.append(textblk_item)
-        textblk_item.setParentItem(self.canvas.textLayer)
+        self.canvas.add_item_to_text_layer(textblk_item)
         textblk_item.begin_edit.connect(self.onTextBlkItemBeginEdit)
         textblk_item.end_edit.connect(self.onTextBlkItemEndEdit)
         textblk_item.hover_enter.connect(self.onTextBlkItemHoverEnter)
@@ -762,24 +822,24 @@ class SceneTextManager(QObject):
     def onTextBlkItemMoved(self):
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) > 0:
-            self.canvas.push_undo_command(MoveBlkItemsCommand(selected_blks, self.txtblkShapeControl))
+            self.push_undo_command(MoveBlkItemsCommand(selected_blks, self.txtblkShapeControl))
         
     def onTextBlkItemReshaped(self, item: TextBlkItem):
-        self.canvas.push_undo_command(ReshapeItemCommand(item))
+        self.push_undo_command(ReshapeItemCommand(item))
 
     def onTextBlkItemRotated(self, new_angle: float):
         blk_item = self.txtblkShapeControl.blk_item
         if blk_item:
-            self.canvas.push_undo_command(RotateItemCommand(blk_item, new_angle, self.txtblkShapeControl))
+            self.push_undo_command(RotateItemCommand(blk_item, new_angle, self.txtblkShapeControl))
 
-    def onDeleteBlkItems(self, mode: int):
+    def onDeleteBlkItems(self, mode: int = 0, data=None):
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) == 0 and self.txtblkShapeControl.blk_item is not None:
             selected_blks.append(self.txtblkShapeControl.blk_item)
         if len(selected_blks) > 0:
-            self.canvas.push_undo_command(DeleteBlkItemsCommand(selected_blks, mode, self))
+            self.push_undo_command(DeleteBlkItemsCommand(selected_blks, mode, self))
 
-    def onCopyBlkItems(self):
+    def onCopyBlkItems(self, data=None):
         """Delegate to clipboard_manager."""
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) == 0 and self.txtblkShapeControl.blk_item is not None:
@@ -787,7 +847,7 @@ class SceneTextManager(QObject):
 
         self.clipboard_manager.copy_blocks(selected_blks)
 
-    def onPasteBlkItems(self, pos: QPointF):
+    def onPasteBlkItems(self, pos: QPointF = None, data=None):
         """Delegate to clipboard_manager and handle undo."""
         blocks_to_paste = self.clipboard_manager.paste_blocks(pos)
 
@@ -802,13 +862,13 @@ class SceneTextManager(QObject):
 
         if len(blkitem_list) > 0:
             self.canvas.clearSelection()
-            self.canvas.push_undo_command(PasteBlkItemsCommand(blkitem_list, pair_widget_list, self))
+            self.push_undo_command(PasteBlkItemsCommand(blkitem_list, pair_widget_list, self))
             if len(blkitem_list) == 1:
                 self.formatpanel.set_textblk_item(blkitem_list[0])
             else:
                 self.formatpanel.set_textblk_item(multi_select=True)
 
-    def onFormatTextblks(self, fmt: FontFormat = None):
+    def onFormatTextblks(self, fmt: FontFormat = None, data=None):
         if fmt is None:
             fmt = self.formatpanel.global_format
         self.apply_fontformat(fmt)
@@ -828,7 +888,7 @@ class SceneTextManager(QObject):
                     return True
         return False
 
-    def onAutoLayoutTextblks(self):
+    def onAutoLayoutTextblks(self, data=None):
         selected_blks = self.canvas.selected_text_items()
         old_html_lst, old_rect_lst, trans_widget_lst = [], [], []
         
@@ -860,17 +920,17 @@ class SceneTextManager(QObject):
 
             # Создать команду отмены
             if old_html_lst:
-                self.canvas.push_undo_command(AutoLayoutCommand(selected_blks, old_rect_lst, old_html_lst, trans_widget_lst))
+                self.push_undo_command(AutoLayoutCommand(selected_blks, old_rect_lst, old_html_lst, trans_widget_lst))
 
     def onResetAngle(self):
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) > 0:
-            self.canvas.push_undo_command(ResetAngleCommand(selected_blks, self.txtblkShapeControl))
+            self.push_undo_command(ResetAngleCommand(selected_blks, self.txtblkShapeControl))
 
     def onSqueezeBlk(self):
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) > 0:
-            self.canvas.push_undo_command(SqueezeCommand(selected_blks, self.txtblkShapeControl))
+            self.push_undo_command(SqueezeCommand(selected_blks, self.txtblkShapeControl))
 
     def onSavePngBlk(self):
         selected_blks = self.canvas.selected_text_items()
@@ -883,7 +943,7 @@ class SceneTextManager(QObject):
                 im.save(f'{Path(self.imgtrans_proj.current_img).stem}_{blkitem.idx}.png')
 
 
-    def on_incanvas_selection_changed(self):
+    def on_incanvas_selection_changed(self, data=None):
         """Delegate to selection_manager."""
         self.selection_manager.on_incanvas_selection_changed()
 
@@ -925,7 +985,7 @@ class SceneTextManager(QObject):
         # Initialise flow boundary points from the new rect
         if hasattr(blk_item, '_init_points_from_rect'):
             blk_item._init_points_from_rect(blk_item.absBoundingRect(qrect=True))
-        self.canvas.push_undo_command(CreateItemCommand(blk_item, self))
+        self.push_undo_command(CreateItemCommand(blk_item, self))
 
     def on_paste2selected_textitems(self):
         blkitems = self.canvas.selected_text_items()
@@ -946,10 +1006,10 @@ class SceneTextManager(QObject):
                 text = text_list
         
         etrans = [self.pairwidget_list[blkitem.idx].e_trans for blkitem in blkitems]
-        self.canvas.push_undo_command(MultiPasteCommand(text, blkitems, etrans))
+        self.push_undo_command(MultiPasteCommand(text, blkitems, etrans))
 
     def onRotateTextBlkItem(self, item: TextBlock):
-        self.canvas.push_undo_command(RotateItemCommand(item))
+        self.push_undo_command(RotateItemCommand(item))
     
     def on_transwidget_focus_in(self, idx: int):
         if self.is_editting():
@@ -963,7 +1023,7 @@ class SceneTextManager(QObject):
             sender = self.sender()
             if isinstance(sender, TransTextEdit):
                 blk_item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
-            self.canvas.gv.ensureVisible(blk_item)
+            self.canvas.ensure_visible(blk_item)
             self.txtblkShapeControl.setBlkItem(blk_item)
 
     def on_textedit_redo(self):
@@ -998,13 +1058,13 @@ class SceneTextManager(QObject):
     def on_push_textitem_undostack(self, num_steps: int, is_formatting: bool):
         blkitem: TextBlkItem = self.sender()
         e_trans = self.pairwidget_list[blkitem.idx].e_trans if not is_formatting else None
-        self.canvas.push_undo_command(TextItemEditCommand(blkitem, e_trans, num_steps, self.textpanel.formatpanel), update_pushed_step=is_formatting)
+        self.push_undo_command(TextItemEditCommand(blkitem, e_trans, num_steps, self.textpanel.formatpanel), update_pushed_step=is_formatting)
 
     def on_push_edit_stack(self, num_steps: int):
         edit: Union[TransTextEdit, SourceTextEdit] = self.sender()
         is_trans = type(edit) == TransTextEdit
         blkitem = self.textblk_item_list[edit.idx] if is_trans else None
-        self.canvas.push_undo_command(TextEditCommand(edit, num_steps, blkitem), update_pushed_step=not is_trans)
+        self.push_undo_command(TextEditCommand(edit, num_steps, blkitem), update_pushed_step=not is_trans)
 
     def on_propagate_textitem_edit(self, pos: int, added_text: str, joint_previous: bool):
         blk_item: TextBlkItem = self.sender()
@@ -1026,7 +1086,7 @@ class SceneTextManager(QObject):
         for blk in selected_blks:
             trans_widget_list.append(self.pairwidget_list[blk.idx].e_trans)
         if len(selected_blks) > 0:
-            self.canvas.push_undo_command(ApplyFontformatCommand(selected_blks, trans_widget_list, fontformat))
+            self.push_undo_command(ApplyFontformatCommand(selected_blks, trans_widget_list, fontformat))
             if self.formatpanel.global_mode():
                 if id(self.formatpanel.active_text_style_format()) != id(fontformat):
                     self.formatpanel.deactivate_style_label()
@@ -1047,7 +1107,7 @@ class SceneTextManager(QObject):
             self.textEditList.clearAllSelected()
 
     def on_rearrange_blks(self, mv_map: Tuple[np.ndarray]):
-        self.canvas.push_undo_command(RearrangeBlksCommand(mv_map, self))
+        self.push_undo_command(RearrangeBlksCommand(mv_map, self))
 
     def updateTextBlkItemIdx(self, sel_ids: set = None):
         """Delegate to block_manager."""
@@ -1075,19 +1135,19 @@ class SceneTextManager(QObject):
     def on_ensure_textitem_svisible(self):
         edit: Union[TransTextEdit, SourceTextEdit] = self.sender()
         self.changeHoveringWidget(edit)
-        self.canvas.gv.ensureVisible(self.textblk_item_list[edit.idx])
+        self.canvas.ensure_visible(self.textblk_item_list[edit.idx])
         self.txtblkShapeControl.setBlkItem(self.textblk_item_list[edit.idx])
 
     def on_page_replace_one(self):
-        self.canvas.push_undo_command(PageReplaceOneCommand(self.canvas.search_widget))
+        self.push_undo_command(PageReplaceOneCommand(self.canvas.search_widget))
 
     def on_page_replace_all(self):
-        self.canvas.push_undo_command(PageReplaceAllCommand(self.canvas.search_widget))
+        self.push_undo_command(PageReplaceAllCommand(self.canvas.search_widget))
 
     def on_spell_word_clicked(self, word: str, idx: object):
         if idx < len(self.textblk_item_list):
             blk_item = self.textblk_item_list[idx]
-            self.canvas.gv.ensureVisible(blk_item)
+            self.canvas.ensure_visible(blk_item)
             self.txtblkShapeControl.setBlkItem(blk_item)
 
             self.textblk_item_list[idx].setSelected(True)
@@ -1114,7 +1174,7 @@ class SceneTextManager(QObject):
 
         # # Optional: ensure visible
         # if matched_indices:
-        #     self.canvas.gv.ensureVisible(self.textblk_item_list[matched_indices[0]])
+        #     self.canvas.ensure_visible(self.textblk_item_list[matched_indices[0]])
 
     def onWordDeleted(self, word: str):
         self.SpellCheckEngine.onWordDeleted(word)

@@ -1,5 +1,7 @@
 from typing import List, Callable, Dict
 import copy
+import inspect
+import logging
 
 from qtpy.QtGui import QFont
 try:
@@ -10,6 +12,23 @@ except:
 from . import shared_widget as SW
 from utils.fontformat import FontFormat, px2pt
 from .textitem import TextBlkItem
+
+LOGGER = logging.getLogger('BallonTranslator')
+
+DEBUG_FONTSIZE = False  # Set to True for font size debug logging
+
+_LOG_TARGET = "BUT OF COURSE!"
+
+def _is_log_target(blk):
+    if not DEBUG_FONTSIZE:
+        return False
+    if blk is None:
+        return False
+    try:
+        text = blk.get_text() if hasattr(blk, 'get_text') else ''
+        return text.startswith(_LOG_TARGET)
+    except Exception:
+        return False
 
 global_default_set_kwargs = dict(set_selected=False, restore_cursor=False)
 local_default_set_kwargs = dict(set_selected=True, restore_cursor=True)
@@ -48,18 +67,30 @@ def font_formating(push_undostack: bool = False, is_property = True):
         def wrapper(param_name: str, values: str, act_ffmt: FontFormat, is_global: bool, blkitems: List[TextBlkItem] = None, set_focus: bool = False, *args, **kwargs):
             if is_global and is_property:
                 if hasattr(act_ffmt, param_name):
-                    act_ffmt[param_name] = values
+                    # font_size comes from panel in pt, but FontFormat stores px
+                    if param_name == 'font_size':
+                        act_ffmt[param_name] = pt2px(values)
+                    else:
+                        act_ffmt[param_name] = values
                 else:
                     print(f'undefined param name: {param_name}')
 
             blkitems, values = wrap_fntformat_input(values, blkitems, is_global)
             if len(blkitems) > 0:
                 if is_property:
-                    act_ffmt[param_name] = values[0]
+                    # Do NOT set act_ffmt.font_size here — setFontSize() already
+                    # sets self.fontformat.font_size correctly (pt→px conversion).
+                    # Setting it here would overwrite the correct px value with the
+                    # raw pt value, causing the panel to display the wrong size.
+                    if param_name != 'font_size':
+                        act_ffmt[param_name] = values[0]
                 if push_undostack:
                     params = copy.deepcopy(kwargs)
                     params.update({'param_name': param_name, 'act_ffmt': act_ffmt, 'is_global': is_global, 'blkitems': blkitems})
                     undo_values = [getattr(blkitem.fontformat, param_name) for blkitem in blkitems]
+                    # font_size undo values are in px (from fontformat), but function expects pt
+                    if param_name == 'font_size':
+                        undo_values = [px2pt(v) for v in undo_values]
                     cmd = TextStyleUndoCommand(formatting_func, params, values, undo_values)
                     SW.canvas.push_undo_command(cmd)
                 else:
@@ -139,14 +170,18 @@ def ffmt_change_stroke_width(param_name: str, values: float, act_ffmt: FontForma
     for blkitem, value in zip(blkitems, values):
         blkitem.setStrokeWidth(value, **set_kwargs)
 
-@font_formating()
+@font_formating(push_undostack=True)
 def ffmt_change_font_size(param_name: str, values: float, act_ffmt: FontFormat, is_global: bool, blkitems: List[TextBlkItem], clip_size=False, **kwargs):
     set_kwargs = global_default_set_kwargs if is_global else local_default_set_kwargs
     for blkitem, value in zip(blkitems, values):
         if value < 0:
             continue
-        value = px2pt(value)
+        # Panel now provides pt values — pass directly to setFontSize (which expects pt)
+        if _is_log_target(blkitem.blk if hasattr(blkitem, 'blk') else None):
+            LOGGER.debug("[FONTSIZE] CMD ffmt_change_font_size: idx=%d input=%.1fpt is_global=%s",
+                blkitem.idx if hasattr(blkitem, 'idx') else -1, value, is_global)
         blkitem.setFontSize(value, clip_size=clip_size, **set_kwargs)
+        blkitem.updateBlkFormat()
 
 @font_formating(is_property=False)
 def ffmt_change_rel_font_size(param_name: str, values: float, act_ffmt: FontFormat, is_global: bool, blkitems: List[TextBlkItem], clip_size=False, **kwargs):

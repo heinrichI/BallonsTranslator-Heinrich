@@ -16,6 +16,21 @@ from utils.logger import logger as LOGGER
 
 QUIET_UI = True
 
+DEBUG_FONTSIZE = False  # Set to True for font size debug logging
+
+_LOG_TARGET = "BUT OF COURSE!"
+
+def _is_log_target(blk):
+    if not DEBUG_FONTSIZE:
+        return False
+    if blk is None:
+        return False
+    try:
+        text = blk.get_text() if hasattr(blk, 'get_text') else ''
+        return text.startswith(_LOG_TARGET)
+    except Exception:
+        return False
+
 
 def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
@@ -54,7 +69,11 @@ class SelectionManager(QObject):
             self.textEditList.set_selected_list([t.idx for t in textitems])
 
             if len(textitems) == 1:
-                self.formatpanel.set_textblk_item(textitems[-1])
+                t = textitems[-1]
+                if _is_log_target(t.blk if hasattr(t, 'blk') else None):
+                    LOGGER.debug("[FONTSIZE] SELECTION idx=%d fontformat.font_size=%.1fpx size_pt=%.1fpt",
+                        t.idx, t.fontformat.font_size, t.fontformat.size_pt)
+                self.formatpanel.set_textblk_item(t)
             else:
                 self.formatpanel.set_textblk_item(multi_select=bool(textitems))
 

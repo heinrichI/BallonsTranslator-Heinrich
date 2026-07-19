@@ -34,11 +34,12 @@ class ClipboardManager(QObject):
     - Pasting text to selected blocks
     """
 
-    def __init__(self, app, canvas, block_manager, parent=None):
+    def __init__(self, app, canvas, block_manager, clipboard_service=None, parent=None):
         super().__init__(parent)
         self.app = app
         self.canvas = canvas
         self.block_manager = block_manager
+        self._clipboard_svc = clipboard_service
 
     @property
     def app_clipboard(self) -> QClipboard:
@@ -58,12 +59,9 @@ class ClipboardManager(QObject):
         if len(selected_blks) == 0:
             return []
 
-        # Clear previous clipboard
-        self.canvas.clipboard_blks.clear()
-
         # Sync text list if there are unsaved changes
         if self.canvas.text_change_unsaved():
-            self.block_manager.update_textblk_list(self.canvas.imgtrans_proj)
+            self.block_manager.update_textblk_list(self.canvas.imgtrans)
 
         # Calculate center position for relative positioning
         pos = selected_blks[0].blk.bounding_rect()
@@ -71,18 +69,23 @@ class ClipboardManager(QObject):
         pos_y = int(pos[1] + pos[3] / 2)
 
         # Copy blocks and build text list
+        blocks = []
         textlist = []
         for blkitem in selected_blks:
             blk = copy.deepcopy(blkitem.blk)
             blk.adjust_pos(-pos_x, -pos_y)
-            self.canvas.clipboard_blks.append(blk)
+            blocks.append(blk)
             textlist.append(blkitem.toPlainText().strip())
+
+        # Store in ClipboardService
+        if self._clipboard_svc:
+            self._clipboard_svc.copy_blocks(blocks)
 
         # Copy text to system clipboard
         textlist = '\n'.join(textlist)
         self.app_clipboard.setText(textlist, QClipboard.Mode.Clipboard)
 
-        return self.canvas.clipboard_blks
+        return blocks
 
     def paste_blocks(self, pos: QPointF) -> List[TextBlkItem]:
         """
@@ -102,13 +105,13 @@ class ClipboardManager(QObject):
             pos_y = int(pos_y / self.canvas.scale_factor)
 
         blkitem_list = []
-        pair_widget_list = []
 
-        for blk in self.canvas.clipboard_blks:
+        # Get blocks from ClipboardService
+        source_blocks = self._clipboard_svc.paste_blocks() if self._clipboard_svc else []
+
+        for blk in source_blocks:
             blk = copy.deepcopy(blk)
             blk.adjust_pos(pos_x, pos_y)
-            # Note: addTextBlock is called by the SceneTextManager
-            # This method returns the blocks to be pasted
             blkitem_list.append((blk, pos_x, pos_y))
 
         return blkitem_list

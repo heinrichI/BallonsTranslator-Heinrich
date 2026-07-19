@@ -58,8 +58,8 @@ class KeyboardShortcutManager:
         self._add_shortcut("D", self._shortcut_next)
         self._add_shortcut(QKeySequence.StandardKey.MoveToNextPage, self._shortcut_next)
         self._add_shortcut("W", self._shortcut_textblock)
-        self._add_shortcut(QKeySequence.StandardKey.ZoomIn, self.mw.canvas.gv.scale_up_signal)
-        self._add_shortcut(QKeySequence.StandardKey.ZoomOut, self.mw.canvas.gv.scale_down_signal)
+        self._add_shortcut(QKeySequence.StandardKey.ZoomIn, self.mw.canvas.scale_up)
+        self._add_shortcut(QKeySequence.StandardKey.ZoomOut, self.mw.canvas.scale_down)
         self._add_shortcut("Ctrl+D", self._shortcut_ctrl_d)
         self._add_shortcut("Space", self._shortcut_space)
         self._add_shortcut(QKeySequence.StandardKey.SelectAll, self._shortcut_select_all)
@@ -187,7 +187,7 @@ class KeyboardShortcutManager:
 
     def _shortcut_delete(self):
         """Удалить выделенные блоки."""
-        if self.mw.canvas.gv.isVisible():
+        if self.mw.canvas.is_visible():
             self.mw.canvas.delete_textblks.emit(1)
 
     def _shortcut_escape(self):

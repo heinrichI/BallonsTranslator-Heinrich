@@ -21,6 +21,20 @@ logger = logging.getLogger('BallonTranslator')
 LOGGER = logger  # alias used in _auto_shrink_font, _auto_grow_font
 
 QUIET_UI = False  # Set to False for verbose UI debug logging
+DEBUG_FONTSIZE = False  # Set to True for font size debug logging
+
+_LOG_TARGET = "BUT OF COURSE!"
+
+def _is_log_target(blk):
+    if not DEBUG_FONTSIZE:
+        return False
+    if blk is None:
+        return False
+    try:
+        text = blk.get_text() if hasattr(blk, 'get_text') else ''
+        return text.startswith(_LOG_TARGET)
+    except Exception:
+        return False
 
 def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
@@ -223,36 +237,16 @@ class FlowTextBlkItem(TextBlkItem):
 
         # If loaded from project with saved points, shrink font to fit control point height
         if self._left_points and self._right_points and self.font_adjuster:
+            # Check font size BEFORE shrink — Fix C guard uses this to decide
+            font_was_large = (self.blk.fontformat is not None
+                              and self.blk.fontformat.font_size > 50.0)
             # Disable grow so it doesn't re-inflate after shrink
             self.font_adjuster._auto_grow_enabled = False
-            # if not QUIET_UI:
-            #     _debug("  BEFORE shrink: fontformat.font_size=%.1f doc_font=%.1f",
-            #            self.fontformat.font_size if self.fontformat else 0,
-            #            self.document().defaultFont().pointSizeF())
+            # Force synchronous layout so shrink_height > 0 before shrink checks overflow
+            self._apply_boundary_functions()
+            self.layout.reLayoutEverything()
             self.font_adjuster.shrink()
-            # if not QUIET_UI:
-            #     _debug("  AFTER shrink: fontformat.font_size=%.1f doc_font=%.1f",
-            #            self.fontformat.font_size if self.fontformat else 0,
-            #            self.document().defaultFont().pointSizeF())
             self.font_adjuster._auto_grow_enabled = True
-            # Sync fontformat.font_size with actual document font after shrink
-            # Read from first fragment (actual rendered size), not document defaultFont
-            block = self.document().firstBlock()
-            it = block.begin()
-            actual_pt = 0
-            if not it.atEnd():
-                actual_pt = it.fragment().charFormat().fontPointSize()
-            if actual_pt > 0:
-                doc_font_pt = actual_pt
-            else:
-                doc_font_pt = self.document().defaultFont().pointSizeF()
-            if doc_font_pt > 0 and self.fontformat is not None:
-                from utils.fontformat import pt2px
-                self.fontformat.font_size = pt2px(doc_font_pt)
-                # Also update document default font to match
-                font = self.document().defaultFont()
-                font.setPointSizeF(doc_font_pt)
-                self.document().setDefaultFont(font)
             # Update blk.xyxy to match control points (not polygon)
             pos = self.pos()
             all_pts = self._left_points + self._right_points
@@ -264,6 +258,29 @@ class FlowTextBlkItem(TextBlkItem):
                 int(pos.x() + local_x), int(pos.y() + local_y),
                 int(pos.x() + local_x + local_w), int(pos.y() + local_y + local_h)
             ]
+            # Disable auto-adjust only if font was ALREADY small when loaded
+            # (from a previous session), NOT if it was just shrunk from a large detector size.
+            if not font_was_large and self.blk.fontformat is not None and self.blk.fontformat.font_size <= 50.0:
+                self._auto_font_adjust = False
+
+        # Shrink even without flow points if font is clearly too big for the bounding rect.
+        # This handles blocks created by pipeline (no saved flow points).
+        elif self.font_adjuster and not self._left_points and not self._right_points:
+            blk_rect = blk.bounding_rect()
+            if blk_rect.isValid() and blk_rect.height() > 10:
+                target_h = blk_rect.height()
+                # Compute layout FIRST so max_font_size() returns real value
+                self.layout.available_height = target_h
+                self.layout.max_height = target_h + self.document().documentMargin() * 2
+                self.layout.reLayoutEverything()  # Compute _max_font_size from fragments
+                self.layout.reLayout()  # Compute shrink_height for the shrink loop
+                min_font = self.layout.max_font_size()
+                if min_font > 20.0:
+                    # Set layout constraints and compute shrink_height BEFORE shrink loop
+                    self.layout.available_height = target_h
+                    self.layout.max_height = target_h + self.document().documentMargin() * 2
+                    self.layout.reLayout()
+                    self.font_adjuster.shrink()
 
         if not QUIET_UI: logging.debug("=== FlowTextBlkItem.__init__ ===")
         if not QUIET_UI: logging.debug("  idx=%d pos=%s", idx, self.pos())
@@ -441,22 +458,25 @@ class FlowTextBlkItem(TextBlkItem):
             self.font_adjuster._internal_font_change = False
 
     def _font_adjuster_sync(self):
-        """Called by FontAutoAdjuster after font size changes to sync fontformat/blk.
-        
-        NOTE: Do NOT update self.fontformat.font_size or self._user_font_size here —
-        that should preserve the user's original font size choice.
-        """
+        """Called by FontAutoAdjuster after font size changes to sync fontformat/blk."""
         try:
             from utils.fontformat import pt2px
-            # Read from document default font (most reliable), not first fragment
             doc_font_pt = self.document().defaultFont().pointSizeF()
             if doc_font_pt > 0:
-                if not QUIET_UI:
+                if _is_log_target(self.blk):
                     _debug("  _font_adjuster_sync: doc_font=%.1fpt -> font_size=%.1fpx",
                            doc_font_pt, pt2px(doc_font_pt))
-                # Do NOT update self.fontformat.font_size — preserve user's choice
+                new_px = pt2px(doc_font_pt)
                 if self.blk is not None and self.blk.fontformat is not None:
-                    self.blk.fontformat.font_size = pt2px(doc_font_pt)
+                    old_blk = self.blk.fontformat.font_size
+                    self.blk.fontformat.font_size = new_px
+                old_view = self.fontformat.font_size if self.fontformat else 0
+                if self.fontformat is not None:
+                    self.fontformat.font_size = new_px
+                if _is_log_target(self.blk):
+                    LOGGER.debug("[FONTSIZE] FLOW _font_adjuster_sync: idx=%d blk %.1fpx -> %.1fpx view %.1fpx -> %.1fpx (doc=%.1fpt)",
+                        self.idx, old_blk if self.blk and self.blk.fontformat else 0, new_px,
+                        old_view, new_px, doc_font_pt)
         except Exception:
             pass
 
@@ -472,10 +492,10 @@ class FlowTextBlkItem(TextBlkItem):
         if not hasattr(self, 'font_adjuster'):
             return
 
-        # if not QUIET_UI:
-        #     _debug("_update_flow_layout: _auto_font_adjust=%s max_font_before=%.1f",
-        #                      self._auto_font_adjust,
-        #                      self.layout.max_font_size() if self.layout else 0)
+        # Reset _auto_font_adjust so shrink/grow can run on handle drag.
+        # Fix C may have set it to False during __init__ — that's only for
+        # the initial layout, not for subsequent user interactions.
+        self._auto_font_adjust = True
 
         # Guard: prevent _display_rect changes from docSizeChanged during flow updates
         self._updating_flow = True
@@ -539,11 +559,13 @@ class FlowTextBlkItem(TextBlkItem):
                         self.reshaped.emit(self)
                     except Exception:
                         pass
-                # Reset flag so next handle drag will auto-adjust,
-                # even after a previous manual font change.
+                if font_changed and _is_log_target(self.blk):
+                    LOGGER.debug("[FONTSIZE] FLOW _update_flow_layout: idx=%d font_changed, fontformat=%.1fpx blk.font=%.1fpx doc=%.1fpt",
+                        self.idx, self.fontformat.font_size if self.fontformat else 0,
+                        self.blk.fontformat.font_size if self.blk and self.blk.fontformat else 0,
+                        self.document().defaultFont().pointSizeF())
+                # Reset so next handle drag auto-adjusts
                 self._auto_font_adjust = True
-                # _debug("_update_flow_layout: DONE max_font_after=%.1f font_changed=%s",
-                #              self.layout.max_font_size() if self.layout else 0, font_changed)
 
             elif isinstance(self.layout, VerticalTextDocumentLayout):
                 # Vertical mode: reduce available_height when left handle moves right.
@@ -932,6 +954,11 @@ class FlowTextBlkItem(TextBlkItem):
         painter.restore()
 
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget) -> None:
+        if _is_log_target(self.blk):
+            LOGGER.debug("[FONTSIZE] FLOW paint: idx=%d doc_font=%.1fpt fontformat=%.1fpx size_pt=%.1fpt",
+                self.idx, self.document().defaultFont().pointSizeF(),
+                self.fontformat.font_size if self.fontformat else 0,
+                self.fontformat.size_pt if self.fontformat else 0)
         # Draw text via parent
         super().paint(painter, option, widget)
 

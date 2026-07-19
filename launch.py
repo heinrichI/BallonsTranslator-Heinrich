@@ -276,9 +276,9 @@ def main():
     if args.ldpi:
         shared.LDPI = args.ldpi
 
-    from ui.mainwindow import MainWindow
+    from ui.composition_root import CompositionRoot
 
-    ballontrans = MainWindow(app, config, open_dir=args.proj_dir, **vars(args))
+    ballontrans = CompositionRoot.build(config, app, open_dir=args.proj_dir, **vars(args))
     global BT
     BT = ballontrans
     BT.restart_signal.connect(restart)

@@ -428,8 +428,8 @@ class LamaInpainterMPE(InpainterBase):
                 with torch.autocast(device_type=self.device, dtype=precision):
                     img_inpainted_torch = self.model(img_torch, mask_torch, rel_pos, direct)
             except Exception as e:
-                self.logger.error(e)
-                self.logger.error(f'{precision} inference is not supported for this device, use fp32 instead.')
+                self.logger.warning(e)
+                self.logger.warning(f'{precision} inference is not supported for this device, use fp32 instead.')
                 # Convert model to float32 to fix type mismatch
                 if hasattr(self.model, 'float'):
                     self.model.float()

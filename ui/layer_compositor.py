@@ -28,13 +28,13 @@ class LayerCompositor:
             canvas: Canvas — графическая сцена
         """
         self.canvas = canvas
-        self.imgtrans_proj = canvas.imgtrans_proj
+        self.imgtrans_proj = canvas.imgtrans
 
         # Слои
         self.baseLayer = canvas.baseLayer
         self.inpaintLayer = canvas.inpaintLayer
         self.drawingLayer = canvas.drawingLayer
-        self.textLayer = canvas.textLayer
+        self.textLayer = canvas.text_layer
 
     def update_layers(self):
         """Обновляет слой inpaint из данных проекта."""
@@ -65,9 +65,8 @@ class LayerCompositor:
             return None
 
         # Сохраняем текущее состояние
-        old_scale = self.canvas.gv.transform().m11()
-        old_scroll_x = self.canvas.gv.horizontalScrollBar().value()
-        old_scroll_y = self.canvas.gv.verticalScrollBar().value()
+        old_scale = self.canvas.get_scale()
+        scroll_x, scroll_y = self.canvas.get_scroll_position()
 
         try:
             # Временно скрываем textLayer для рендера
@@ -75,7 +74,7 @@ class LayerCompositor:
             self.textLayer.hide()
 
             # Устанавливаем масштаб 1:1
-            self.canvas.gv.resetTransform()
+            self.canvas.reset_transform()
 
             # Рендерим сцену
             from qtpy.QtGui import QImage, QPainter
@@ -100,9 +99,8 @@ class LayerCompositor:
 
         finally:
             # Восстанавливаем масштаб и прокрутку
-            self.canvas.gv.scale(old_scale, old_scale)
-            self.canvas.gv.horizontalScrollBar().setValue(old_scroll_x)
-            self.canvas.gv.verticalScrollBar().setValue(old_scroll_y)
+            self.canvas.scale_to(old_scale)
+            self.canvas.set_scroll_position(scroll_x, scroll_y)
 
     def set_mask_transparency(self, value: int):
         """

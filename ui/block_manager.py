@@ -55,7 +55,7 @@ class BlockManager(QObject):
             The added TextBlkItem
         """
         self.textblk_item_list.append(textblk_item)
-        textblk_item.setParentItem(self.canvas.textLayer)
+        self.canvas.add_item_to_text_layer(textblk_item)
 
         # Wire signals - these will be connected to the appropriate handlers
         # by the SceneTextManager that owns this BlockManager
@@ -95,7 +95,7 @@ class BlockManager(QObject):
         self.canvas.block_selection_signal = True
         for blkitem, p_widget in zip(blkitem_list, p_widget_list):
             self.textblk_item_list.insert(blkitem.idx, blkitem)
-            blkitem.setParentItem(self.canvas.textLayer)
+            self.canvas.add_item_to_text_layer(blkitem)
             self.pairwidget_list.insert(p_widget.idx, p_widget)
             self.textEditList.insertPairWidget(p_widget, p_widget.idx)
         self.update_textblk_item_idx()

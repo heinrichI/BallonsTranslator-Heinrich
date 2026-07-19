@@ -594,12 +594,15 @@ class TestAutoFontAdjustFlag:
     """
 
     def test_auto_font_adjust_survives_shrink(self, scene):
-        """_auto_font_adjust stays True after _auto_shrink_font runs."""
+        """_auto_font_adjust stays True after _auto_shrink_font runs (large font)."""
+        # Use font_size > 50px so Fix C guard doesn't disable auto-adjust
         text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
-        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=120.0)
         item = FlowTextBlkItem(blk, idx=0)
         scene.addItem(item)
         item.setPlainText(text)
+        # _update_flow_layout resets _auto_font_adjust to True (line 566)
+        item._update_flow_layout()
 
         assert item._auto_font_adjust is True
         item.font_adjuster.shrink()
@@ -609,11 +612,13 @@ class TestAutoFontAdjustFlag:
 
     def test_auto_font_adjust_survives_grow(self, scene):
         """_auto_font_adjust stays True after _auto_grow_font runs."""
+        # Use font_size > 50px so Fix C guard doesn't disable auto-adjust
         text = "Hello"
-        blk = _make_blk(xyxy=(0, 0, 400, 300), text=text, font_size=10.0)
+        blk = _make_blk(xyxy=(0, 0, 400, 300), text=text, font_size=80.0)
         item = FlowTextBlkItem(blk, idx=0)
         scene.addItem(item)
         item.setPlainText(text)
+        item._update_flow_layout()
 
         assert item._auto_font_adjust is True
         item.font_adjuster.grow()
@@ -623,16 +628,30 @@ class TestAutoFontAdjustFlag:
 
     def test_auto_font_adjust_survives_update_flow_layout(self, scene):
         """_auto_font_adjust stays True after full _update_flow_layout with shrink."""
+        # Use font_size > 50px so Fix C guard doesn't disable auto-adjust
         text = "БЫСТРЕЕ---БЫСТРЕЕ---БЫСТРЕЕ-- БЫСТРЕЕ-ПОКА ДИАНА ПОКРЫВАЕТ ЗАГАДОЧНУЮ КНИГУ"
-        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=67.5)
+        blk = _make_blk(xyxy=(0, 0, 305, 92), text=text, font_size=120.0)
         item = FlowTextBlkItem(blk, idx=0)
         scene.addItem(item)
         item.setPlainText(text)
+        item._update_flow_layout()
 
         assert item._auto_font_adjust is True
         item._update_flow_layout()
         assert item._auto_font_adjust is True, (
             "_auto_font_adjust was reset to False by _update_flow_layout"
+        )
+
+    def test_low_font_disables_auto_adjust(self, scene):
+        """Block with font_size <= 50px gets _auto_font_adjust=False after init (Fix C)."""
+        text = "Hello world"
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text=text, font_size=14.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        item.setPlainText("Hello world")
+
+        assert item._auto_font_adjust is False, (
+            "Font <= 50px should disable auto-adjust to prevent grow re-inflation"
         )
 
     def test_manual_font_change_disables_auto_adjust(self, scene):
@@ -641,10 +660,11 @@ class TestAutoFontAdjustFlag:
         This prevents grow from overriding the user's font choice.
         Internal shrink/grow use _internal_font_change=True to skip this.
         """
-        blk = _make_blk(xyxy=(0, 0, 400, 200), text="Hello world", font_size=14.0)
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text="Hello world", font_size=80.0)
         item = FlowTextBlkItem(blk, idx=0)
         scene.addItem(item)
         item.setPlainText("Hello world")
+        item._update_flow_layout()
 
         assert item._auto_font_adjust is True
         item.setFontSize(20.0)  # Simulate user changing font via toolbar
@@ -677,6 +697,7 @@ class TestBlockResizeShrinkGrow:
         scene.addItem(item)
         item.setPlainText(text)
         item._update_flow_layout()
+        item._auto_font_adjust = True  # Ensure auto-adjust is active
 
         font_before = item.layout.max_font_size()
         width_before = item.layout.shrink_width
@@ -698,10 +719,14 @@ class TestBlockResizeShrinkGrow:
         item = FlowTextBlkItem(blk, idx=0)
         scene.addItem(item)
         item.setPlainText(text)
+        item._update_flow_layout()
 
         # Shrink first
         self._resize_right(item, 200)
         font_after_shrink = item.layout.max_font_size()
+
+        # Re-enable auto-adjust before widen (simulates user interaction resetting flag)
+        item._auto_font_adjust = True
 
         # Now widen back to original
         self._resize_right(item, 305)
@@ -725,6 +750,7 @@ class TestBlockResizeShrinkGrow:
 
         # Shrink to 200px, then back to 305px
         self._resize_right(item, 200)
+        item._auto_font_adjust = True  # Re-enable before widen
         self._resize_right(item, 305)
         font_recovered = item.layout.max_font_size()
 
@@ -741,9 +767,11 @@ class TestBlockResizeShrinkGrow:
         item = FlowTextBlkItem(blk, idx=0)
         scene.addItem(item)
         item.setPlainText(text)
+        item._update_flow_layout()
 
         fonts = []
         for w in [200, 305, 200, 305]:
+            item._auto_font_adjust = True  # Re-enable before each resize
             self._resize_right(item, w)
             fonts.append(item.layout.max_font_size())
 
@@ -1349,6 +1377,39 @@ class TestProjectLoadFontPreservation:
         fmt2 = item2.get_fontformat()
         assert abs(fmt2.font_size - saved_font_size) < 1.0, (
             f"Font size lost after save/load: {fmt2.font_size:.1f}px, expected {saved_font_size:.1f}px"
+        )
+
+    def test_font_size_preserved_across_page_switch(self, scene):
+        """User-set font size must be preserved when block is re-created (page switch)."""
+        from utils.fontformat import pt2px
+        blk = _make_blk(xyxy=(0, 0, 200, 100), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # User sets font to 10pt
+        item.setFontSize(10.0)
+        user_font_px = pt2px(10.0)
+
+        # Verify font was set
+        fmt = item.get_fontformat()
+        assert abs(fmt.font_size - user_font_px) < 1.0, (
+            f"Font not set: {fmt.font_size:.1f}px, expected {user_font_px:.1f}px"
+        )
+
+        # Simulate page switch: destroy old item, create new one from saved data
+        scene.removeItem(item)
+        blk2 = _make_blk(xyxy=(0, 0, 200, 100), text="Test", font_size=10.0)
+        blk2.fontformat.font_size = user_font_px  # saved from user's choice
+        blk2.left_points = [[p.x(), p.y()] for p in item._left_points]
+        blk2.right_points = [[p.x(), p.y()] for p in item._right_points]
+
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+
+        # Font size must still be 10pt, not inflated by binary search
+        fmt2 = item2.get_fontformat()
+        assert abs(fmt2.font_size - user_font_px) < 1.0, (
+            f"Font lost after page switch: {fmt2.font_size:.1f}px, expected {user_font_px:.1f}px (10pt)"
         )
 
 

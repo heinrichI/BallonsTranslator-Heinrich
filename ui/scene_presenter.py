@@ -9,11 +9,12 @@ Pattern:
 """
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Any
 
 from utils.logger import logger as LOGGER
 from utils.textblock import TextBlock
 from .view_interfaces import ISceneView
+from .event_bus import EventBus, Events
 
 LOGGER = logging.getLogger('BallonTranslator')
 
@@ -26,19 +27,46 @@ class ScenePresenter:
     - Связывает Model (TextBlock[]) и View Interface (ISceneView)
     - Обрабатывает события от View и обновляет Model
     - Загружает данные из Model и говорит View показать
+    - Предоставляет доступ к DI сервисам (UndoManager, LayerManager)
+    - Интегрирован с EventBus для декомпозиции связей
 
     Правило: Presenter зависит от View Interface, не от конкретного View.
     """
 
-    def __init__(self, model_list: List[TextBlock], view: ISceneView):
+    def __init__(self, model_list: List[TextBlock], view: ISceneView,
+                 undo_manager=None, layer_manager=None):
         """
         Args:
             model_list: List[TextBlock] — список блоков модели
             view: ISceneView — интерфейс View для отображения
+            undo_manager: IUndoManager — менеджер undo/redo (опционально)
+            layer_manager: ILayerManager — менеджер слоёв (опционально)
         """
         self._model_list = model_list
         self._view = view
+        self._undo_mgr = undo_manager
+        self._layer_mgr = layer_manager
         self._connected = False
+        self._event_bus = EventBus.get_instance()
+        self._subscribe_to_events()
+
+    def _subscribe_to_events(self):
+        """Подписывается на события EventBus."""
+        self._event_bus.subscribe(Events.DELETE_TEXT_BLOCKS, self._on_delete_blocks)
+        self._event_bus.subscribe(Events.COPY_TEXT_BLOCKS, self._on_copy_blocks)
+        self._event_bus.subscribe(Events.PASTE_TEXT_BLOCKS, self._on_paste_blocks)
+
+    def _on_delete_blocks(self, data=None):
+        """Обработчик события удаления блоков."""
+        LOGGER.debug("[ScenePresenter] delete_blocks event received")
+
+    def _on_copy_blocks(self, data=None):
+        """Обработчик события копирования блоков."""
+        LOGGER.debug("[ScenePresenter] copy_blocks event received")
+
+    def _on_paste_blocks(self, data=None):
+        """Обработчик события вставки блоков."""
+        LOGGER.debug("[ScenePresenter] paste_blocks event received")
 
     def connect_signals(self):
         """Подключает сигналы View к обработчикам Presenter."""
@@ -63,6 +91,22 @@ class ScenePresenter:
                 pass
 
         self._connected = False
+
+    # ── DI Service Access ──────────────────────────────────────
+
+    def push_undo_command(self, command: Any, update_pushed_step: bool = True):
+        """Добавляет команду в стек undo через DI UndoManager."""
+        if self._undo_mgr:
+            self._undo_mgr.push_command(command)
+        elif hasattr(self._view, 'push_undo_command'):
+            self._view.push_undo_command(command, update_pushed_step)
+
+    def add_item_to_text_layer(self, item: Any):
+        """Добавляет элемент на текстовый слой через DI LayerManager."""
+        if self._layer_mgr:
+            self._layer_mgr.add_item_to_text_layer(item)
+        elif hasattr(self._view, 'add_item_to_text_layer'):
+            self._view.add_item_to_text_layer(item)
 
     # ── View → Model (события от View) ──────────────────────
 

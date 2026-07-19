@@ -25,6 +25,7 @@ from .page_search_widget import PageSearchWidget
 from utils import shared as C
 from utils.config import pcfg
 from utils.proj_imgtrans import ProjImgTrans
+from .event_bus import EventBus, Events
 
 CANVAS_SCALE_MAX = 10.0
 CANVAS_SCALE_MIN = 0.01
@@ -197,8 +198,13 @@ class Canvas(QGraphicsScene):
     incanvas_selection_changed = Signal()
     switch_text_item = Signal(int, QKeyEvent)
 
-    def __init__(self, parent=None):
+    def __init__(self, undo_manager=None, layer_manager=None, scale_manager=None,
+                 clipboard_service=None, parent=None):
         super().__init__(parent)
+        self._undo_mgr = undo_manager
+        self._layer_mgr = layer_manager
+        self._scale_mgr = scale_manager
+        self._clipboard_svc = clipboard_service
         self.scale_factor = 1.
         self.text_transparency = 0
         self.textblock_mode = False
@@ -273,7 +279,11 @@ class Canvas(QGraphicsScene):
         self.txtblkShapeControl.setParentItem(self.baseLayer)
 
         self.scalefactor_changed.connect(self.onScaleFactorChanged)
-        self.selectionChanged.connect(self.on_selection_changed)     
+        self.selectionChanged.connect(self.on_selection_changed)
+
+        # Subscribe to EventBus events
+        self._event_bus = EventBus.get_instance()
+        self._event_bus.subscribe(Events.TRANSPARENCY_CHANGED, self._on_transparency_changed)     
 
         self.stroke_img_item: StrokeImgItem = None
         self.erase_img_key = None
@@ -286,8 +296,6 @@ class Canvas(QGraphicsScene):
         self.saved_drawundo_step = 0
         self.num_pushed_textstep = 0
         self.num_pushed_drawstep = 0
-
-        self.clipboard_blks: List[TextBlock] = []
 
         self.drop_folder: str = None
         self.block_selection_signal = False
@@ -404,7 +412,7 @@ class Canvas(QGraphicsScene):
         return result
     
     def updateLayers(self):
-        
+
         if not self.imgtrans_proj.img_valid:
             return
         
@@ -481,6 +489,7 @@ class Canvas(QGraphicsScene):
         self.scaleFactorLabel.setText(f'{self.scale_factor*100:2.0f}%')
         self.scaleFactorLabel.raise_()
         self.scaleFactorLabel.startFadeAnimation()
+        EventBus.get_instance().publish(Events.SCALE_CHANGED, self.scale_factor)
 
     def on_selection_changed(self):
         if self.txtblkShapeControl.isVisible():
@@ -489,6 +498,16 @@ class Canvas(QGraphicsScene):
                 blk_item.endEdit()
         if self.hasFocus() and not self.block_selection_signal:
             self.incanvas_selection_changed.emit()
+            EventBus.get_instance().publish(Events.SELECTION_CHANGED, self.selected_text_items())
+
+    def _on_transparency_changed(self, data: dict):
+        """Обработчик события изменения прозрачности через EventBus."""
+        layer = data.get('layer')
+        value = data.get('value', 0)
+        if layer == 'original':
+            self.setOriginalTransparency(value)
+        elif layer == 'text':
+            self.setTextLayerTransparency(value)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
@@ -882,6 +901,11 @@ class Canvas(QGraphicsScene):
         if self.textEditMode():
             if p is None:
                 p = self.scene_cursor_pos()
+            if self._clipboard_svc and self._clipboard_svc.has_blocks():
+                blocks = self._clipboard_svc.paste_blocks(p)
+                if blocks:
+                    self.paste_textblks.emit(p)
+                    return
             if self.have_selected_blkitem:
                 self.paste2selected_textitems.emit()
             else:
@@ -890,6 +914,11 @@ class Canvas(QGraphicsScene):
     def on_copy(self):
         if self.textEditMode():
             if self.have_selected_blkitem:
+                if self._clipboard_svc:
+                    selected = self.selected_text_items()
+                    from .textitem import TextBlock
+                    blocks = [blk.get_textblock() for blk in selected if hasattr(blk, 'get_textblock')]
+                    self._clipboard_svc.copy_blocks(blocks)
                 self.copy_textblks.emit()
 
     def hide_rubber_band(self):
@@ -938,11 +967,18 @@ class Canvas(QGraphicsScene):
         return None
 
     def push_undo_command(self, command: QUndoCommand, update_pushed_step=True):
+        """Original push_undo_command — delegates to DI proxy."""
+        if self._undo_mgr:
+            self._undo_mgr.push_command(command)
+            self.setProjSaveState(True)
+            logger.debug("[SAVE] push_undo_command via _undo_mgr (v2): projstate_unsaved=True")
+            return
         if self.textEditMode():
             self.push_text_command(command, update_pushed_step)
         elif self.drawMode():
             self.push_draw_command(command, update_pushed_step)
         else:
+            logger.debug("[SAVE] push_undo_command (v2): no mode match, command dropped")
             return
 
     def push_draw_command(self, command: QUndoCommand, update_pushed_step=True):
@@ -981,49 +1017,6 @@ class Canvas(QGraphicsScene):
             self.num_pushed_textstep -= 1
         self.text_undo_stack.undo()
 
-    def redo(self):
-        if self.textEditMode():
-            undo_stack = self.text_undo_stack
-            self.num_pushed_textstep += 1
-            self.on_textstack_changed()
-        elif self.drawMode():
-            undo_stack = self.draw_undo_stack
-            self.num_pushed_drawstep += 1
-            self.on_drawstack_changed()
-        else:
-            return
-        if undo_stack is not None:
-            undo_stack.redo()
-            if undo_stack == self.text_undo_stack:
-                self.txtblkShapeControl.updateBoundingRect()
-
-    def undo(self):
-        if self.textEditMode():
-            undo_stack = self.text_undo_stack
-            if self.num_pushed_textstep > 0:
-                self.num_pushed_textstep -= 1
-            self.on_textstack_changed()
-        elif self.drawMode():
-            undo_stack = self.draw_undo_stack
-            if self.num_pushed_drawstep > 0:
-                self.num_pushed_drawstep -= 1
-            self.on_drawstack_changed()
-        else:
-            return
-        if undo_stack is not None:
-            undo_stack.undo()
-            if undo_stack == self.text_undo_stack:
-                self.txtblkShapeControl.updateBoundingRect()
-
-    def clear_undostack(self, update_saved_step=False):
-        if update_saved_step:
-            self.saved_drawundo_step = 0
-            self.saved_textundo_step = 0
-            self.num_pushed_textstep = 0
-            self.num_pushed_drawstep = 0
-        self.draw_undo_stack.clear()
-        self.text_undo_stack.clear()
-
     def clear_text_stack(self):
         self.num_pushed_textstep = 0
         self.text_undo_stack.clear()
@@ -1046,3 +1039,194 @@ class Canvas(QGraphicsScene):
         self.blockSignals(True)
         self.text_undo_stack.blockSignals(True)
         self.draw_undo_stack.blockSignals(True)
+
+    # ── DI Proxy Methods (для обратной совместимости) ──────────────────
+
+    def undo(self):
+        """Отмена действия с делегированием в DI UndoManager."""
+        if self._undo_mgr:
+            self._undo_mgr.undo()
+            return
+        if self.textEditMode():
+            undo_stack = self.text_undo_stack
+            if self.num_pushed_textstep > 0:
+                self.num_pushed_textstep -= 1
+            self.on_textstack_changed()
+        elif self.drawMode():
+            undo_stack = self.draw_undo_stack
+            if self.num_pushed_drawstep > 0:
+                self.num_pushed_drawstep -= 1
+            self.on_drawstack_changed()
+        else:
+            return
+        if undo_stack is not None:
+            undo_stack.undo()
+            if undo_stack == self.text_undo_stack:
+                self.txtblkShapeControl.updateBoundingRect()
+
+    def redo(self):
+        """Повтор действия с делегированием в DI UndoManager."""
+        if self._undo_mgr:
+            self._undo_mgr.redo()
+            return
+        if self.textEditMode():
+            undo_stack = self.text_undo_stack
+            self.num_pushed_textstep += 1
+            self.on_textstack_changed()
+        elif self.drawMode():
+            undo_stack = self.draw_undo_stack
+            self.num_pushed_drawstep += 1
+            self.on_drawstack_changed()
+        else:
+            return
+        if undo_stack is not None:
+            undo_stack.redo()
+            if undo_stack == self.text_undo_stack:
+                self.txtblkShapeControl.updateBoundingRect()
+
+    def push_undo_command(self, command: QUndoCommand, update_pushed_step=True):
+        """Добавление команды в стек с делегированием в DI UndoManager."""
+        if self._undo_mgr:
+            self._undo_mgr.push_command(command)
+            self.setProjSaveState(True)
+            logger.debug("[SAVE] push_undo_command via _undo_mgr: projstate_unsaved=True")
+            return
+        if self.textEditMode():
+            self.push_text_command(command, update_pushed_step)
+        elif self.drawMode():
+            self.push_draw_command(command, update_pushed_step)
+        else:
+            logger.debug("[SAVE] push_undo_command: no mode match, command dropped")
+            return
+
+    def clear_undostack(self, update_saved_step=False):
+        """Очистка стека с делегированием в DI UndoManager."""
+        if self._undo_mgr:
+            self._undo_mgr.clear()
+            if update_saved_step:
+                self.update_saved_undostep()
+            return
+        if update_saved_step:
+            self.saved_drawundo_step = 0
+            self.saved_textundo_step = 0
+            self.num_pushed_textstep = 0
+            self.num_pushed_drawstep = 0
+        self.draw_undo_stack.clear()
+        self.text_undo_stack.clear()
+
+    # ── Facade API (для слабой связанности) ──────────────────
+
+    def ensure_visible(self, item):
+        """Facade: делает виджет видимым на сцене."""
+        self.gv.ensureVisible(item)
+
+    def set_text_layer_visible(self, visible: bool):
+        """Facade: управляет видимостью текстового слоя."""
+        if visible:
+            self.textLayer.show()
+        else:
+            self.textLayer.hide()
+
+    def get_image_array(self):
+        """Facade: возвращает numpy массив изображения."""
+        return self.imgtrans_proj.img_array
+
+    def get_inpainted_array(self):
+        """Facade: возвращает numpy массив инпейнта."""
+        return self.imgtrans_proj.inpainted_array
+
+    def get_mask_array(self):
+        """Facade: возвращает numpy массив маски."""
+        return self.imgtrans_proj.mask_array
+
+    def set_drag_mode(self, mode):
+        """Facade: устанавливает режим перетаскивания."""
+        self.gv.setDragMode(mode)
+
+    def get_scale_factor(self) -> float:
+        """Facade: возвращает коэффициент масштабирования."""
+        return self.gv.transform().m11()
+
+    def reset_transform(self):
+        """Facade: сбрасывает трансформацию."""
+        self.gv.resetTransform()
+
+    def set_scene_rect(self, rect):
+        """Facade: устанавливает прямоугольник сцены."""
+        self.setSceneRect(rect)
+
+    def add_item_to_text_layer(self, item):
+        """Facade: добавляет элемент на текстовый слой."""
+        item.setParentItem(self.textLayer)
+
+    def remove_item(self, item):
+        """Facade: удаляет элемент со сцены."""
+        self.removeItem(item)
+
+    def set_cursor(self, cursor):
+        """Facade: устанавливает курсор."""
+        self.gv.setCursor(cursor)
+
+    def is_ctrl_pressed(self) -> bool:
+        """Facade: проверяет, нажата ли Ctrl."""
+        return self.gv.ctrl_pressed
+
+    def is_visible(self) -> bool:
+        """Facade: проверяет видимость."""
+        return self.gv.isVisible()
+
+    def scale_up(self):
+        """Facade: увеличение масштаба."""
+        self.gv.scale_up_signal.emit()
+
+    def scale_down(self):
+        """Facade: уменьшение масштаба."""
+        self.gv.scale_down_signal.emit()
+
+    def get_scroll_position(self):
+        """Facade: возвращает позицию прокрутки."""
+        return self.gv.horizontalScrollBar().value(), self.gv.verticalScrollBar().value()
+
+    def set_scroll_position(self, x: int, y: int):
+        """Facade: устанавливает позицию прокрутки."""
+        self.gv.horizontalScrollBar().setValue(x)
+        self.gv.verticalScrollBar().setValue(y)
+
+    def scale_to(self, factor: float):
+        """Facade: устанавливает масштаб."""
+        self.gv.scale(factor, factor)
+
+    def get_scale(self) -> float:
+        """Facade: возвращает текущий масштаб."""
+        return self.gv.transform().m11()
+
+    @property
+    def hide_canvas_signal(self):
+        """Facade: сигнал скрытия Canvas."""
+        return self.gv.hide_canvas
+
+    @property
+    def text_layer(self):
+        """Facade: возвращает текстовый слой."""
+        return self.textLayer
+
+    def is_image_valid(self) -> bool:
+        """Facade: проверяет валидность изображения."""
+        return self.imgtrans_proj.img_valid if self.imgtrans_proj else False
+
+    def get_img_array_region(self, x1: int, y1: int, x2: int, y2: int):
+        """Facade: возвращает регион изображения."""
+        return self.imgtrans_proj.img_array[y1:y2, x1:x2]
+
+    def get_inpainted_region(self, x1: int, y1: int, x2: int, y2: int):
+        """Facade: возвращает регион инпейнта."""
+        return self.imgtrans_proj.inpainted_array[y1:y2, x1:x2]
+
+    def get_mask_region(self, x1: int, y1: int, x2: int, y2: int):
+        """Facade: возвращает регион маски."""
+        return self.imgtrans_proj.mask_array[y1:y2, x1:x2]
+
+    @property
+    def imgtrans(self):
+        """Facade: возвращает ссылку на ProjImgTrans."""
+        return self.imgtrans_proj

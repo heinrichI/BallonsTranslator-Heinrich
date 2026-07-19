@@ -120,6 +120,12 @@ class MainWindow(mainwindow_cls):
         FramelessMoveResize.toggleMaxState(self)
         self.setAcceptDrops(True)
 
+        # Создаём MainPresenter
+        from .main_presenter import MainPresenter
+        from .event_bus import EventBus
+        event_bus = EventBus.get_instance()
+        self._presenter = MainPresenter(self.imgtrans_proj, self, event_bus)
+
         if open_dir != '' and osp.exists(open_dir):
             self.OpenProj(open_dir)
         elif pcfg.open_recent_on_startup:
@@ -137,6 +143,10 @@ class MainWindow(mainwindow_cls):
             self.showMaximized()
 
         # self.AbortSpellCheck = False
+
+    @property
+    def presenter(self):
+        return self._presenter
 
     def setStyleSheet(self, styleSheet: str) -> None:
         self.imgtrans_progress_msgbox.setStyleSheet(styleSheet)
@@ -214,7 +224,7 @@ class MainWindow(mainwindow_cls):
         # set up canvas
         SW.canvas = self.canvas = Canvas()
         self.canvas.imgtrans_proj = self.imgtrans_proj
-        self.canvas.gv.hide_canvas.connect(self.onHideCanvas)
+        self.canvas.hide_canvas_signal.connect(self.onHideCanvas)
         self.canvas.proj_savestate_changed.connect(self.on_savestate_changed)
         self.canvas.textstack_changed.connect(self.on_textstack_changed)
         self.canvas.run_blktrans.connect(self.on_run_blktrans)
@@ -224,8 +234,8 @@ class MainWindow(mainwindow_cls):
         self.canvas.copy_src_signal.connect(self.on_copy_src)
         self.canvas.paste_src_signal.connect(self.on_paste_src)
 
-        self.bottomBar.originalSlider.valueChanged.connect(self.canvas.setOriginalTransparencyBySlider)
-        self.bottomBar.textlayerSlider.valueChanged.connect(self.canvas.setTextLayerTransparencyBySlider)
+        self.bottomBar.originalSlider.valueChanged.connect(self._on_transparency_slider_changed)
+        self.bottomBar.textlayerSlider.valueChanged.connect(self._on_transparency_slider_changed)
         
         self.drawingPanel = DrawingPanel(self.canvas, self.configPanel.inpaint_config_panel)
         self.textPanel = TextPanel(self.app)
@@ -491,13 +501,17 @@ class MainWindow(mainwindow_cls):
         self.retranslateUI()
 
     def OpenProj(self, proj_path: str):
-        if osp.isdir(proj_path):
-            self.openDir(proj_path)
+        if hasattr(self, '_presenter'):
+            self._presenter.open_project(proj_path)
         else:
-            self.openJsonProj(proj_path)
-        
-        if pcfg.let_textstyle_indep_flag and not shared.HEADLESS:
-            self.load_textstyle_from_proj_dir(from_proj=True)
+            # Fallback для обратной совместимости
+            if osp.isdir(proj_path):
+                self.openDir(proj_path)
+            else:
+                self.openJsonProj(proj_path)
+
+            if pcfg.let_textstyle_indep_flag and not shared.HEADLESS:
+                self.load_textstyle_from_proj_dir(from_proj=True)
 
     def load_textstyle_from_proj_dir(self, from_proj=False):
         if from_proj:
@@ -524,8 +538,8 @@ class MainWindow(mainwindow_cls):
             self.imgtrans_proj.load(directory)
             self.st_manager.clearSceneTextitems()
             self.titleBar.setTitleContent(osp.basename(directory))
-            self.updatePageList()
             self.opening_dir = False
+            self.updatePageList()
         except Exception as e:
             self.opening_dir = False
             create_error_dialog(e, self.tr('Failed to load project ') + directory)
@@ -542,6 +556,7 @@ class MainWindow(mainwindow_cls):
             self.imgtrans_proj.load_from_json(json_path)
             self.st_manager.clearSceneTextitems()
             self.leftBar.updateRecentProjList(self.imgtrans_proj.proj_path)
+            self.opening_dir = False
             self.updatePageList()
             self.titleBar.setTitleContent(osp.basename(self.imgtrans_proj.proj_path))
             self.opening_dir = False
@@ -612,10 +627,27 @@ class MainWindow(mainwindow_cls):
     def save_config(self):
         save_config()
 
+    def _on_transparency_slider_changed(self, value: int):
+        """Обработчик изменения прозрачности — публикует событие через EventBus."""
+        from .event_bus import EventBus, Events
+        sender = self.sender()
+        if sender == self.bottomBar.originalSlider:
+            layer = "original"
+        elif sender == self.bottomBar.textlayerSlider:
+            layer = "text"
+        else:
+            return
+        EventBus.get_instance().publish(Events.TRANSPARENCY_CHANGED, {
+            'layer': layer,
+            'value': value / 100.0
+        })
+
     def onHideCanvas(self):
         self.canvas.clearToolStates()
 
     def conditional_save(self, keep_exist_as_backup=False):
+        LOGGER.debug("[SAVE] conditional_save: projstate_unsaved=%s opening_dir=%s save_on_page_changed=%s",
+            self.canvas.projstate_unsaved, self.opening_dir, self.save_on_page_changed)
         if self.canvas.projstate_unsaved and not self.opening_dir:
             update_scene_text = save_proj = self.canvas.text_change_unsaved()
             save_rst_only = not self.canvas.draw_change_unsaved()
@@ -627,6 +659,9 @@ class MainWindow(mainwindow_cls):
     def pageListCurrentItemChanged(self):
         item = self.pageList.currentItem()
         self.page_changing = True
+        was_opening_dir = self.opening_dir
+        LOGGER.debug("[SAVE] pageListCurrentItemChanged: projstate_unsaved=%s opening_dir=%s",
+            self.canvas.projstate_unsaved, self.opening_dir)
         if item is not None:
             if self.save_on_page_changed:
                 self.conditional_save()
@@ -637,8 +672,18 @@ class MainWindow(mainwindow_cls):
             self.titleBar.setTitleContent(page_name=self.imgtrans_proj.current_img)
             self.module_manager.handle_page_changed()
             self.drawingPanel.handle_page_changed()
-            
+            # Force save after first page load — opening_dir blocked conditional_save
+            if was_opening_dir and not self.opening_dir:
+                from qtpy.QtCore import QTimer
+                QTimer.singleShot(0, self._force_save_after_open)
+
         self.page_changing = False
+
+    def _force_save_after_open(self):
+        """Save after opening_dir was True during first page load."""
+        self.canvas.setProjSaveState(True)
+        self.conditional_save()
+        LOGGER.debug("[SAVE] _force_save_after_open: saved after initial load")
 
     def setupShortcuts(self):
         self.titleBar.nextpage_trigger.connect(self.shortcutNext) 
@@ -673,9 +718,9 @@ class MainWindow(mainwindow_cls):
         shortcutTextblock = QShortcut(QKeySequence("W"), self)
         shortcutTextblock.activated.connect(self.shortcutTextblock)
         shortcutZoomIn = QShortcut(QKeySequence.StandardKey.ZoomIn, self)
-        shortcutZoomIn.activated.connect(self.canvas.gv.scale_up_signal)
+        shortcutZoomIn.activated.connect(self.canvas.scale_up)
         shortcutZoomOut = QShortcut(QKeySequence.StandardKey.ZoomOut, self)
-        shortcutZoomOut.activated.connect(self.canvas.gv.scale_down_signal)
+        shortcutZoomOut.activated.connect(self.canvas.scale_down)
         shortcutCtrlD = QShortcut(QKeySequence("Ctrl+D"), self)
         shortcutCtrlD.activated.connect(self.shortcutCtrlD)
         shortcutSpace = QShortcut(QKeySequence("Space"), self)
@@ -779,7 +824,7 @@ class MainWindow(mainwindow_cls):
             self.textPanel.formatpanel.formatBtnGroup.boldBtn.click()
 
     def shortcutDelete(self):
-        if self.canvas.gv.isVisible():
+        if self.canvas.is_visible():
             self.canvas.delete_textblks.emit(1)
 
     def shortcutItalic(self):
@@ -797,7 +842,7 @@ class MainWindow(mainwindow_cls):
         self.canvas.undo()
 
     def on_page_search(self):
-        if self.canvas.gv.isVisible():
+        if self.canvas.is_visible():
             fo = self.app.focusObject()
             sel_text = ''
             tgt_edit = None
@@ -822,7 +867,7 @@ class MainWindow(mainwindow_cls):
             self.canvas.search_widget.setCurrentEditor(tgt_edit)
 
     def on_global_search(self):
-        if self.canvas.gv.isVisible():
+        if self.canvas.is_visible():
             if not self.leftBar.globalSearchChecker.isChecked():
                 self.leftBar.globalSearchChecker.click()
             fo = self.app.focusObject()
@@ -923,10 +968,15 @@ class MainWindow(mainwindow_cls):
         self.st_manager.showTextblkItemRect(mode)
 
     def manual_save(self):
-        if self.leftBar.imgTransChecker.isChecked()\
-            and self.imgtrans_proj.directory is not None:
-            LOGGER.debug('Manually saving...')
-            self.saveCurrentPage(update_scene_text=True, save_proj=True, restore_interface=True, save_rst_only=False)
+        if hasattr(self, '_presenter'):
+            self._presenter.manual_save()
+        else:
+            # Fallback
+            if self.leftBar.imgTransChecker.isChecked()\
+                and self.imgtrans_proj.directory is not None:
+                LOGGER.debug('Manually saving...')
+                self.saveCurrentPage(update_scene_text=True, save_proj=True,
+                                   restore_interface=True, save_rst_only=False)
 
     def saveCurrentPage(self, update_scene_text=True, save_proj=True, restore_interface=False, save_rst_only=False, keep_exist_as_backup=False):
         
