@@ -408,6 +408,7 @@ class SceneTextManager(QObject):
         # The block_manager now owns these lists
         self.textblk_item_list = self.block_manager.textblk_item_list
         self.pairwidget_list = self.block_manager.pairwidget_list
+        self.textEditList.pairwidget_list = self.block_manager.pairwidget_list
 
         # Initialize EventBus and subscribe to events
         self._event_bus = EventBus.get_instance()
@@ -429,6 +430,7 @@ class SceneTextManager(QObject):
         """Proxy: добавляет команду в стек undo через DI UndoManager."""
         if self._undo_mgr:
             self._undo_mgr.push_command(command)
+            self.canvas.setProjSaveState(True)
         else:
             self.canvas.push_undo_command(command, update_pushed_step)
 

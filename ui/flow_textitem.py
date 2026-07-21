@@ -460,23 +460,9 @@ class FlowTextBlkItem(TextBlkItem):
     def _font_adjuster_sync(self):
         """Called by FontAutoAdjuster after font size changes to sync fontformat/blk."""
         try:
-            from utils.fontformat import pt2px
             doc_font_pt = self.document().defaultFont().pointSizeF()
             if doc_font_pt > 0:
-                if _is_log_target(self.blk):
-                    _debug("  _font_adjuster_sync: doc_font=%.1fpt -> font_size=%.1fpx",
-                           doc_font_pt, pt2px(doc_font_pt))
-                new_px = pt2px(doc_font_pt)
-                if self.blk is not None and self.blk.fontformat is not None:
-                    old_blk = self.blk.fontformat.font_size
-                    self.blk.fontformat.font_size = new_px
-                old_view = self.fontformat.font_size if self.fontformat else 0
-                if self.fontformat is not None:
-                    self.fontformat.font_size = new_px
-                if _is_log_target(self.blk):
-                    LOGGER.debug("[FONTSIZE] FLOW _font_adjuster_sync: idx=%d blk %.1fpx -> %.1fpx view %.1fpx -> %.1fpx (doc=%.1fpt)",
-                        self.idx, old_blk if self.blk and self.blk.fontformat else 0, new_px,
-                        old_view, new_px, doc_font_pt)
+                self.font_size_mgr.set(doc_font_pt, source="auto_layout")
         except Exception:
             pass
 
@@ -491,11 +477,6 @@ class FlowTextBlkItem(TextBlkItem):
         # Guard: font_adjuster not yet created during super().__init__() → setVertical()
         if not hasattr(self, 'font_adjuster'):
             return
-
-        # Reset _auto_font_adjust so shrink/grow can run on handle drag.
-        # Fix C may have set it to False during __init__ — that's only for
-        # the initial layout, not for subsequent user interactions.
-        self._auto_font_adjust = True
 
         # Guard: prevent _display_rect changes from docSizeChanged during flow updates
         self._updating_flow = True

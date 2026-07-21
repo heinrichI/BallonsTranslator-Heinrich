@@ -69,15 +69,21 @@ class OverlapResolver:
             overlap_y = max(0, min(new_bottom, ex_bottom) - max(new_top, ex_top))
             if overlap_x <= 0 or overlap_y <= 0:
                 continue
-            
-            overlaps_found += 1
-            existing_text = existing.toPlainText()[:30]
-            LOGGER.debug("[OVERLAP] Resolving overlap between '%s' and '%s' (overlap_x=%.1f, overlap_y=%.1f)",
-                        new_text, existing_text, overlap_x, overlap_y)
-            
-            # Determine which block is bigger
+
             new_area = (new_right - new_left) * (new_bottom - new_top)
             ex_area = (ex_right - ex_left) * (ex_bottom - ex_top)
+            bigger_area = max(new_area, ex_area)
+            overlap_area = overlap_x * overlap_y
+            if bigger_area > 0 and overlap_area / bigger_area >= 0.5:
+                existing_text = existing.toPlainText()[:30]
+                LOGGER.debug("[OVERLAP] Skipping: overlap too large relative to bigger block (%.0f%%) between '%s' and '%s'",
+                            overlap_area / bigger_area * 100, new_text, existing_text)
+                continue
+
+            overlaps_found += 1
+            existing_text = existing.toPlainText()[:30]
+            LOGGER.debug("[OVERLAP] Resolving overlap between '%s' (area=%.0f) and '%s' (area=%.0f) (overlap_x=%.1f, overlap_y=%.1f)",
+                        new_text, new_area, existing_text, ex_area, overlap_x, overlap_y)
             
             if new_area >= ex_area:
                 bigger = new_item
@@ -124,6 +130,17 @@ class OverlapResolver:
             
             # Update layout of the bigger block
             bigger._update_flow_layout()
+
+            bigger_left_new = min(p.x() for p in bigger._left_points) + bigger_pos.x()
+            bigger_right_new = max(p.x() for p in bigger._right_points) + bigger_pos.x()
+            bigger_top_new = min(p.y() for p in bigger._left_points) + bigger_pos.y()
+            bigger_bottom_new = max(p.y() for p in bigger._left_points) + bigger_pos.y()
+            bigger_area_new = (bigger_right_new - bigger_left_new) * (bigger_bottom_new - bigger_top_new)
+            bigger_text = bigger.toPlainText()[:30]
+            LOGGER.debug("[OVERLAP] After resolution: '%s' area %.0f -> %.0f",
+                        bigger_text,
+                        new_area if bigger is new_item else ex_area,
+                        bigger_area_new)
         
         if overlaps_found > 0:
             LOGGER.debug("[OVERLAP] Resolved %d overlap(s) for block '%s'", overlaps_found, new_text)

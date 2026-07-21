@@ -1413,6 +1413,49 @@ class TestProjectLoadFontPreservation:
         )
 
 
+class TestFontSizeManager:
+    """FontSizeManager syncs all 3 stores and tracks source."""
+
+    def test_font_size_manager_syncs_all_stores(self, scene):
+        """Setting font via font_size_mgr must update fontformat, blk, and document."""
+        from utils.fontformat import px2pt
+        blk = _make_blk(xyxy=(0, 0, 200, 100), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        # Set font via font_size_mgr
+        item.font_size_mgr.set(15.0, source="user")
+
+        # All 3 stores must match
+        assert abs(item.fontformat.size_pt - 15.0) < 0.1
+        assert abs(px2pt(item.blk.fontformat.font_size) - 15.0) < 0.1
+        assert abs(item.document().defaultFont().pointSizeF() - 15.0) < 0.1
+
+    def test_font_size_manager_source_tracking(self, scene):
+        """Source must track who changed the font size."""
+        blk = _make_blk(xyxy=(0, 0, 200, 100), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        item.font_size_mgr.set(10.0, source="user")
+        assert item.font_size_mgr.source == "user"
+
+        item.font_size_mgr.set(15.0, source="auto_layout")
+        assert item.font_size_mgr.source == "auto_layout"
+
+    def test_font_size_manager_is_user_set(self, scene):
+        """is_user_set() must return True only for user source."""
+        blk = _make_blk(xyxy=(0, 0, 200, 100), text="Test", font_size=24.0)
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+
+        item.font_size_mgr.set(10.0, source="user")
+        assert item.font_size_mgr.is_user_set()
+
+        item.font_size_mgr.set(15.0, source="auto_layout")
+        assert not item.font_size_mgr.is_user_set()
+
+
 class TestTopEdgeTextPositioning:
     """Text must stick to the top edge when the top diamond handle is moved."""
 
@@ -1720,6 +1763,41 @@ class TestOverlapFromLog:
         assert new_right[1] == orig_right[1], f"Point 1 should not shift: {new_right[1]} != {orig_right[1]}"
         assert new_right[2] < orig_right[2], f"Point 2 should shift: {new_right[2]} >= {orig_right[2]}"
         assert new_right[3] < orig_right[3], f"Point 3 should shift: {new_right[3]} >= {orig_right[3]}"
+
+    def test_skip_when_nearly_full_overlap(self, scene):
+        """When overlap area >= 50% of bigger block, resolution should be skipped.
+        Regression: blocks with same text overlapping nearly 100% were destroying the bigger block."""
+        # Block A (bigger): 990 x 30 = 29700
+        blk1 = _make_blk(xyxy=(100, 100, 1090, 130), text="Same text block")
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+        item1._left_points = [QPointF(0, 0), QPointF(0, 10), QPointF(0, 20), QPointF(0, 30)]
+        item1._right_points = [QPointF(990, 0), QPointF(990, 10), QPointF(990, 20), QPointF(990, 30)]
+
+        # Block B (smaller): 578 x 26 = 15028, overlapping almost fully
+        blk2 = _make_blk(xyxy=(512, 102, 1090, 128), text="Same text block")
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+        item2._left_points = [QPointF(0, 0), QPointF(0, 8.7), QPointF(0, 17.3), QPointF(0, 26)]
+        item2._right_points = [QPointF(578, 0), QPointF(578, 8.7), QPointF(578, 17.3), QPointF(578, 26)]
+
+        orig_right = [p.x() for p in item1._right_points]
+
+        class MockManager:
+            textblk_item_list = [item1, item2]
+            overlap_resolver = OverlapResolver()
+            def _resolve_overlaps(self, new_item):
+                self.overlap_resolver.resolve_overlaps(new_item, self.textblk_item_list)
+
+        manager = MockManager()
+        manager._resolve_overlaps(item1)
+
+        new_right = [p.x() for p in item1._right_points]
+        # overlap = 578 x 26 = 15028, bigger area = 29700
+        # 15028 / 29700 = 50.6% >= 50% → should SKIP
+        assert new_right == orig_right, (
+            f"Points should NOT change when overlap >= 50%% of bigger: orig={orig_right} new={new_right}"
+        )
 
 
 class TestMoveAfterControlPointChange:

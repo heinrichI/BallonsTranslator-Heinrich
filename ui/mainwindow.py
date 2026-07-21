@@ -649,11 +649,15 @@ class MainWindow(mainwindow_cls):
         LOGGER.debug("[SAVE] conditional_save: projstate_unsaved=%s opening_dir=%s save_on_page_changed=%s",
             self.canvas.projstate_unsaved, self.opening_dir, self.save_on_page_changed)
         if self.canvas.projstate_unsaved and not self.opening_dir:
-            update_scene_text = save_proj = self.canvas.text_change_unsaved()
+            update_scene_text = self.canvas.text_change_unsaved()
             save_rst_only = not self.canvas.draw_change_unsaved()
-            if not save_rst_only:
+            save_proj = update_scene_text or not save_rst_only
+            # Shape/control point changes don't increment textstep or drawstep,
+            # but projstate_unsaved is True → always save the project JSON
+            if not save_proj:
                 save_proj = True
-            
+                save_rst_only = True
+
             self.saveCurrentPage(update_scene_text, save_proj, restore_interface=True, save_rst_only=save_rst_only, keep_exist_as_backup=keep_exist_as_backup)
 
     def pageListCurrentItemChanged(self):

@@ -17,6 +17,7 @@ from .misc import td_pattern, table_pattern
 from .scene_textlayout import VerticalTextDocumentLayout, HorizontalTextDocumentLayout, SceneTextLayout
 from .text_graphical_effect import apply_shadow_effect
 from .text_format_manager import TextFormatManager
+from .font_size_manager import FontSizeManager
 
 LOGGER = logging.getLogger('BallonTranslator')
 
@@ -229,8 +230,9 @@ class TextBlkItem(QGraphicsTextItem):
     def initTextBlock(self, blk: TextBlock = None, set_format=True):
         self.blk = blk
         self.fontformat = blk.fontformat.deepcopy() if blk and blk.fontformat else blk.fontformat
-        # Initialize TextFormatManager
+        # Initialize TextFormatManager and FontSizeManager
         self.format_manager = TextFormatManager(self)
+        self.font_size_mgr = FontSizeManager(self)
         # Save the font size explicitly — deepcopy may share internal state with blk.fontformat
         self._saved_font_size = self.fontformat.font_size if self.fontformat else 0
         if _is_log_target(self.blk):
@@ -1047,16 +1049,13 @@ class TextBlkItem(QGraphicsTextItem):
         # But only if NOT called from auto-layout (which should not overwrite user's choice)
         if self.fontformat is not None:
             if not _is_auto_layout:
-                new_px = pt2px(value)
-                self.fontformat.font_size = new_px
-                self._user_font_size = new_px  # Save user's choice
-                # Also update model immediately — otherwise page switch loses user's change
-                if self.blk is not None and self.blk.fontformat is not None:
-                    self.blk.fontformat.font_size = new_px
+                source = "user"
+                self.font_size_mgr.set(value, source=source)
+                self._user_font_size = pt2px(value)  # Save user's choice
                 caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else '?'
                 if _is_log_target(self.blk):
                     LOGGER.debug("[FONTSIZE] TEXTITEM setFontSize: idx=%d input_pt=%.1f -> font_size_px=%.1f _auto_font_adjust=%s caller=%s",
-                        self.idx, value, new_px, self._auto_font_adjust, caller)
+                        self.idx, value, pt2px(value), self._auto_font_adjust, caller)
 
         cursor, after_kwargs = self._before_set_ffmt(set_selected=set_selected, restore_cursor=restore_cursor)
         self.layout.relayout_on_changed = False
