@@ -1291,12 +1291,11 @@ class MainWindow(mainwindow_cls):
             self.canvas.updateCanvas()
             self.st_manager.updateSceneTextitems()
 
+        self.st_manager.auto_textlayout_flag = False
+
         if not pcfg.module.enable_detect and pcfg.module.enable_translate:
             for blkitem in self.st_manager.textblk_item_list:
                 blkitem.squeezeBoundingRect()
-
-        if page_index + 1 == self.imgtrans_proj.num_pages:
-            self.st_manager.auto_textlayout_flag = False
 
         # save proj file on page trans finished
         self.imgtrans_proj.save()

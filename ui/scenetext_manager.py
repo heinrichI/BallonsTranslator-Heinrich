@@ -592,6 +592,7 @@ class SceneTextManager(QObject):
                        txt[:20], blk.xyxy,
                        getattr(blk, 'left_points', None),
                        getattr(blk, 'right_points', None))
+        did_auto_layout = False
         if isinstance(blk, TextBlkItem):
             blk_item = blk
             blk_item.idx = len(self.textblk_item_list)
@@ -606,6 +607,7 @@ class SceneTextManager(QObject):
             if translation:
                 blk.translation = translation
                 rst = self.layout_textblk(blk_item, text=translation)
+                did_auto_layout = True
                 if rst is None:
                     blk_item.setPlainText(translation)
         _debug("  after creation: blk_item.pos=%s", blk_item.pos())
@@ -623,8 +625,8 @@ class SceneTextManager(QObject):
                        [(p.x(), p.y()) for p in blk_item._right_points])
         self.addTextBlkItem(blk_item)
 
-        # Resolve overlaps with existing blocks
-        if hasattr(blk_item, '_left_points') and hasattr(blk_item, '_right_points'):
+        # Resolve overlaps only during automatic layout (not on page load)
+        if did_auto_layout and hasattr(blk_item, '_left_points') and hasattr(blk_item, '_right_points'):
             self._resolve_overlaps(blk_item)
         # LOGGER.info(f"addTextBlock {blk_item.toPlainText()}")
 
