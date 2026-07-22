@@ -19,6 +19,7 @@ from modules import INPAINTERS, TRANSLATORS, TEXTDETECTORS, OCR, \
 import modules
 modules.translators.SYSTEM_LANG = QLocale.system().name()
 from utils.textblock import TextBlock, sort_regions
+from utils.block_dedup import deduplicate_blocks
 from utils import shared
 from utils.message import create_error_dialog, create_info_dialog
 from .custom_widget import ImgtransProgressMessageBox, ParamComboBox
@@ -434,6 +435,12 @@ class ImgtransThread(QThread):
                             if need_save_mask:
                                 self.imgtrans_proj.save_mask(imgname, mask)
                                 need_save_mask = False
+
+                n_before = len(blk_list)
+                blk_list[:] = deduplicate_blocks(blk_list)
+                n_removed = n_before - len(blk_list)
+                if n_removed > 0:
+                    self.imgtrans_proj.pages[imgname] = blk_list
 
                 self.update_ocr_progress.emit(self.ocr_counter)
 

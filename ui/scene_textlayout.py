@@ -4,7 +4,7 @@ import logging
 LOGGER = logging.getLogger('BallonTranslator')
 
 QUIET_UI = False  # Set to False for verbose UI debug logging
-VERTICAL_CENTER = False  # True = center text vertically in bubble; False = top-align
+VERTICAL_CENTER = True  # True = center text vertically in bubble; False = top-align
 
 from utils.shared import LOG_PREFIXES as _LOG_PREFIXES
 
