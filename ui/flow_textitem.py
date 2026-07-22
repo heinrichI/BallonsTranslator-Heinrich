@@ -587,6 +587,23 @@ class FlowTextBlkItem(TextBlkItem):
         # Update _display_rect AFTER flow layout completes.
         self._update_display_rect_from_control_points()
         self.save_flow_points()
+        if self._left_points and self._right_points:
+            old_xyxy = list(self.blk.xyxy) if self.blk else None
+            self.blk._bounding_rect = self.absBoundingRect()
+            self.blk.set_lines_by_xywh(self.blk._bounding_rect, angle=-self.blk.angle, adjust_bbox=True)
+            # Set xyxy AFTER set_lines_by_xywh (adjust_bbox overwrites xyxy from lines)
+            pos = self.pos()
+            all_pts = self._left_points + self._right_points
+            local_x = min(p.x() for p in all_pts)
+            local_y = min(p.y() for p in all_pts)
+            local_w = max(p.x() for p in all_pts) - local_x
+            local_h = max(p.y() for p in all_pts) - local_y
+            self.blk.xyxy = [
+                int(pos.x() + local_x), int(pos.y() + local_y),
+                int(pos.x() + local_x + local_w), int(pos.y() + local_y + local_h)
+            ]
+            # LOGGER.debug("[COORD-SYNC] _update_flow_layout idx=%d old_xyxy=%s new_xyxy=%s br=%s",
+            #     self.idx, old_xyxy, self.blk.xyxy, self.blk._bounding_rect)
 
         # Log tracked blocks after flow layout update
         if self._left_points and self._right_points:
@@ -768,7 +785,7 @@ class FlowTextBlkItem(TextBlkItem):
 
     def absBoundingRect(self, max_h=None, max_w=None, qrect=False):
         """Override to use _display_rect for dimensions (excludes control points).
-        Uses control points y-range for height when available."""
+        Uses control points y-range for height and x-range for x-position when available."""
         import math
         P = 2 * self.padding()
         pos = self.pos()
@@ -780,10 +797,14 @@ class FlowTextBlkItem(TextBlkItem):
         else:
             br = super().boundingRect()
             w, h = br.width() - P, br.height() - P
-        # Use control points y-range for height when available
+        # Use control points for both x and y when available
         if self._left_points and self._right_points:
+            all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
             all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
+            cp_x = min(all_xs)
             cp_h = max(all_ys) - min(all_ys)
+            # x from leftmost control point + item position (scene coords)
+            x = pos.x() + cp_x
             if cp_h > 0:
                 h = cp_h
         if max_h is not None:

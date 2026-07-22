@@ -57,15 +57,27 @@ class MoveBlkItemsCommand(QUndoCommand):
 
     def redo(self):
         for item, new_pos, padding in zip(self.items, self.new_pos_lst, self.padding_lst):
+            old_xyxy = list(item.blk.xyxy)
             item.setPos(new_pos - padding)
-        # Update shape control without triggering blk_item.setPos again
+            item.blk._bounding_rect = item.absBoundingRect()
+            item.blk.set_lines_by_xywh(item.blk._bounding_rect, angle=-item.blk.angle, adjust_bbox=True)
+            # Set xyxy AFTER set_lines_by_xywh (adjust_bbox overwrites xyxy from lines)
+            bx, by, bw, bh = item.blk._bounding_rect
+            item.blk.xyxy = [int(bx), int(by), int(bx + bw), int(by + bh)]
+            # LOGGER.debug("[COORD-SYNC] MoveBlkItemsCommand.redo idx=%d old_xyxy=%s new_xyxy=%s", item.idx, old_xyxy, item.blk.xyxy)
         if self.items and self.shape_ctrl.blk_item in self.items:
             self.shape_ctrl.updateBoundingRect()
 
     def undo(self):
         for item, old_pos, padding in zip(self.items, self.old_pos_lst, self.padding_lst):
+            old_xyxy = list(item.blk.xyxy)
             item.setPos(old_pos - padding)
-        # Update shape control without triggering blk_item.setPos again
+            item.blk._bounding_rect = item.absBoundingRect()
+            item.blk.set_lines_by_xywh(item.blk._bounding_rect, angle=-item.blk.angle, adjust_bbox=True)
+            # Set xyxy AFTER set_lines_by_xywh (adjust_bbox overwrites xyxy from lines)
+            bx, by, bw, bh = item.blk._bounding_rect
+            item.blk.xyxy = [int(bx), int(by), int(bx + bw), int(by + bh)]
+            # LOGGER.debug("[COORD-SYNC] MoveBlkItemsCommand.undo idx=%d old_xyxy=%s new_xyxy=%s", item.idx, old_xyxy, item.blk.xyxy)
         if self.items and self.shape_ctrl.blk_item in self.items:
             self.shape_ctrl.updateBoundingRect()
 
@@ -128,7 +140,15 @@ class ReshapeItemCommand(QUndoCommand):
         if self.idx < 0:
             self.idx += 1
             return
+        old_xyxy = list(self.item.blk.xyxy)
         self.item.setRect(self.newRect)
+        self.item.blk._bounding_rect = self.item.absBoundingRect()
+        self.item.blk.set_lines_by_xywh(self.item.blk._bounding_rect, angle=-self.item.blk.angle, adjust_bbox=True)
+        # Re-set xyxy after set_lines_by_xywh (adjust_bbox overwrites xyxy from lines)
+        bx, by, bw, bh = self.item.blk._bounding_rect
+        self.item.blk.xyxy = [int(bx), int(by), int(bx + bw), int(by + bh)]
+        # LOGGER.debug("[COORD-SYNC] ReshapeItemCommand.redo idx=%d old_xyxy=%s new_xyxy=%s newRect=%s",
+        #     self.item.idx, old_xyxy, self.item.blk.xyxy, [self.newRect.x(), self.newRect.y(), self.newRect.width(), self.newRect.height()])
         if self.new_font_size is not None and hasattr(self.item, 'font_size_mgr'):
             from utils.fontformat import px2pt
             self.item.font_size_mgr.set(px2pt(self.new_font_size), source="undo_redo")
@@ -140,7 +160,15 @@ class ReshapeItemCommand(QUndoCommand):
                 self.item._update_flow_layout()
 
     def undo(self):
+        old_xyxy = list(self.item.blk.xyxy)
         self.item.setRect(self.oldRect)
+        self.item.blk._bounding_rect = self.item.absBoundingRect()
+        self.item.blk.set_lines_by_xywh(self.item.blk._bounding_rect, angle=-self.item.blk.angle, adjust_bbox=True)
+        # Re-set xyxy after set_lines_by_xywh (adjust_bbox overwrites xyxy from lines)
+        bx, by, bw, bh = self.item.blk._bounding_rect
+        self.item.blk.xyxy = [int(bx), int(by), int(bx + bw), int(by + bh)]
+        # LOGGER.debug("[COORD-SYNC] ReshapeItemCommand.undo idx=%d old_xyxy=%s new_xyxy=%s oldRect=%s",
+        #     self.item.idx, old_xyxy, self.item.blk.xyxy, [self.oldRect.x(), self.oldRect.y(), self.oldRect.width(), self.oldRect.height()])
         if self.old_font_size is not None and hasattr(self.item, 'font_size_mgr'):
             from utils.fontformat import px2pt
             self.item.font_size_mgr.set(px2pt(self.old_font_size), source="undo_redo")

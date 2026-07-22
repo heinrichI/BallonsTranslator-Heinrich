@@ -939,10 +939,13 @@ class SceneTextManager(QObject):
     def onSavePngBlk(self):
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) > 0:
+            from PIL import Image
+            from pathlib import Path
             for blkitem in selected_blks:
-                x1, y1, x2, y2 = map(int, blkitem.blk.xyxy)
-                from PIL import Image
-                from pathlib import Path
+                bx, by, bw, bh = blkitem.absBoundingRect()
+                x1, y1, x2, y2 = int(bx), int(by), int(bx + bw), int(by + bh)
+                # LOGGER.debug("[COORD-SYNC] onSavePngBlk idx=%d blk.xyxy=%s absBoundingRect=(%d,%d,%d,%d)",
+                #     blkitem.idx, blkitem.blk.xyxy, x1, y1, x2, y2)
                 im = Image.fromarray(self.imgtrans_proj.img_array[y1:y2, x1:x2])
                 im.save(f'{Path(self.imgtrans_proj.current_img).stem}_{blkitem.idx}.png')
 

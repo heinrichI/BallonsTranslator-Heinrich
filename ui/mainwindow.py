@@ -1168,10 +1168,13 @@ class MainWindow(mainwindow_cls):
         blk_list, blk_ids = [], []
         for blkitem in blkitem_list:
             blk: TextBlock = blkitem.blk
+            old_xyxy = list(blk.xyxy)
             blk._bounding_rect = blkitem.absBoundingRect()
             blk.text = self.st_manager.pairwidget_list[blkitem.idx].e_source.toPlainText()
             blk_ids.append(blkitem.idx)
             blk.set_lines_by_xywh(blk._bounding_rect, angle=-blk.angle, x_range=[0, im_w-1], y_range=[0, im_h-1], adjust_bbox=True)
+            # LOGGER.debug("[COORD-SYNC] translateBlkitemList idx=%d old_xyxy=%s new_xyxy=%s br=%s",
+            #     blkitem.idx, old_xyxy, blk.xyxy, blk._bounding_rect)
             blk_list.append(blk)
 
         self.module_manager.runBlktransPipeline(blk_list, tgt_img, mode, blk_ids, tgt_mask = tgt_mask)
