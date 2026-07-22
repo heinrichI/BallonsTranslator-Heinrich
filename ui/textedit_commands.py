@@ -129,10 +129,9 @@ class ReshapeItemCommand(QUndoCommand):
             self.idx += 1
             return
         self.item.setRect(self.newRect)
-        if hasattr(self.item, 'fontformat') and self.item.fontformat and self.new_font_size is not None:
-            self.item.fontformat.font_size = self.new_font_size
-            if self.item.blk is not None and self.item.blk.fontformat is not None:
-                self.item.blk.fontformat.font_size = self.new_font_size
+        if self.new_font_size is not None and hasattr(self.item, 'font_size_mgr'):
+            from utils.fontformat import px2pt
+            self.item.font_size_mgr.set(px2pt(self.new_font_size), source="undo_redo")
         if self.new_left_points is not None and hasattr(self.item, '_left_points'):
             from copy import deepcopy
             self.item._left_points = deepcopy(self.new_left_points)
@@ -142,10 +141,9 @@ class ReshapeItemCommand(QUndoCommand):
 
     def undo(self):
         self.item.setRect(self.oldRect)
-        if hasattr(self.item, 'fontformat') and self.item.fontformat and self.old_font_size is not None:
-            self.item.fontformat.font_size = self.old_font_size
-            if self.item.blk is not None and self.item.blk.fontformat is not None:
-                self.item.blk.fontformat.font_size = self.old_font_size
+        if self.old_font_size is not None and hasattr(self.item, 'font_size_mgr'):
+            from utils.fontformat import px2pt
+            self.item.font_size_mgr.set(px2pt(self.old_font_size), source="undo_redo")
         if self.old_left_points is not None and hasattr(self.item, '_left_points'):
             from copy import deepcopy
             self.item._left_points = deepcopy(self.old_left_points)

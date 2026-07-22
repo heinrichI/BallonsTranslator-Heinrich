@@ -122,9 +122,7 @@ class TextBlockPresenter:
         if self._model is None or self._model.fontformat is None:
             return
 
-        self._model.fontformat.font_size = pt2px(size_pt)
-
-        # Обновляем View
+        # View's font_size_mgr handles model sync
         if self._view:
             self._view.setFontSize(size_pt)
 

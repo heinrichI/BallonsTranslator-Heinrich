@@ -404,40 +404,7 @@ class LamaInpainterMPE(InpainterBase):
         im_h, im_w = img.shape[:2]
         img_torch, mask_torch, rel_pos, direct, img_original, mask_original, pad_bottom, pad_right = self.inpaint_preprocess(img, mask)
         
-        precision = TORCH_DTYPE_MAP[self.precision]
-        if self.device in {'cuda'}:
-            # Ensure model weights match target precision before autocast
-            try:
-                # LamaFourier is not an nn.Module — check generator parameters
-                if hasattr(self.model, 'generator'):
-                    model_dtype = next(self.model.generator.parameters()).dtype
-                else:
-                    model_dtype = next(self.model.parameters()).dtype
-                if model_dtype != precision:
-                    if hasattr(self.model, 'generator'):
-                        self.model.generator.to(dtype=precision)
-                    if hasattr(self.model, 'mpe') and self.model.mpe is not None:
-                        self.model.mpe.to(dtype=precision)
-                    try:
-                        self.model.to(dtype=precision)
-                    except TypeError:
-                        pass
-            except StopIteration:
-                pass
-            try:
-                with torch.autocast(device_type=self.device, dtype=precision):
-                    img_inpainted_torch = self.model(img_torch, mask_torch, rel_pos, direct)
-            except Exception as e:
-                self.logger.warning(e)
-                self.logger.warning(f'{precision} inference is not supported for this device, use fp32 instead.')
-                # Convert model to float32 to fix type mismatch
-                if hasattr(self.model, 'float'):
-                    self.model.float()
-                elif hasattr(self.model, 'generator'):
-                    self.model.generator.float()
-                img_inpainted_torch = self.model(img_torch.float(), mask_torch.float(), rel_pos.float(), direct.float())
-        else:
-            img_inpainted_torch = self.model(img_torch, mask_torch, rel_pos, direct)
+        img_inpainted_torch = self.model(img_torch, mask_torch, rel_pos, direct)
 
         img_inpainted = (img_inpainted_torch.to(device='cpu', dtype=torch.float32).squeeze_(0).permute(1, 2, 0).numpy() * 255)
         img_inpainted = (np.clip(np.round(img_inpainted), 0, 255)).astype(np.uint8)
@@ -469,19 +436,6 @@ class LamaInpainterMPE(InpainterBase):
             self.precision = precision
 
     def moveToDevice(self, device: str, precision: str = None):
-        if precision is not None:
-            dtype = TORCH_DTYPE_MAP.get(precision)
-            if dtype is not None:
-                # LamaFourier is not an nn.Module — convert submodules directly
-                if hasattr(self.model, 'generator'):
-                    self.model.generator.to(dtype=dtype)
-                if hasattr(self.model, 'mpe') and self.model.mpe is not None:
-                    self.model.mpe.to(dtype=dtype)
-                if hasattr(self.model, 'float'):
-                    try:
-                        self.model.to(dtype=dtype)
-                    except TypeError:
-                        pass  # non-nn.Module models handled above
         self.model.to(device)
         self.device = device
         if precision is not None:
@@ -525,10 +479,9 @@ class LamaLarge(LamaInpainterMPE):
 
     def _load_model(self):
         device = self.params['device']['value']
-        precision = self.params['precision']['value']
 
         self.model = load_lama_mpe(r'data/models/lama_large_512px.ckpt', device='cpu', use_mpe=False, large_arch=True)
-        self.moveToDevice(device, precision=precision)
+        self.moveToDevice(device)
 
 
 # LAMA_ORI: LamaFourier = None

@@ -427,5 +427,8 @@ def load_lama_mpe(model_path, device, use_mpe=True, large_arch: bool = False) ->
     model.generator.load_state_dict(sd['gen_state_dict'])
     if use_mpe:
         model.mpe.load_state_dict(sd['str_state_dict'])
+    model.generator.float()
+    if model.mpe is not None:
+        model.mpe.float()
     model.eval().to(device)
     return model

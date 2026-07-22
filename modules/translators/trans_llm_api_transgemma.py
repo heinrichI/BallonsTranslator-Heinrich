@@ -235,6 +235,7 @@ class TransGemmaTranslator(BaseTranslator):
             completion = self.client.chat.completions.create(**api_args)
         except Exception as e:
             self.logger.error(f"API request failed: {e}")
+            create_error_dialog(e, self.tr('Translation failed.'))
             raise
 
         if completion.choices and completion.choices[0].message and completion.choices[0].message.content:
