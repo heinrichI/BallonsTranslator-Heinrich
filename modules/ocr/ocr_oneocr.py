@@ -298,7 +298,7 @@ class OCROneAPI(OCRBase):
             return
         im_h, im_w = img.shape[:2]
         for i, blk in enumerate(blk_list):
-            x1, y1, x2, y2 = blk.xyxy
+            x1, y1, x2, y2 = blk.absBounding_rect()
             # pad
             x1 = x1 - 15 if x1 - 15 > 0 else 0
             x2 = x2 + 15 if x2 + 15 < im_w else im_w

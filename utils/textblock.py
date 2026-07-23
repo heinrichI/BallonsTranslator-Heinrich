@@ -270,7 +270,13 @@ class TextBlock:
     def lines_array(self, dtype=np.float64):
         return np.array(self.lines, dtype=dtype)
 
-    def set_lines_by_xywh(self, xywh: np.ndarray, angle=0, x_range=None, y_range=None, adjust_bbox=False):
+    def set_lines_by_xywh(self, xywh: np.ndarray, angle=0, x_range=None, y_range=None, recalc_xyxy_from_lines=False):
+        """Установить lines из xywh.
+
+        Args:
+            recalc_xyxy_from_lines: если True, пересчитать xyxy из min/max lines.
+                ВАЖНО: перезаписывает xyxy!
+        """
         if isinstance(xywh, List):
             xywh = np.array(xywh)
         lines = xywh2xyxypoly(np.array([xywh]))
@@ -287,7 +293,7 @@ class TextBlock:
             lines[..., 1] = np.clip(lines[..., 1], y_range[0], y_range[1])
         self.lines = lines.tolist()
 
-        if adjust_bbox:
+        if recalc_xyxy_from_lines:
             self.adjust_bbox()
 
     def aspect_ratio(self) -> float:
@@ -300,6 +306,18 @@ class TextBlock:
     def center(self) -> np.ndarray:
         xyxy = np.array(self.xyxy)
         return (xyxy[:2] + xyxy[2:]) / 2
+
+    def absBounding_rect(self):
+        """Координаты кропа [x1, y1, x2, y2] из _bounding_rect.
+
+        Использовать вместо прямого чтения blk.xyxy — xyxy может быть
+        устаревшим. _bounding_rect всегда актуален (обновляется
+        sync_coordinates()).
+        """
+        if self._bounding_rect is not None:
+            x1, y1, w, h = self._bounding_rect
+            return [int(x1), int(y1), int(x1 + w), int(y1 + h)]
+        return list(self.xyxy)
 
     def unrotated_polygons(self, ids=None) -> np.ndarray:
         angled = self.angle != 0

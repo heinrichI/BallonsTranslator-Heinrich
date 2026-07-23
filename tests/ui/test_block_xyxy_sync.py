@@ -579,3 +579,147 @@ class TestCoordinateSyncIntegration:
         assert x2 - x1 <= 220, (
             f"После ресайза post-undo: ширина={x2 - x1} должна быть ~200"
         )
+
+
+# ── Invariant-тесты: согласованность координат после каждой операции ──
+
+
+def _assert_coords_consistent(item):
+    """Проверить что blk.xyxy совпадает с absBoundingRect()."""
+    bx, by, bw, bh = item.absBoundingRect()
+    expected = [int(bx), int(by), int(bx + bw), int(by + bh)]
+    assert item.blk.xyxy == expected, (
+        f"blk.xyxy={item.blk.xyxy} != absBoundingRect={expected}"
+    )
+
+
+class TestCoordinateInvariant:
+    """Invariant: после каждой операции blk.xyxy должен совпадать с absBoundingRect().
+
+    Причина: координаты хранятся в трёх местах (xyxy, lines, _bounding_rect).
+    Если какое-то место обновилось, а другое нет — invariant-тест поймает.
+    """
+
+    def test_invariant_after_move(self, scene):
+        """После перемещения координаты согласованы."""
+        from ui.textedit_commands import MoveBlkItemsCommand
+        item = _make_flow_item(scene, xyxy=(100, 100, 300, 200))
+        shape_ctrl = MagicMock()
+        shape_ctrl.blk_item = item
+
+        old_pos = item.pos()
+        item.setPos(QPointF(old_pos.x() + 100, old_pos.y() + 50))
+        cmd = MoveBlkItemsCommand([item], shape_ctrl)
+        cmd.redo()
+        _assert_coords_consistent(item)
+
+    def test_invariant_after_undo_move(self, scene):
+        """После undo перемещения координаты согласованы."""
+        from ui.textedit_commands import MoveBlkItemsCommand
+        item = _make_flow_item(scene, xyxy=(100, 100, 300, 200))
+        shape_ctrl = MagicMock()
+        shape_ctrl.blk_item = item
+
+        old_pos = item.pos()
+        item.setPos(QPointF(old_pos.x() + 100, old_pos.y() + 50))
+        cmd = MoveBlkItemsCommand([item], shape_ctrl)
+        cmd.redo()
+        cmd.undo()
+        _assert_coords_consistent(item)
+
+    def test_invariant_after_flow_resize_right(self, scene):
+        """После сужения правой границы координаты согласованы."""
+        item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(200, pt.y())
+        item._update_flow_layout()
+        _assert_coords_consistent(item)
+
+    def test_invariant_after_flow_resize_left(self, scene):
+        """После сужения левой границы координаты согласованы."""
+        item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
+        for i, pt in enumerate(item._left_points):
+            item._left_points[i] = QPointF(80, pt.y())
+        item._update_flow_layout()
+        _assert_coords_consistent(item)
+
+    def test_invariant_after_flow_resize_top(self, scene):
+        """После смещения верхней границы вниз координаты согласованы."""
+        item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
+        for i, pt in enumerate(item._left_points):
+            item._left_points[i] = QPointF(pt.x(), pt.y() + 30)
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(pt.x(), pt.y() + 30)
+        item._update_flow_layout()
+        _assert_coords_consistent(item)
+
+    def test_invariant_after_flow_resize_bottom(self, scene):
+        """После смещения нижней границы вниз координаты согласованы."""
+        item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
+        for i, pt in enumerate(item._left_points):
+            item._left_points[i] = QPointF(pt.x(), pt.y() - 30)
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(pt.x(), pt.y() - 30)
+        item._update_flow_layout()
+        _assert_coords_consistent(item)
+
+    def test_invariant_after_move_then_resize(self, scene):
+        """После перемещения и ресайза координаты согласованы."""
+        from ui.textedit_commands import MoveBlkItemsCommand
+        item = _make_flow_item(scene, xyxy=(100, 100, 300, 200))
+        shape_ctrl = MagicMock()
+        shape_ctrl.blk_item = item
+
+        old_pos = item.pos()
+        item.setPos(QPointF(old_pos.x() + 50, old_pos.y() + 30))
+        cmd = MoveBlkItemsCommand([item], shape_ctrl)
+        cmd.redo()
+
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(150, pt.y())
+        item._update_flow_layout()
+        _assert_coords_consistent(item)
+
+    def test_invariant_after_undo_then_resize(self, scene):
+        """После undo перемещения и ресайза координаты согласованы."""
+        from ui.textedit_commands import MoveBlkItemsCommand
+        item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
+        shape_ctrl = MagicMock()
+        shape_ctrl.blk_item = item
+
+        old_pos = item.pos()
+        item.setPos(QPointF(old_pos.x() + 100, old_pos.y() + 50))
+        cmd = MoveBlkItemsCommand([item], shape_ctrl)
+        cmd.redo()
+        cmd.undo()
+
+        for i, pt in enumerate(item._right_points):
+            item._right_points[i] = QPointF(200, pt.y())
+        item._update_flow_layout()
+        _assert_coords_consistent(item)
+
+    def test_invariant_update_textblk_list(self, scene):
+        """После update_textblk_list координаты согласованы."""
+        from ui.block_manager import BlockManager
+        item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
+        for i, pt in enumerate(item._left_points):
+            item._left_points[i] = QPointF(80, pt.y())
+        item._update_flow_layout()
+
+        proj = MagicMock()
+        cbl = []
+        proj.current_block_list.return_value = cbl
+
+        mgr = BlockManager.__new__(BlockManager)
+        mgr.textblk_item_list = [item]
+        mgr.pairwidget_list = [MagicMock()]
+        mgr.pairwidget_list[0].e_source.toPlainText.return_value = "test"
+
+        mgr.update_textblk_list(proj)
+        saved_blk = cbl[0]
+        # Координаты в сохранённом блоке совпадают с absBoundingRect
+        bx, by, bw, bh = item.absBoundingRect()
+        expected = [int(bx), int(by), int(bx + bw), int(by + bh)]
+        assert saved_blk.xyxy == expected, (
+            f"Сохранённый xyxy={saved_blk.xyxy} != expected={expected}"
+        )

@@ -429,7 +429,7 @@ class SceneTextManager(QObject):
     def push_undo_command(self, command, update_pushed_step=True):
         """Proxy: добавляет команду в стек undo через DI UndoManager."""
         if self._undo_mgr:
-            self._undo_mgr.push_command(command)
+            self._undo_mgr.push_command(command, update_step=True)
             self.canvas.setProjSaveState(True)
         else:
             self.canvas.push_undo_command(command, update_pushed_step)
@@ -944,8 +944,6 @@ class SceneTextManager(QObject):
             for blkitem in selected_blks:
                 bx, by, bw, bh = blkitem.absBoundingRect()
                 x1, y1, x2, y2 = int(bx), int(by), int(bx + bw), int(by + bh)
-                # LOGGER.debug("[COORD-SYNC] onSavePngBlk idx=%d blk.xyxy=%s absBoundingRect=(%d,%d,%d,%d)",
-                #     blkitem.idx, blkitem.blk.xyxy, x1, y1, x2, y2)
                 im = Image.fromarray(self.imgtrans_proj.img_array[y1:y2, x1:x2])
                 im.save(f'{Path(self.imgtrans_proj.current_img).stem}_{blkitem.idx}.png')
 
@@ -1077,7 +1075,7 @@ class SceneTextManager(QObject):
         blk_item: TextBlkItem = self.sender()
         edit = self.pairwidget_list[blk_item.idx].e_trans
         propagate_user_edit(blk_item, edit, pos, added_text, joint_previous)
-        self.canvas.push_text_command(command=None, update_pushed_step=True)
+        self.canvas.push_undo_command(command=None, update_pushed_step=True)
 
     def on_propagate_transwidget_edit(self, pos: int, added_text: str, joint_previous: bool):
         edit: TransTextEdit = self.sender()
@@ -1085,7 +1083,7 @@ class SceneTextManager(QObject):
         if blk_item.isEditing():
             blk_item.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         propagate_user_edit(edit, blk_item, pos, added_text, joint_previous)
-        self.canvas.push_text_command(command=None, update_pushed_step=True)
+        self.canvas.push_undo_command(command=None, update_pushed_step=True)
 
     def apply_fontformat(self, fontformat: FontFormat):
         selected_blks = self.canvas.selected_text_items()

@@ -379,6 +379,40 @@ class TextBlkItem(QGraphicsTextItem):
             return QRectF(x, y, w, h)
         return [int(round(x)), int(round(y)), math.ceil(w), math.ceil(h)]
 
+    def sync_coordinates(self):
+        """Синхронизировать xyxy, lines, _bounding_rect из визуального состояния.
+
+        Единственный метод записи координат. Не вызывать set_lines_by_xywh
+        или записывать blk.xyxy напрямую — только через этот метод.
+        """
+        self.blk._bounding_rect = self.absBoundingRect()
+        self.blk.set_lines_by_xywh(
+            self.blk._bounding_rect,
+            angle=-self.blk.angle,
+            recalc_xyxy_from_lines=True
+        )
+        bx, by, bw, bh = self.blk._bounding_rect
+        self.blk.xyxy = [int(bx), int(by), int(bx + bw), int(by + bh)]
+        self._verify_coords()
+
+    def _verify_coords(self):
+        """Проверить согласованность координат (только в debug-режиме).
+
+        Вызывается из sync_coordinates(). В release-режиме ничего не делает.
+        """
+        import sys
+        if not sys.gettrace():
+            return
+        if not self.blk:
+            return
+        bx, by, bw, bh = self.absBoundingRect()
+        expected = [int(bx), int(by), int(bx + bw), int(by + bh)]
+        if self.blk.xyxy != expected:
+            LOGGER.warning(
+                "[COORD-INVARIANT] blk.xyxy=%s != absBoundingRect=%s idx=%d",
+                self.blk.xyxy, expected, self.idx
+            )
+
     def shape(self) -> QPainterPath:
         path = QPainterPath()
         br = self.boundingRect()

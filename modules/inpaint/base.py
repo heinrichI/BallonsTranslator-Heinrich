@@ -125,7 +125,7 @@ class InpainterBase(BaseModule):
             original_mask = mask.copy()
             
             for blk in textblock_list:
-                xyxy = blk.xyxy
+                xyxy = blk.absBounding_rect()
                 xyxy_e = enlarge_window(xyxy, im_w, im_h, ratio=1.7)
                 im = inpainted[xyxy_e[1]:xyxy_e[3], xyxy_e[0]:xyxy_e[2]]
                 msk = mask[xyxy_e[1]:xyxy_e[3], xyxy_e[0]:xyxy_e[2]]

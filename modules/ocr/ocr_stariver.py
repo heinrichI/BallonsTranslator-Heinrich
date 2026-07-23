@@ -111,7 +111,7 @@ class OCRStariver(OCRBase):
         self.update_token_if_needed() # 在向服务器发送请求前尝试更新 Token
         im_h, im_w = img.shape[:2]
         for blk in blk_list:
-            x1, y1, x2, y2 = blk.xyxy
+            x1, y1, x2, y2 = blk.absBounding_rect()
             if y2 < im_h and x2 < im_w and \
                     x1 > 0 and y1 > 0 and x1 < x2 and y1 < y2:
                 blk.text = self.ocr(img[y1:y2, x1:x2])

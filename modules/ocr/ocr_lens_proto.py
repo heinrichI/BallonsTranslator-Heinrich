@@ -510,7 +510,7 @@ class OCRLensAPI_exp(OCRBase):
     def _ocr_blk_list(self, img: np.ndarray, blk_list: List[TextBlock], *args, **kwargs):
         im_h, im_w = img.shape[:2]
         for blk in blk_list:
-            x1, y1, x2, y2 = blk.xyxy
+            x1, y1, x2, y2 = blk.absBounding_rect()
             if y2 <= im_h and x2 <= im_w and x1 >= 0 and y1 >= 0 and x1 < x2 and y1 < y2:
                 cropped_img = img[y1:y2, x1:x2]
                 blk.text = self.ocr_img(cropped_img)

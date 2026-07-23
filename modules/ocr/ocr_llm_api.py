@@ -426,7 +426,7 @@ class LLM_OCR(OCRBase):
         if self.debug_mode:
             self.logger.debug(f"Image dimensions: {im_h}x{im_w}")
         for blk in blk_list:
-            x1, y1, x2, y2 = blk.xyxy
+            x1, y1, x2, y2 = blk.absBounding_rect()
             # pad
             x1 = x1 - 15 if x1 - 15 > 0 else 0
             x2 = x2 + 15 if x2 + 15 < im_w else im_w

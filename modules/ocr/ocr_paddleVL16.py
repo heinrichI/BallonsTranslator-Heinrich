@@ -295,7 +295,7 @@ class PaddleOCRVL16(OCRBase):
     def _ocr_blk_list(self, img: np.ndarray, blk_list: List[TextBlock], *args, **kwargs):
         im_h, im_w = img.shape[:2]
         for blk in blk_list:
-            x1, y1, x2, y2 = blk.xyxy
+            x1, y1, x2, y2 = blk.absBounding_rect()
             x1 = int(max(0, x1 - 10))
             x2 = int(min(im_w, x2 + 10))
             y1 = int(max(0, y1 - 2))

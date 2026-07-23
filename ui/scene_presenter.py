@@ -96,10 +96,12 @@ class ScenePresenter:
 
     def push_undo_command(self, command: Any, update_pushed_step: bool = True):
         """Добавляет команду в стек undo через DI UndoManager."""
-        if self._undo_mgr:
-            self._undo_mgr.push_command(command)
-        elif hasattr(self._view, 'push_undo_command'):
+        # Delegate to view (canvas) which properly updates canvas step counters
+        # for save detection. Direct _undo_mgr.push_command bypasses counters.
+        if hasattr(self._view, 'push_undo_command'):
             self._view.push_undo_command(command, update_pushed_step)
+        elif self._undo_mgr:
+            self._undo_mgr.push_command(command)
 
     def add_item_to_text_layer(self, item: Any):
         """Добавляет элемент на текстовый слой через DI LayerManager."""

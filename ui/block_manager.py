@@ -129,7 +129,6 @@ class BlockManager(QObject):
 
         cbl.clear()
         for blk_item, trans_pair in zip(self.textblk_item_list, self.pairwidget_list):
-            old_xyxy = list(blk_item.blk.xyxy)
             if not blk_item.document().isEmpty():
                 blk_item.blk.rich_text = blk_item.toHtml()
                 blk_item.blk.translation = blk_item.toPlainText()
@@ -137,13 +136,8 @@ class BlockManager(QObject):
                 blk_item.blk.rich_text = ''
                 blk_item.blk.translation = ''
             blk_item.blk.text = [trans_pair.e_source.toPlainText()]
-            blk_item.blk._bounding_rect = blk_item.absBoundingRect()
-            blk_item.blk.set_lines_by_xywh(blk_item.blk._bounding_rect, angle=-blk_item.blk.angle, adjust_bbox=True)
-            bx, by, bw, bh = blk_item.blk._bounding_rect
-            blk_item.blk.xyxy = [int(bx), int(by), int(bx + bw), int(by + bh)]
+            blk_item.sync_coordinates()
             blk_item.updateBlkFormat()
-            # LOGGER.debug("[COORD-SYNC] update_textblk_list idx=%d old_xyxy=%s new_xyxy=%s br=%s",
-            #     blk_item.idx, old_xyxy, blk_item.blk.xyxy, blk_item.blk._bounding_rect)
 
             # Save flow points if supported
             if hasattr(blk_item, 'save_flow_points'):

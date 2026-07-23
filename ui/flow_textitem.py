@@ -151,38 +151,18 @@ def interpolate_boundary(points: List[QPointF], y: float) -> float:
 
 def build_quad_path(points: List[QPointF]) -> QPainterPath:
     """
-    Build a quadratic Bezier path that passes THROUGH all points.
-    For each consecutive triple (A, B, C), compute a control point
-    so the curve passes through B at t=0.5:
-        C_ctrl = 2 * B - 0.5 * (A + C)
+    Build a linear (lineTo) path through all control points.
+    Uses linear segments so the visual boundary matches the linear
+    interpolation used by interpolate_boundary() for text layout.
     """
     path = QPainterPath()
     if len(points) < 2:
         return path
 
     pts = sorted(points, key=lambda p: p.y())
-
-    if len(pts) == 2:
-        path.moveTo(pts[0])
-        path.lineTo(pts[1])
-    elif len(pts) == 3:
-        ctrl = QPointF(
-            2 * pts[1].x() - 0.5 * (pts[0].x() + pts[2].x()),
-            2 * pts[1].y() - 0.5 * (pts[0].y() + pts[2].y()),
-        )
-        path.moveTo(pts[0])
-        path.quadTo(ctrl, pts[2])
-    else:
-        # 4+ points: draw quadratic segments between consecutive triples
-        path.moveTo(pts[0])
-        for i in range(1, len(pts) - 1):
-            a, b, c = pts[i - 1], pts[i], pts[i + 1]
-            ctrl = QPointF(
-                2 * b.x() - 0.5 * (a.x() + c.x()),
-                2 * b.y() - 0.5 * (a.y() + c.y()),
-            )
-            path.quadTo(ctrl, c)
-    return path
+    path.moveTo(pts[0])
+    for pt in pts[1:]:
+        path.lineTo(pt)
     return path
 
 
@@ -214,6 +194,26 @@ class FlowTextBlkItem(TextBlkItem):
             self._right_points = [QPointF(p[0], p[1]) for p in blk.right_points]
 
         super().__init__(blk, idx, set_format, show_rect, *args, **kwargs)
+
+        # ── FIX: Adjust control points for pos shift from setRect() ──
+        # Flow points are saved in local coords relative to old pos.
+        # setRect(_bounding_rect) applies padRect → shifts pos by (cp - pad).
+        # Without this fix, the cp offset is applied twice in sync_coordinates(),
+        # causing blk.xyxy to drift on every page switch.
+        if self._left_points and self._right_points:
+            all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
+            all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
+            pad = self.padding()
+            dx = min(all_xs) - pad
+            dy = min(all_ys) - pad
+            if abs(dx) > 0.01 or abs(dy) > 0.01:
+                for pt in self._left_points:
+                    pt.setX(pt.x() - dx)
+                    pt.setY(pt.y() - dy)
+                for pt in self._right_points:
+                    pt.setX(pt.x() - dx)
+                    pt.setY(pt.y() - dy)
+
         self.setAcceptHoverEvents(True)
 
         # Generate default flow points if not restored from blk and not yet set.
@@ -247,17 +247,7 @@ class FlowTextBlkItem(TextBlkItem):
             self.layout.reLayoutEverything()
             self.font_adjuster.shrink()
             self.font_adjuster._auto_grow_enabled = True
-            # Update blk.xyxy to match control points (not polygon)
-            pos = self.pos()
-            all_pts = self._left_points + self._right_points
-            local_x = min(p.x() for p in all_pts)
-            local_y = min(p.y() for p in all_pts)
-            local_w = max(p.x() for p in all_pts) - local_x
-            local_h = max(p.y() for p in all_pts) - local_y
-            self.blk.xyxy = [
-                int(pos.x() + local_x), int(pos.y() + local_y),
-                int(pos.x() + local_x + local_w), int(pos.y() + local_y + local_h)
-            ]
+            self.sync_coordinates()
             # Disable auto-adjust only if font was ALREADY small when loaded
             # (from a previous session), NOT if it was just shrunk from a large detector size.
             if not font_was_large and self.blk.fontformat is not None and self.blk.fontformat.font_size <= 50.0:
@@ -588,22 +578,7 @@ class FlowTextBlkItem(TextBlkItem):
         self._update_display_rect_from_control_points()
         self.save_flow_points()
         if self._left_points and self._right_points:
-            old_xyxy = list(self.blk.xyxy) if self.blk else None
-            self.blk._bounding_rect = self.absBoundingRect()
-            self.blk.set_lines_by_xywh(self.blk._bounding_rect, angle=-self.blk.angle, adjust_bbox=True)
-            # Set xyxy AFTER set_lines_by_xywh (adjust_bbox overwrites xyxy from lines)
-            pos = self.pos()
-            all_pts = self._left_points + self._right_points
-            local_x = min(p.x() for p in all_pts)
-            local_y = min(p.y() for p in all_pts)
-            local_w = max(p.x() for p in all_pts) - local_x
-            local_h = max(p.y() for p in all_pts) - local_y
-            self.blk.xyxy = [
-                int(pos.x() + local_x), int(pos.y() + local_y),
-                int(pos.x() + local_x + local_w), int(pos.y() + local_y + local_h)
-            ]
-            # LOGGER.debug("[COORD-SYNC] _update_flow_layout idx=%d old_xyxy=%s new_xyxy=%s br=%s",
-            #     self.idx, old_xyxy, self.blk.xyxy, self.blk._bounding_rect)
+            self.sync_coordinates()
 
         # Log tracked blocks after flow layout update
         if self._left_points and self._right_points:
@@ -802,9 +777,11 @@ class FlowTextBlkItem(TextBlkItem):
             all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
             all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
             cp_x = min(all_xs)
+            cp_y = min(all_ys)
             cp_h = max(all_ys) - min(all_ys)
-            # x from leftmost control point + item position (scene coords)
+            # x and y from control points + item position (scene coords)
             x = pos.x() + cp_x
+            y = pos.y() + cp_y
             if cp_h > 0:
                 h = cp_h
         if max_h is not None:
@@ -818,6 +795,41 @@ class FlowTextBlkItem(TextBlkItem):
         if qrect:
             return QRectF(x, y, w, h)
         return [int(round(x)), int(round(y)), math.ceil(w), math.ceil(h)]
+
+    def sync_coordinates(self):
+        """Синхронизировать координаты из контрольных точек.
+
+        Переопределение: для flow-элементов x/y вычисляется из control points,
+        а не из _bounding_rect + pos(). Вычисляет _bounding_rect из control points
+        и вызывает базовый sync_coordinates() для согласованности.
+        """
+        if self._left_points and self._right_points:
+            import math
+            P = 2 * self.padding()
+            pos = self.pos()
+            all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
+            all_ys = [p.y() for p in self._left_points] + [p.y() for p in self._right_points]
+            cp_x = min(all_xs)
+            cp_y = min(all_ys)
+            cp_w = max(all_xs) - cp_x
+            cp_h = max(all_ys) - cp_y
+            # _bounding_rect в формате [x, y, w, h] как absBoundingRect
+            self.blk._bounding_rect = [
+                int(round(pos.x() + cp_x)),
+                int(round(pos.y() + cp_y)),
+                math.ceil(cp_w),
+                math.ceil(cp_h)
+            ]
+            self.blk.set_lines_by_xywh(
+                self.blk._bounding_rect,
+                angle=-self.blk.angle,
+                recalc_xyxy_from_lines=True
+            )
+            bx, by, bw, bh = self.blk._bounding_rect
+            self.blk.xyxy = [int(bx), int(by), int(bx + bw), int(by + bh)]
+            self._verify_coords()
+        else:
+            super().sync_coordinates()
 
     # ── Hover events ──────────────────────────────────────────
 

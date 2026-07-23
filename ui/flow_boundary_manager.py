@@ -244,31 +244,15 @@ def interpolate_boundary(points: List[QPointF], y: float) -> float:
 
 def build_quad_path(points: List[QPointF]) -> QPainterPath:
     """
-    Строит квадратичный Bezier путь, проходящий через все точки.
+    Строит линейный путь через все контрольные точки.
+    Использует lineTo для совпадения с interpolate_boundary().
     """
     path = QPainterPath()
     if len(points) < 2:
         return path
-    
+
     pts = sorted(points, key=lambda p: p.y())
-    
-    if len(pts) == 2:
-        path.moveTo(pts[0])
-        path.lineTo(pts[1])
-    elif len(pts) == 3:
-        ctrl = QPointF(
-            2 * pts[1].x() - 0.5 * (pts[0].x() + pts[2].x()),
-            2 * pts[1].y() - 0.5 * (pts[0].y() + pts[2].y()),
-        )
-        path.moveTo(pts[0])
-        path.quadTo(ctrl, pts[2])
-    else:
-        path.moveTo(pts[0])
-        for i in range(1, len(pts) - 1):
-            a, b, c = pts[i - 1], pts[i], pts[i + 1]
-            ctrl = QPointF(
-                2 * b.x() - 0.5 * (a.x() + c.x()),
-                2 * b.y() - 0.5 * (a.y() + c.y()),
-            )
-            path.quadTo(ctrl, c)
+    path.moveTo(pts[0])
+    for pt in pts[1:]:
+        path.lineTo(pt)
     return path

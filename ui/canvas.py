@@ -966,31 +966,30 @@ class Canvas(QGraphicsScene):
             return self.draw_undo_stack
         return None
 
-    def push_undo_command(self, command: QUndoCommand, update_pushed_step=True):
-        """Original push_undo_command — delegates to DI proxy."""
-        if self._undo_mgr:
-            self._undo_mgr.push_command(command)
-            self.setProjSaveState(True)
-            logger.debug("[SAVE] push_undo_command via _undo_mgr (v2): projstate_unsaved=True")
-            return
-        if self.textEditMode():
-            self.push_text_command(command, update_pushed_step)
-        elif self.drawMode():
-            self.push_draw_command(command, update_pushed_step)
-        else:
-            logger.debug("[SAVE] push_undo_command (v2): no mode match, command dropped")
-            return
-
-    def push_draw_command(self, command: QUndoCommand, update_pushed_step=True):
+    def _push_draw_command_internal(self, command: QUndoCommand, update_pushed_step=True):
+        """Internal: push draw command to correct stack. Use push_undo_command instead."""
+        import sys
+        if sys.gettrace():
+            LOGGER.warning("[UNDO] _push_draw_command_internal called directly — prefer push_undo_command")
         if command is not None:
-            self.draw_undo_stack.push(command)
+            if self._undo_mgr:
+                self._undo_mgr.push_draw_command(command)
+            else:
+                self.draw_undo_stack.push(command)
         if update_pushed_step:
             self.num_pushed_drawstep += 1
             self.on_drawstack_changed()
 
-    def push_text_command(self, command: QUndoCommand, update_pushed_step=True):
+    def _push_text_command_internal(self, command: QUndoCommand, update_pushed_step=True):
+        """Internal: push text command to correct stack. Use push_undo_command instead."""
+        import sys
+        if sys.gettrace():
+            LOGGER.warning("[UNDO] _push_text_command_internal called directly — prefer push_undo_command")
         if command is not None:
-            self.text_undo_stack.push(command)
+            if self._undo_mgr:
+                self._undo_mgr.push_command(command)
+            else:
+                self.text_undo_stack.push(command)
         if update_pushed_step:
             self.num_pushed_textstep += 1
             self.on_textstack_changed()
@@ -1026,13 +1025,20 @@ class Canvas(QGraphicsScene):
         self.draw_undo_stack.clear()
 
     def update_saved_undostep(self):
-        self.saved_drawundo_step = self.num_pushed_drawstep
-        self.saved_textundo_step = self.num_pushed_textstep
+        if self._undo_mgr:
+            self._undo_mgr.mark_clean()
+        else:
+            self.saved_drawundo_step = self.num_pushed_drawstep
+            self.saved_textundo_step = self.num_pushed_textstep
 
     def text_change_unsaved(self) -> bool:
+        if self._undo_mgr:
+            return self._undo_mgr.is_dirty()
         return self.saved_textundo_step != self.num_pushed_textstep
 
     def draw_change_unsaved(self) -> bool:
+        if self._undo_mgr:
+            return self._undo_mgr.is_dirty()
         return self.saved_drawundo_step != self.num_pushed_drawstep
 
     def prepareClose(self):
@@ -1085,16 +1091,32 @@ class Canvas(QGraphicsScene):
                 self.txtblkShapeControl.updateBoundingRect()
 
     def push_undo_command(self, command: QUndoCommand, update_pushed_step=True):
-        """Добавление команды в стек с делегированием в DI UndoManager."""
+        """Единая точка входа для push команд в undo-стек."""
+        if command is None:
+            # command=None used to increment step counters without pushing to stack
+            if update_pushed_step:
+                if self.textEditMode():
+                    self.num_pushed_textstep += 1
+                elif self.drawMode():
+                    self.num_pushed_drawstep += 1
+            logger.debug("[SAVE] push_undo_command: command=None, counters updated")
+            return
         if self._undo_mgr:
             self._undo_mgr.push_command(command)
             self.setProjSaveState(True)
+            # Increment canvas step counters so save detection works
+            if update_pushed_step:
+                if self.textEditMode():
+                    self.num_pushed_textstep += 1
+                elif self.drawMode():
+                    self.num_pushed_drawstep += 1
             logger.debug("[SAVE] push_undo_command via _undo_mgr: projstate_unsaved=True")
             return
+        # Fallback: old canvas undo stacks
         if self.textEditMode():
-            self.push_text_command(command, update_pushed_step)
+            self._push_text_command_internal(command, update_pushed_step)
         elif self.drawMode():
-            self.push_draw_command(command, update_pushed_step)
+            self._push_draw_command_internal(command, update_pushed_step)
         else:
             logger.debug("[SAVE] push_undo_command: no mode match, command dropped")
             return

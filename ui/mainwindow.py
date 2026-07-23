@@ -657,6 +657,9 @@ class MainWindow(mainwindow_cls):
             if not save_proj:
                 save_proj = True
                 save_rst_only = True
+            # Always update block list when saving — text_change_unsaved may be
+            # unreliable with DI UndoManager
+            update_scene_text = True
 
             self.saveCurrentPage(update_scene_text, save_proj, restore_interface=True, save_rst_only=save_rst_only, keep_exist_as_backup=keep_exist_as_backup)
 
@@ -1168,13 +1171,10 @@ class MainWindow(mainwindow_cls):
         blk_list, blk_ids = [], []
         for blkitem in blkitem_list:
             blk: TextBlock = blkitem.blk
-            old_xyxy = list(blk.xyxy)
             blk._bounding_rect = blkitem.absBoundingRect()
             blk.text = self.st_manager.pairwidget_list[blkitem.idx].e_source.toPlainText()
             blk_ids.append(blkitem.idx)
-            blk.set_lines_by_xywh(blk._bounding_rect, angle=-blk.angle, x_range=[0, im_w-1], y_range=[0, im_h-1], adjust_bbox=True)
-            # LOGGER.debug("[COORD-SYNC] translateBlkitemList idx=%d old_xyxy=%s new_xyxy=%s br=%s",
-            #     blkitem.idx, old_xyxy, blk.xyxy, blk._bounding_rect)
+            blk.set_lines_by_xywh(blk._bounding_rect, angle=-blk.angle, x_range=[0, im_w-1], y_range=[0, im_h-1], recalc_xyxy_from_lines=True)
             blk_list.append(blk)
 
         self.module_manager.runBlktransPipeline(blk_list, tgt_img, mode, blk_ids, tgt_mask = tgt_mask)
@@ -1545,7 +1545,7 @@ class MainWindow(mainwindow_cls):
 
     def on_global_replace_finished(self):
         rt = self.global_search_widget.replace_thread
-        self.canvas.push_text_command(
+        self.canvas.push_undo_command(
             GlobalRepalceAllCommand(rt.sceneitem_list, rt.background_list, rt.target_text, self.imgtrans_proj)
         )
         rt.sceneitem_list = None

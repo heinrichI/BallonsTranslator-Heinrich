@@ -106,19 +106,25 @@ class SizeComboBox(QComboBox):
 
     def on_text_changed(self):
         if self.hasFocus():
-            self.param_changed.emit(self.param_name, self.value())
+            val = self.value()
+            if val is not None:
+                self.param_changed.emit(self.param_name, val)
 
     def on_current_index_changed(self):
         if self.hasFocus() or self.view().isVisible():
-            self.param_changed.emit(self.param_name, self.value())
+            val = self.value()
+            if val is not None:
+                self.param_changed.emit(self.param_name, val)
 
     def value(self) -> float:
-        txt = self.currentText()
+        txt = self.currentText().strip()
+        if not txt:
+            return self._value
         try:
             val = float(txt)
             self._value = val
             return val
-        except:
+        except (ValueError, TypeError):
             return self._value
 
     def setValue(self, value: float):

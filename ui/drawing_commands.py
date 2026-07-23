@@ -88,7 +88,7 @@ class RunBlkTransCommand(QUndoCommand):
         self.empty_command = None
         if mode > 1:
             self.empty_command = EmptyCommand()
-            canvas.push_draw_command(self.empty_command)
+            canvas.push_undo_command(self.empty_command)
 
         self.op_counter = -1
         self.blkitems = blkitems
@@ -132,7 +132,7 @@ class RunBlkTransCommand(QUndoCommand):
 
                     layout_ok = False
                     if target_w >= 2 and target_h >= 2:
-                        optimal_size = st_manager._find_best_font_size(
+                        optimal_size = st_manager.layout_manager._find_best_font_size(
                             blkitem, trs, target_w, target_h, old_font_size
                         )
 

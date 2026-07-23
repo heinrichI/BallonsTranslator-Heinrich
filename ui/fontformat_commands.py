@@ -10,7 +10,7 @@ except:
     from qtpy.QtGui import QUndoCommand
 
 from . import shared_widget as SW
-from utils.fontformat import FontFormat, px2pt
+from utils.fontformat import FontFormat, px2pt, pt2px
 from .textitem import TextBlkItem
 
 LOGGER = logging.getLogger('BallonTranslator')
