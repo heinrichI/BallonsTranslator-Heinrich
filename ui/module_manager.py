@@ -452,10 +452,7 @@ class ImgtransThread(QThread):
                 if self.parallel_trans:
                     self.translate_thread.push_pagekey_queue(imgname)
                 elif not low_vram_trans:
-                    try:
-                        self.translator.translate_textblk_lst(blk_list)
-                    except Exception as e:
-                        create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
+                    self.translator.translate_textblk_lst(blk_list)
                     self.translate_counter += 1
                     self.update_translate_progress.emit(self.translate_counter)
                         
@@ -481,10 +478,7 @@ class ImgtransThread(QThread):
             for imgname in self.pages:
                 LOGGER.debug(f'imgtrans_pipeline translate {imgname}')
                 blk_list = self.imgtrans_proj.pages[imgname]
-                try:
-                    self.translator.translate_textblk_lst(blk_list)
-                except Exception as e:
-                    create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
+                self.translator.translate_textblk_lst(blk_list)
                 self.translate_counter += 1
                 self.update_translate_progress.emit(self.translate_counter)
 
