@@ -159,8 +159,8 @@ class TextLayoutManager:
         if original_size < 1:
             original_size = 12.0
 
-        LOGGER.debug("[AUTOLAYOUT] idx=%d original_size=%.1fpt target_w=%.0f target_h=%.0f text='%s'",
-                     blkitem.idx, original_size, target_w, target_h, text[:30])
+        # LOGGER.debug("[AUTOLAYOUT] idx=%d original_size=%.1fpt target_w=%.0f target_h=%.0f text='%s'",
+        #              blkitem.idx, original_size, target_w, target_h, text[:30])
 
         # Check if text fits at original size — if not, run binary search regardless of threshold.
         # Only skip binary search for small user-set fonts that already fit.
@@ -173,14 +173,14 @@ class TextLayoutManager:
 
         if original_size < 50.0 and text_fits:
             optimal_size = original_size
-            LOGGER.debug("[AUTOLAYOUT] idx=%d preserving %.1fpt (fits: shrink_h=%.0f <= target_h=%.0f)",
-                         blkitem.idx, original_size, orig_shrink_h, target_h)
+            # LOGGER.debug("[AUTOLAYOUT] idx=%d preserving %.1fpt (fits: shrink_h=%.0f <= target_h=%.0f)",
+            #              blkitem.idx, original_size, orig_shrink_h, target_h)
         else:
             optimal_size = self._find_best_font_size(
                 blkitem, text, target_w, target_h, original_size
             )
-            LOGGER.debug("[AUTOLAYOUT] idx=%d binary search: %.1fpt -> %.1fpt (was shrink_h=%.0f)",
-                         blkitem.idx, original_size, optimal_size, orig_shrink_h)
+            # LOGGER.debug("[AUTOLAYOUT] idx=%d binary search: %.1fpt -> %.1fpt (was shrink_h=%.0f)",
+            #              blkitem.idx, original_size, optimal_size, orig_shrink_h)
 
         # Sync fontformat to optimal size found by binary search.
         # _find_best_font_size uses _is_auto_layout=True which skips
@@ -205,9 +205,9 @@ class TextLayoutManager:
         blkitem.font_adjuster._auto_grow_enabled = saved_grow
 
         final_size = blkitem.font().pointSizeF()
-        LOGGER.debug("[AUTOLAYOUT] idx=%d final_size=%.1fpt (was %.1fpt, target_h=%.0f, shrink_h=%.1f)",
-                     blkitem.idx, final_size, optimal_size, target_h,
-                     blkitem.layout.shrink_height if hasattr(blkitem.layout, 'shrink_height') else 0)
+        # LOGGER.debug("[AUTOLAYOUT] idx=%d final_size=%.1fpt (was %.1fpt, target_h=%.0f, shrink_h=%.1f)",
+        #              blkitem.idx, final_size, optimal_size, target_h,
+        #              blkitem.layout.shrink_height if hasattr(blkitem.layout, 'shrink_height') else 0)
 
         return text
     

@@ -3,6 +3,7 @@ import os
 import os.path as osp
 import json
 import sys
+import threading
 
 ICON_PATH = 'icons/icon.icns'
 
@@ -130,6 +131,11 @@ showed_exception = set()
 create_errdialog_in_mainthread = lambda *args, **kwargs: None
 
 create_infodialog_in_mainthread = lambda *args, **kwargs: None
+
+create_yesno_dialog_in_mainthread = lambda *args, **kwargs: None
+
+_yesno_result = {}
+_yesno_event = threading.Event()
 
 def load_cache():
     global cache_data

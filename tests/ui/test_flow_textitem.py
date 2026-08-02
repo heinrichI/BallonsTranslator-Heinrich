@@ -2298,3 +2298,89 @@ class TestFlowPresenter:
         presenter.set_control_points(left, right)
         assert boundary_manager.left_points == left
         assert boundary_manager.right_points == right
+
+
+class TestVerticalCenterAlignment:
+    """Vertical centering must apply regardless of horizontal alignment.
+
+    Regression: HorizontalTextDocumentLayout.reLayout() only shifted text
+    vertically when alignment was AlignCenter.  With left/right alignment the
+    text stuck to the top.  Flow items opt in via _vertical_center_always.
+    """
+
+    def _first_line_y(self, item):
+        """Return the first laid-out line's y position (including the vertical
+        center offset applied by reLayout())."""
+        layout = item.layout
+        block = item.document().firstBlock()
+        tl = block.layout()
+        assert tl.lineCount() > 0, "Expected at least one laid-out line"
+        line = tl.lineAt(0)
+        return line.position().y()
+
+    def test_flow_item_opt_in_flag_default(self, scene):
+        """Flow text items enable _vertical_center_always on the layout."""
+        item = _make_item(scene, xyxy=(0, 0, 400, 300), text="Hi", font_size=16.0)
+        item._update_flow_layout()
+        assert item.layout._vertical_center_always is True
+
+    def test_left_alignment_centers_vertically(self, scene):
+        """AlignLeft still vertically centers the single text line."""
+        item = _make_item(scene, xyxy=(0, 0, 400, 300), text="Hi", font_size=16.0)
+        item._update_flow_layout()
+        item.setAlignment(0)  # Left
+        line_y = self._first_line_y(item)
+        # With 300px tall block and a ~20px line, centering puts the line
+        # well below the top edge.  Buggy behaviour would keep it near 0.
+        assert line_y > 50, f"Left-aligned flow text should be centered: line_y={line_y:.1f}"
+
+    def test_right_alignment_centers_vertically(self, scene):
+        """AlignRight still vertically centers the single text line."""
+        item = _make_item(scene, xyxy=(0, 0, 400, 300), text="Hi", font_size=16.0)
+        item._update_flow_layout()
+        item.setAlignment(2)  # Right
+        line_y = self._first_line_y(item)
+        assert line_y > 50, f"Right-aligned flow text should be centered: line_y={line_y:.1f}"
+
+    def test_default_center_alignment_centers_vertically(self, scene):
+        """AlignCenter keeps its existing vertical centering (sanity)."""
+        item = _make_item(scene, xyxy=(0, 0, 400, 300), text="Hi", font_size=16.0)
+        item._update_flow_layout()
+        item.setAlignment(1)  # Center
+        line_y = self._first_line_y(item)
+        assert line_y > 50, f"Center-aligned flow text should be centered: line_y={line_y:.1f}"
+
+    def test_per_line_shift_matches_center_offset(self, scene):
+        """The line y offset equals (max_height - shrink_height) / 2 - margin —
+        i.e. the text block is vertically centered inside the control-box."""
+        item = _make_item(scene, xyxy=(0, 0, 400, 300), text="Hi", font_size=16.0)
+        item._update_flow_layout()
+        item.setAlignment(0)  # Left
+
+        layout = item.layout
+        margin = item.document().documentMargin()
+        expected_top = (layout.max_height - layout.shrink_height) / 2 - margin
+
+        # The baseline line position before centering is at doc_margin; after
+        # centering it is shifted by `expected_top`.
+        line_y = self._first_line_y(item)
+        assert abs(line_y - (margin + expected_top)) < 2.0, (
+            f"line_y={line_y:.2f} expected={margin + expected_top:.2f} "
+            f"max_h={layout.max_height:.1f} shrink={layout.shrink_height:.1f}"
+        )
+
+    def test_vertical_flag_survives_mode_switch(self, scene):
+        """After a vertical->horizontal round-trip the layout is re-opted in."""
+        blk = _make_blk(xyxy=(0, 0, 400, 300), text="Hi", font_size=16.0)
+        blk.fontformat.vertical = True
+        item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(item)
+        self._center(item)  # ensure layout ran
+        item.setVertical(False)
+        assert isinstance(item.layout, HorizontalTextDocumentLayout)
+        assert item.layout._vertical_center_always is True
+
+    def _center(self, item):
+        """Force a synchronous horizontal layout pass."""
+        item.layout.reLayoutEverything()
+        item.layout.reLayout()

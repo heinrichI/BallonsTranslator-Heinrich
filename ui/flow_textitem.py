@@ -295,6 +295,7 @@ class FlowTextBlkItem(TextBlkItem):
             if isinstance(self.layout, HorizontalTextDocumentLayout):
                 lp = self._left_points[:]
                 rp = self._right_points[:]
+                self.layout._vertical_center_always = True
                 self.layout.set_boundary_functions(
                     left_fn=lambda y, _lp=lp: interpolate_boundary(_lp, y),
                     right_fn=lambda y, _rp=rp: interpolate_boundary(_rp, y),
@@ -522,8 +523,8 @@ class FlowTextBlkItem(TextBlkItem):
                     # where grow undoes shrink and triggers another cycle.
                     if self.font_adjuster._auto_grow_enabled and not font_changed:
                         font_changed = self.font_adjuster.grow() or font_changed
-                else:
-                    _debug("  _update_flow_layout: _auto_font_adjust=False, shrink/grow SKIPPED")
+                # else:
+                #     _debug("  _update_flow_layout: _auto_font_adjust=False, shrink/grow SKIPPED")
                 if font_changed:
                     # Notify the text panel so it refreshes the font-size display.
                     try:
@@ -602,6 +603,11 @@ class FlowTextBlkItem(TextBlkItem):
         """
         # 1. Switch layout engine first (Vertical/HorizontalTextDocumentLayout)
         super().setVertical(vertical)
+        # 1b. Re-opt the new layout into always-vertical-centering.
+        #     setVertical() creates a fresh HorizontalTextDocumentLayout whose
+        #     _vertical_center_always default is False — re-apply it here.
+        if not vertical and isinstance(self.layout, HorizontalTextDocumentLayout):
+            self.layout._vertical_center_always = True
         # 2. Save the current bounding rect AFTER layout switch.
         #    Use _display_rect + pos() instead of absBoundingRect() because
         #    absBoundingRect() relies on boundingRect() which can return near-zero
@@ -615,6 +621,22 @@ class FlowTextBlkItem(TextBlkItem):
         self._update_flow_layout()
         if self._left_points and self._right_points:
             self.save_flow_points()
+
+    # ── Alignment override ─────────────────────────────────────
+
+    def setAlignment(self, value, restore_cursor=False, repaint_background=True, *args, **kwargs):
+        """Override TextBlkItem.setAlignment() to re-layout flow text after
+        the alignment flag changes.
+
+        The base setAlignment() only stores the Qt alignment flag and repaints;
+        it does NOT re-layout.  Without re-layout, the vertical centering
+        offset computed in HorizontalTextDocumentLayout.reLayout() (which
+        depends on doc.defaultTextOption().alignment()) would not be
+        recalculated until some other event triggers a layout pass.
+        """
+        super().setAlignment(value, restore_cursor=restore_cursor, repaint_background=repaint_background, *args, **kwargs)
+        if isinstance(self.layout, HorizontalTextDocumentLayout):
+            self._update_flow_layout()
 
     # ── Font change override ────────────────────────────────────
 

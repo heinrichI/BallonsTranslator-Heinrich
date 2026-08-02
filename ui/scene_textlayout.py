@@ -918,6 +918,10 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         self._right_boundary_fn = None
         self._has_overflow_char_break: bool = False  # True if char-level breaks AND vertical overflow
         self._has_char_level_breaks: bool = False  # True if ANY char-level breaks (regardless of overflow)
+        # When True, vertically center the text block regardless of horizontal
+        # alignment (flow text items opt in so left/right/justify still centers
+        # by height).  Default False keeps legacy behaviour for regular blocks.
+        self._vertical_center_always: bool = False
     def set_line_x_offsets(self, left_offsets: dict, right_offsets: dict = None):
         """Store per-line left offsets and right boundaries, trigger relayout."""
         self._line_left_offsets = left_offsets if left_offsets is not None else {}
@@ -958,7 +962,8 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             self.available_height = new_height
             self.size_enlarged.emit()
 
-        if VERTICAL_CENTER and doc.defaultTextOption().alignment() == Qt.AlignmentFlag.AlignCenter:
+        alignment = doc.defaultTextOption().alignment()
+        if VERTICAL_CENTER and (self._vertical_center_always or alignment == Qt.AlignmentFlag.AlignCenter):
             block = doc.firstBlock()
             y_offset = (self.max_height - new_height) / 2 - doc_margin
             while block.isValid():

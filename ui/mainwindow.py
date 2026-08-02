@@ -94,6 +94,7 @@ class MainWindow(mainwindow_cls):
     restart_signal = Signal()
     create_errdialog = Signal(str, str, str)
     create_infodialog = Signal(dict)
+    create_yesno_dialog = Signal(dict)
 
      # Define the signal at the class level with correct types
     data_updated = Signal(str, str, QImage, list)
@@ -105,6 +106,8 @@ class MainWindow(mainwindow_cls):
         self.create_errdialog.connect(self.on_create_errdialog)
         shared.create_infodialog_in_mainthread = self.create_infodialog.emit
         self.create_infodialog.connect(self.on_create_infodialog)
+        shared.create_yesno_dialog_in_mainthread = self.create_yesno_dialog.emit
+        self.create_yesno_dialog.connect(self.on_create_yesno_dialog)
         shared.register_view_widget = self.register_view_widget
 
         self.app = app
@@ -646,8 +649,8 @@ class MainWindow(mainwindow_cls):
         self.canvas.clearToolStates()
 
     def conditional_save(self, keep_exist_as_backup=False):
-        LOGGER.debug("[SAVE] conditional_save: projstate_unsaved=%s opening_dir=%s save_on_page_changed=%s",
-            self.canvas.projstate_unsaved, self.opening_dir, self.save_on_page_changed)
+        # LOGGER.debug("[SAVE] conditional_save: projstate_unsaved=%s opening_dir=%s save_on_page_changed=%s",
+        #     self.canvas.projstate_unsaved, self.opening_dir, self.save_on_page_changed)
         if self.canvas.projstate_unsaved and not self.opening_dir:
             update_scene_text = self.canvas.text_change_unsaved()
             save_rst_only = not self.canvas.draw_change_unsaved()
@@ -667,8 +670,8 @@ class MainWindow(mainwindow_cls):
         item = self.pageList.currentItem()
         self.page_changing = True
         was_opening_dir = self.opening_dir
-        LOGGER.debug("[SAVE] pageListCurrentItemChanged: projstate_unsaved=%s opening_dir=%s",
-            self.canvas.projstate_unsaved, self.opening_dir)
+        # LOGGER.debug("[SAVE] pageListCurrentItemChanged: projstate_unsaved=%s opening_dir=%s",
+        #     self.canvas.projstate_unsaved, self.opening_dir)
         if item is not None:
             if self.save_on_page_changed:
                 self.conditional_save()
@@ -1714,6 +1717,14 @@ class MainWindow(mainwindow_cls):
         QMessageBox.StandardButton.NoButton
         dialog = MessageBox(**info_dict)
         dialog.show()   # exec_ will block main thread
+
+    def on_create_yesno_dialog(self, info_dict: dict):
+        question = info_dict.get('question', '')
+        dialog_id = info_dict.get('dialog_id', '')
+        reply = QMessageBox.question(self, self.tr('Translation Quality'), question, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        result = reply == QMessageBox.Yes
+        shared._yesno_result[dialog_id] = result
+        shared._yesno_event.set()
 
     def setupRegisterWidget(self):
         self.titleBar.viewMenu.addSeparator()

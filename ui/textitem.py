@@ -847,7 +847,16 @@ class TextBlkItem(QGraphicsTextItem):
             self.block_change_signal = True
             cursor.mergeCharFormat(cfmt)
             self.block_change_signal = False
-        cursor.mergeBlockCharFormat(cfmt)
+        # Apply to block format only when there is no active selection or the
+        # whole document is selected. Otherwise mergeBlockCharFormat would
+        # overwrite the format of the entire block, ignoring the selected
+        # fragment (bold/italic/etc. would apply to all text instead of just
+        # the selection).
+        doc = self.document()
+        full_doc_selected = (cursor.selectionStart() == 0 and
+                             cursor.selectionEnd() == doc.rootFrame().lastPosition())
+        if not cursor.hasSelection() or full_doc_selected:
+            cursor.mergeBlockCharFormat(cfmt)
         cursor.clearSelection()
         self.setTextCursor(cursor)
         # Always update document default font to match the cursor font
@@ -1044,12 +1053,19 @@ class TextBlkItem(QGraphicsTextItem):
     def setFontColor(self, value: Tuple, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, force=False):
         cursor, after_kwargs = self._before_set_ffmt(set_selected, restore_cursor)
         cfmt = QTextCharFormat()
-        cfmt.setForeground(QColor(*value))
+        # Coerce components to int — undo values may be floats (e.g. [0.0, 0.0, 0.0])
+        # and QColor requires ints.
+        cfmt.setForeground(QColor(*[int(c) for c in value]))
         self.set_cursor_cfmt(cursor, cfmt, True)
         self._after_set_ffmt(cursor, repaint_background=repaint_background, restore_cursor=restore_cursor, **after_kwargs)
 
     def setStrokeColor(self, scolor, **kwargs):
-        self.stroke_qcolor = scolor if isinstance(scolor, QColor) else QColor(*scolor)
+        if isinstance(scolor, QColor):
+            self.stroke_qcolor = scolor
+        else:
+            # Coerce components to int — undo values may be floats (e.g. [0.0, 0.0, 0.0])
+            # and QColor requires ints.
+            self.stroke_qcolor = QColor(*[int(c) for c in scolor])
         self.fontformat.srgb = [self.stroke_qcolor.red(), self.stroke_qcolor.green(), self.stroke_qcolor.blue()]
         self.repaint_background()
         self.update()

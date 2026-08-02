@@ -434,6 +434,9 @@ class ConfigPanel(Widget):
         global_fntfmt_layout.addWidget(sublock, 1, 1)
 
         self.let_effect_combox, sublock = combobox_with_label([dec_program_str, use_global_str], self.tr('Effect'), parent=self, insert_stretch=True)
+        effect_tooltip = self.tr('Opacity and shadow.')
+        self.let_effect_combox.setToolTip(effect_tooltip)
+        sublock.setToolTip(effect_tooltip)
         self.let_effect_combox.activated.connect(self.on_effect_flag_changed)
         global_fntfmt_layout.addWidget(sublock, 2, 0)
         self.let_alignment_combox, sublock = combobox_with_label([dec_program_str, use_global_str], self.tr('Alignment'), parent=self, insert_stretch=True)
@@ -441,6 +444,9 @@ class ConfigPanel(Widget):
         global_fntfmt_layout.addWidget(sublock, 2, 1)
 
         self.let_writing_mode_combox, sublock = combobox_with_label([dec_program_str, use_global_str], self.tr('Writing-mode'), parent=self, insert_stretch=True)
+        writing_mode_tooltip = self.tr('Horizontal or vertical text.')
+        self.let_writing_mode_combox.setToolTip(writing_mode_tooltip)
+        sublock.setToolTip(writing_mode_tooltip)
         self.let_writing_mode_combox.activated.connect(self.on_writing_mode_flag_changed)
         global_fntfmt_layout.addWidget(sublock, 3, 0)
         self.let_family_combox, sublock = combobox_with_label([self.tr('Keep existing'), self.tr('Always use global setting')], self.tr('Font Family'), parent=self, insert_stretch=True)

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .base import BaseTranslator, register_translator
 
-from utils.message import create_error_dialog
+from utils.message import create_error_dialog, create_yes_no_dialog
 
 class InvalidNumTranslations(Exception):
     """Exception raised when the number of translations does not match the number of sources."""
@@ -499,8 +499,11 @@ class LLM_API_Translator(BaseTranslator):
                     tr: str = ratio_response.translations[0].translation
                     current_ratio = len(tr) / len(src)
                     if current_ratio < RATIO_THRESHOLD and (len(src) > 25):
-                        create_error_dialog(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}", 'Translation failed.')
-                        raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
+                        if not create_yes_no_dialog(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}).\nSrc={src}\nTrans={tr}\n\nStop translation?"):
+                            raise TranslationIntegrityError(f"ID {i}: Low compression ratio ({current_ratio:.2f} < {RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
+                        else:
+                            self.logger.warning(f"Low compression ignored by user, continuing with: {tr}.")
+                            ordered_translations[i] = tr
                     else:
                         self.logger.warning(f"Get translation for low compression: {tr}.")
                         ordered_translations[i] = tr
@@ -510,7 +513,7 @@ class LLM_API_Translator(BaseTranslator):
                     ordered_translations[i] = ordered_translations[i].removesuffix("{}")
 
             translations.extend(ordered_translations)
-            self.logger.info(f"Successfully translated batch of {num_src}. Tokens used: {self.token_count_last}")
+            self.logger.info(f"Successfully translated batch len={num_src}. Tokens used: {self.token_count_last}")
 
                 # except TranslationIntegrityError as e:
                 #     skipped_translation_retry_attempt += 1
