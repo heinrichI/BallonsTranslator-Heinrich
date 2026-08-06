@@ -326,8 +326,48 @@ class PaddleOCRVL16Color(OCRBase):
     def updateParam(self, param_key: str, param_content):
         super().updateParam(param_key, param_content)
         if param_key == 'model_path':
-            self.model = None
-            self.processor = None
+            # Eagerly reload model when model_path changes.
+            try:
+                if self.model is not None:
+                    try:
+                        del self.model
+                    except Exception:
+                        pass
+                self.model = None
+                self.processor = None
+                # reset mit_model so it will be recreated on next load
+                try:
+                    if getattr(self, 'mit_model', None) is not None:
+                        del self.mit_model
+                except Exception:
+                    pass
+                self.mit_model = None
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    self._load_model()
+                    # Log successful reload
+                    try:
+                        self.logger.info(f"Reloaded OCR model from {self._get_model_dir()}")
+                    except Exception:
+                        pass
+                except Exception:
+                    raise
+            except Exception as e:
+                self.logger.error(f"Failed to load model from new model_path: {e}", exc_info=self.debug_mode)
+                self.model = None
+                self.processor = None
+                self.mit_model = None
+                self.module_init_report = {
+                    'module': 'PaddleOCRVL16Color',
+                    'device': self.device,
+                    'model_dir': self._get_model_dir(),
+                    'success': False,
+                    'error': str(e),
+                }
             return
         device = self.params['device']['value']
         if self.device != device and self.model is not None:

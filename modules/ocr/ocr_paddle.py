@@ -160,6 +160,7 @@ if PADDLE_OCR_AVAILABLE:
         }
 
         device = DEFAULT_DEVICE
+        _load_model_keys = {'model'}
 
         def __init__(self, **params) -> None:
             super().__init__(**params)
@@ -175,7 +176,6 @@ if PADDLE_OCR_AVAILABLE:
             self.output_format = self.params["output_format"]["value"]
             self.model = None
             self._setup_logging()
-            self._load_model()
 
         def _setup_logging(self):
             if self.debug_mode:
@@ -387,6 +387,9 @@ if PADDLE_OCR_AVAILABLE:
                 self.det_limit_side_len = self.params["det_limit_side_len"]["value"]
                 self.rec_batch_num = self.params["rec_batch_num"]["value"]
                 self.drop_score = self.params["drop_score"]["value"]
+                # Mark model as unloaded so all_model_loaded() reports False while it is being rebuilt.
+                # This keeps the lazy-loading machinery consistent when run under load_model_on_demand.
+                self.model = None
                 self._load_model()
             elif param_key == "text_case":
                 self.text_case = self.params["text_case"]["value"]

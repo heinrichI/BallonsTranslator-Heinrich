@@ -28,7 +28,7 @@ class ModuleConfig(Config):
     translate_source: str = '日本語'
     translate_target: str = '简体中文'
     check_need_inpaint: bool = True
-    load_model_on_demand: bool = False
+    load_model_on_demand: bool = True
     empty_runcache: bool = False
 
     def get_params(self, module_key: str, for_saving=False) -> dict:

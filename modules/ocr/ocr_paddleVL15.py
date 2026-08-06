@@ -26,6 +26,10 @@ class PaddleOCRVL15(OCRBase):
     """
     params = {
         "device": DEVICE_SELECTOR(),
+        "model_path": {
+            "value": "",
+            "description": "Path to PaddleOCR-VL-1.5 model dir. Leave empty to use default downloaded model.",
+        },
         "task": {
             "type": "selector",
             "options": ["ocr", "spotting"],
@@ -246,13 +250,14 @@ class PaddleOCRVL15(OCRBase):
             warnings.filterwarnings("ignore", message="Unrecognized keys in .rope_parameters.")
             warnings.filterwarnings("ignore", message="`torch_dtype` is deprecated")
             warnings.filterwarnings("ignore", message="`PaddleOCRVLProcessor` defines")
+            model_dir = self.params.get('model_path', {}).get('value', '').strip() or LOCAL_MODEL_DIR
             model = AutoModelForImageTextToText.from_pretrained(
-                LOCAL_MODEL_DIR,
+                model_dir,
                 dtype=dtype,
                 **load_kwargs
             ).to(self.device).eval()
-
-        processor = AutoProcessor.from_pretrained(LOCAL_MODEL_DIR)
+ 
+        processor = AutoProcessor.from_pretrained(model_dir)
 
         try:
             if getattr(model, "generation_config", None) is not None:
@@ -292,6 +297,41 @@ class PaddleOCRVL15(OCRBase):
 
     def updateParam(self, param_key: str, param_content):
         super().updateParam(param_key, param_content)
+        if param_key == 'model_path':
+            # Eagerly reload model when model_path changes.
+            try:
+                if self.model is not None:
+                    try:
+                        del self.model
+                    except Exception:
+                        pass
+                self.model = None
+                self.processor = None
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    self._load_model()
+                    try:
+                        self.logger.info(f"Reloaded OCR model from {self.params.get('model_path', {}).get('value', '').strip() or LOCAL_MODEL_DIR}")
+                    except Exception:
+                        pass
+                except Exception:
+                    raise
+            except Exception as e:
+                self.logger.error(f"Failed to load model from new model_path: {e}", exc_info=self.debug_mode)
+                self.model = None
+                self.processor = None
+                self.module_init_report = {
+                    'module': 'PaddleOCRVL15',
+                    'device': self.device,
+                    'model_dir': self.params.get('model_path', {}).get('value', '').strip() or LOCAL_MODEL_DIR,
+                    'success': False,
+                    'error': str(e),
+                }
+            return
         device = self.params['device']['value']
         if self.device != device and self.model is not None:
             try:

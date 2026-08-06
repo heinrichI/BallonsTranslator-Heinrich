@@ -315,8 +315,47 @@ class PaddleOCRVL16(OCRBase):
     def updateParam(self, param_key: str, param_content):
         super().updateParam(param_key, param_content)
         if param_key == 'model_path':
-            self.model = None
-            self.processor = None
+            # Attempt to eagerly reload model when model_path changes.
+            # Clear existing references to free memory, then try to load the new model.
+            try:
+                if self.model is not None:
+                    try:
+                        # Delete strong reference to allow memory/freeing on CUDA
+                        del self.model
+                    except Exception:
+                        pass
+                self.model = None
+                self.processor = None
+                # Try to free CUDA cache if available
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                # Load model from new path; _load_model() will set module_init_report
+                try:
+                    self._load_model()
+                    # Log successful reload
+                    try:
+                        self.logger.info(f"Reloaded OCR model from {self._get_model_dir()}")
+                    except Exception:
+                        # If _get_model_dir missing or logging fails, ignore
+                        pass
+                except Exception as e:
+                    # _load_model may raise; surface and record failure
+                    raise
+            except Exception as e:
+                self.logger.error(f"Failed to load model from new model_path: {e}", exc_info=self.debug_mode)
+                # Ensure state reflects failed load
+                self.model = None
+                self.processor = None
+                self.module_init_report = {
+                    'module': 'PaddleOCRVL16',
+                    'device': self.device,
+                    'model_dir': self._get_model_dir(),
+                    'success': False,
+                    'error': str(e),
+                }
             return
         device = self.params['device']['value']
         if self.device != device and self.model is not None:

@@ -301,13 +301,14 @@ class ComicTextAndBubbleDetector(TextDetectorBase):
         "description": "HF object-detection (ogkalu). pip install transformers torch",
     }
 
-    _load_model_keys = {"pipe"}
+    _load_model_keys = {"pipe", "_ctd_detector"}
 
     def __init__(self, **params) -> None:
         super().__init__(**params)
         self.pipe = None
         self._model_id = None
         self._device = None
+        self._ctd_detector = None
 
     def _resolve_model_ref(self, model_id: str) -> str:
         """Resolve model_id: if it's a relative path, try repo root."""
@@ -479,9 +480,14 @@ class ComicTextAndBubbleDetector(TextDetectorBase):
         # keep a copy of the coarse HF mask for debugging
         coarse_mask = mask.copy()
         try:
-            ctd = ComicTextDetector()
-            ctd._load_model()
-            ctd_mask, ctd_blk_list = ctd._detect(img, None)
+            # Cache ComicTextDetector instance to avoid reloading model on every call.
+            if self._ctd_detector is None:
+                self._ctd_detector = ComicTextDetector()
+                try:
+                    self._ctd_detector._load_model()
+                except Exception as e:
+                    self.logger.warning("Failed to load CTD sub-detector: %s", e)
+            ctd_mask, ctd_blk_list = self._ctd_detector._detect(img, None)
             # if CTD returned a valid mask, use it; otherwise fall back to coarse mask
             if isinstance(ctd_mask, np.ndarray) and ctd_mask.dtype == np.uint8:
                 mask = ctd_mask

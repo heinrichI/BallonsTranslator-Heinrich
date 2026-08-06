@@ -1,134 +1,115 @@
 # Implementation Plan
 
-[Overview]
-Integrate and verify the existing ogkalu/comic-text-and-bubble-detector usage so object detections (text_bubble and text_free) produce TextBlocks and CTD.pixel-level segmentation (refine_mask) is applied to produce per-character masks; bubble detections are skipped.
+## [Overview]
 
-This change ensures accurate per-character masks for inpainting and OCR downstream while reusing the existing HF pipeline implementation in modules/textdetector/detector_comic-text-and-bubble-detector.py. The approach preserves current registration and UI parameters, validates device/model selection, and adds verification and test steps so the detector behaves consistently with other detectors (CTD + HF pipeline integration).
+Make lazy model loading the default behavior for inpaint, OCR, and detector modules, and fix the modules that currently defeat lazy loading by loading models eagerly in `__init__` or re-creating them on every call.
 
-[Types]
-No new Python types required.
+The codebase already has a complete lazy-loading infrastructure: `BaseModule` (`modules/base.py`) provides `_load_model_keys`, `load_model()`, `_load_model()`, `all_model_loaded()`, and `unload_model()`. The entry points `TextDetectorBase.detect()`, `OCRBase.run_ocr()`, and `InpainterBase.inpaint()` already check `all_model_loaded()` and call `load_model()` on first use. The `ModuleThread._set_module()` (`ui/module_manager.py` line 58-59) already gates eager loading behind `pcfg.module.load_model_on_demand`. However, the flag **defaults to `False`** (`utils/config.py` line 31), so all four modules load their models at startup when `mainwindow.py` calls `setTextDetector()/setOCR()/setInpainter()/setTranslator()`.
 
-Re-used types and constraints:
-- TextBlock (utils/textblock.TextBlock): fields used: xyxy: List[int|float] (x1,y1,x2,y2), lines: List[List[List[int]]] (polygons), font_size (float), _detected_font_size (int/float), det_model (str)
-  - Validation: xyxy must be clipped to image bounds; lines must contain polygons with integer coordinates; font_size > 0.
-- Mask: numpy.ndarray, dtype=uint8, shape=(H,W), values {0,255}
-- HF pipeline results: List[Dict] with keys:
-  - score: float in [0,1]
-  - label: str in {"bubble","text_bubble","text_free"} (case-insensitive)
-  - box: dict with xmin,ymin,xmax,ymax (numbers)
-- ProjImgTrans (utils.proj_imgtrans.ProjImgTrans) optional context passed into detect()
+Two genuine bugs defeat lazy loading even when the flag is enabled:
 
-[Files]
-Single sentence: Modify the existing HF detector module and ensure tests and documentation are updated.
+1. **`modules/ocr/ocr_paddle.py`** (line 178): calls `self._load_model()` inside `__init__`, loading the PaddleOCR model eagerly regardless of the flag. It also does NOT define `_load_model_keys`, so `unload_model()` cannot free it.
 
-Detailed breakdown:
-- Existing file to modify:
-  - modules/textdetector/detector_comic-text-and-bubble-detector.py
-    - Purpose: HF object-detection -> parse detections -> create TextBlocks -> draw rough masks -> call CTD.refine_mask for pixel-level refinement -> return (mask, blk_list)
-    - Specific modifications (if any required by verification):
-      - Ensure explicit skip for label "bubble" (confirmed)
-      - Confirm call refine_mask(img, mask, blk_list) is present and receives correct arguments (img as RGB ndarray, mask as uint8, blk_list list[TextBlock]).
-      - Verify parameter names and UI keys: "model_id", "confidence threshold", "box_padding", "font size multiplier", "font size max", "font size min", "mask dilate size", "device"
-      - Add defensive checks: handle missing/irregular box dicts, non-dict pipeline outputs, and torch/device fallback logic already present.
-      - Add inline docstrings/comments explaining the decision to skip "bubble" detections and call CTD.refine_mask.
-- New files to create:
-  - None required for core change.
-- Files to delete/move:
-  - None.
-- Configuration updates:
-  - README or doc/modules/ note (optional) to document that ogkalu detector calls CTD.refine_mask; add short entry in doc/modules/ or CHANGELOG if desired.
+2. **`modules/textdetector/detector_comic-text-and-bubble-detector.py`** (lines 482-484): creates a **new `ComicTextDetector()` and loads the CTD model on every single `_detect()` call** — never cached, never unloaded, causing repeated model loads and memory leaks.
 
-[Functions]
-Single sentence: Keep existing functions; add or adjust small helper validation and logging.
+All other audited modules are properly lazy (set model attrs to `None` in `__init__`, define `_load_model_keys`, don't call `_load_model()` in `__init__`): `detector_ctd.py`, `ocr_paddleVL15/16/16Color/my/myColor.py`, `ocr_mit.py`, `ocr_manga.py`, `ocr_oneocr.py`, `ocr_stariver.py`, `ocr_llm_api.py`, `ocr_none.py`, AOT/Lama inpainters.
 
-Detailed breakdown:
-- New helper functions (inside detector_comic-text-and-bubble-detector.py if needed):
-  - _validate_detection_item(item) -> bool
-    - Purpose: robustly validate HF pipeline item dict shape before reading label/box/score.
-    - Implementation: ensure dict, contains numeric score, label str, box dict with xmin/ymin/xmax/ymax.
-  - (Optional) _safe_box_from_item(item, w, h) -> Tuple[int,int,int,int] — clamps and returns integers (x1,y1,x2,y2).
-- Existing functions (verify and adjust as needed):
-  - _iou_xyxy(a, b) — keep as implemented for overlap merging.
-  - _merge_overlapping_blocks(blk_list, iou_threshold) — keep.
-  - _clip_blocks_to_page(blk_list, img_w, img_h) — keep.
-  - _expand_blocks(blk_list, pad, w, h) — keep.
-  - ComicTextAndBubbleDetector._load_model(self) — verify pipeline creation and device mapping; keep.
-  - ComicTextAndBubbleDetector._detect(self, img, proj) -> Tuple[np.ndarray, List[TextBlock]]
-    - Ensure flow:
-      1. Normalize input to 3-channel RGB (already present).
-      2. Read conf_thr & pad_val from params (already present).
-      3. Run HF pipeline and filter results by score >= conf_thr.
-      4. Skip detections with label == "bubble".
-      5. For text_bubble/text_free create TextBlock with xyxy and polygon lines.
-      6. Merge, pad, sort, clip.
-      7. Draw rough mask (rect/polygon) into mask uint8.
-      8. Call refine_mask(img, mask, blk_list) from modules/textdetector/ctd/textmask.py
-      9. Dilate mask per param, return mask, blk_list.
-    - Required change: none if file already matches; else align to the above flow.
-- Removed functions: None.
+## [Types]
 
-[Classes]
-Single sentence: Modify existing ComicTextAndBubbleDetector only where defensive validation or logging is needed.
+No new types are introduced. The change modifies existing class attributes and method behavior.
 
-Detailed breakdown:
-- Modified class:
-  - ComicTextAndBubbleDetector (modules/textdetector/detector_comic-text-and-bubble-detector.py)
-    - Key methods to verify/adjust:
-      - __init__: ensure self.pipe, self._model_id, self._device initial state (already present).
-      - _load_model: ensure torch/cuda fallback logic present and informative logging used.
-      - _detect: confirm call refine_mask(img, mask, blk_list) and that blk._detected_font_size/font_size adjustments are applied after refine_mask as appropriate.
-      - updateParam: reset self.pipe on model/device changes (already present).
-    - Inheritance: TextDetectorBase
-- New classes: None.
-- Removed classes: None.
+- `ModuleConfig.load_model_on_demand: bool` — default changes from `False` to `True` in `utils/config.py`.
+- `PaddleOCRModule._load_model_keys: set` — new class attribute `{'model'}` added in `modules/ocr/ocr_paddle.py`.
+- `ComicTextAndBubbleDetector._ctd_detector: Optional[ComicTextDetector]` — new instance attribute caching the CTD sub-detector in `modules/textdetector/detector_comic-text-and-bubble-detector.py`.
+- `ComicTextAndBubbleDetector._load_model_keys: set` — extended from `{'pipe'}` to `{'pipe', '_ctd_detector'}` so `unload_model()` frees both.
 
-[Dependencies]
-Single sentence: No new packages; transformers, torch, and pillow are required and already referenced.
+## [Files]
 
-Details:
-- Required packages (verify presence in requirements.txt):
-  - transformers >= 4.38
-  - torch
-  - pillow
-- Model files:
-  - ogkalu/comic-text-and-bubble-detector will be downloaded by transformers; ensure network/caching policies noted in docs.
-- Integration requirements:
-  - CTD refine_mask uses utils.imgproc_utils helpers; ensure these imports remain available.
+### Modified files
 
-[Testing]
-Single sentence: Manual UI testing plus a small scripted validation of detection -> refinement flow.
+1. **`utils/config.py`** (line 31)
+   - Change `load_model_on_demand: bool = False` to `load_model_on_demand: bool = True`.
 
-Test plan:
-- Manual UI:
-  1. Launch app via virtualenv: & "j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe" launch.py
-  2. Settings → Text Detection → select "comic-text-and-bubble-detector"
-  3. Load diverse comic page images (vertical/horizontal, different font sizes).
-  4. Run detection and confirm:
-     - text_bubble and text_free produce TextBlocks (visible in UI)
-     - bubble detections are skipped
-     - mask highlights per-character regions (not just rectangles)
-     - OCR accuracy improves on refined masks
-- Scripted smoke test (python script):
-  - Small script to call module API:
-    from modules.textdetector.detector_comic-text-and-bubble-detector import ComicTextAndBubbleDetector
-    det = ComicTextAndBubbleDetector()
-    mask, blks = det.detect(img)  # with sample numpy array
-    assert isinstance(mask, np.ndarray) and mask.dtype == np.uint8
-    assert all(isinstance(b, TextBlock) for b in blks)
-- Edge case tests:
-  - HF pipeline returns malformed entries (graceful skip, log warning).
-  - Empty results -> return empty blk_list and zero mask.
-  - Large boxes clipped correctly.
-  - Device not available (cuda requested but unavailable) -> fallback to cpu.
+2. **`modules/ocr/ocr_paddle.py`**
+   - Add `_load_model_keys = {'model'}` class attribute (near line 162, after `device = DEFAULT_DEVICE`).
+   - Remove the `self._load_model()` call from `__init__` (line 178).
+   - In `updateParam` (lines 370-390): when a model-affecting param changes, set `self.model = None` before calling `self._load_model()` so the next `run_ocr()` re-loads lazily and `all_model_loaded()` reports `False` until then.
 
-[Implementation Order]
-Single sentence: Verify and, if necessary, adjust the existing detector module, document behavior, then create a tracking task to implement and validate.
+3. **`modules/textdetector/detector_comic-text-and-bubble-detector.py`**
+   - Change `_load_model_keys = {"pipe"}` to `_load_model_keys = {"pipe", "_ctd_detector"}` (line 304).
+   - In `__init__` (lines 306-310): add `self._ctd_detector = None`.
+   - In `_detect()` (lines 481-492): replace the per-call `ComicTextDetector()` creation with a cached instance.
+   - In `updateParam` (lines 569-574): when `model_id` or `device` changes, also reset `self._ctd_detector = None` so the CTD sub-detector is re-created on next use.
 
-Numbered steps:
-1. Confirm code in modules/textdetector/detector_comic-text-and-bubble-detector.py already follows the required flow (HF inference → skip "bubble" → create TextBlocks → merge/pad/sort/clip → draw coarse mask → call refine_mask(img, mask, blk_list) → dilate → return mask, blk_list). If not, apply minimal adjustments.
-2. Add _validate_detection_item and/or _safe_box_from_item helpers if HF outputs need hardening; add small unit tests for these helpers.
-3. Ensure refine_mask call uses image in RGB, mask uint8, and blk_list list[TextBlock]; move font-size post-processing to after refine_mask if needed.
-4. Run smoke tests and manual UI test to confirm detection and mask quality.
-5. Update docs (doc/modules or README) noting that this detector invokes CTD.refine_mask and that "bubble" detections are skipped.
-6. If tests reveal parameter tuning needed, adjust default params ("confidence threshold" 0.3, "box_padding" 3, "mask dilate size" 2).
-7. Merge changes and close the implementation task.
+## [Functions]
+
+### Modified functions
+
+1. **`PaddleOCRModule.__init__`** (`modules/ocr/ocr_paddle.py`, lines 164-178)
+   - Remove `self._load_model()` (line 178). Model loads lazily on first `run_ocr()` via `OCRBase.run_ocr()` → `all_model_loaded()` → `load_model()`.
+
+2. **`PaddleOCRModule.updateParam`** (`modules/ocr/ocr_paddle.py`, lines 370-390)
+   - When a model-affecting param changes (`language`, `device`, `use_angle_cls`, `ocr_version`, `enable_mkldnn`, `det_limit_side_len`, `rec_batch_num`, `drop_score`): set `self.model = None` before calling `self._load_model()`. This ensures the model is re-created lazily on next use and `all_model_loaded()` correctly reports `False` until then.
+
+3. **`ComicTextAndBubbleDetector._detect`** (`modules/textdetector/detector_comic-text-and-bubble-detector.py`, lines 481-492)
+   - Replace the per-call `ComicTextDetector()` instantiation with a cached `self._ctd_detector` instance. Only create and load once; reuse on subsequent calls:
+     ```python
+     if self._ctd_detector is None:
+         self._ctd_detector = ComicTextDetector()
+         self._ctd_detector._load_model()
+     ctd_mask, ctd_blk_list = self._ctd_detector._detect(img, None)
+     ```
+
+4. **`ComicTextAndBubbleDetector.updateParam`** (`modules/textdetector/detector_comic-text-and-bubble-detector.py`, lines 569-574)
+   - When `model_id` or `device` changes, also set `self._ctd_detector = None` so the CTD sub-detector is re-created on next use.
+
+## [Classes]
+
+### Modified classes
+
+1. **`PaddleOCRModule`** (`modules/ocr/ocr_paddle.py`)
+   - Add `_load_model_keys = {'model'}` class attribute.
+   - Remove the eager `_load_model()` call from `__init__`.
+   - Update `updateParam` to reset `self.model = None` before reload.
+
+2. **`ComicTextAndBubbleDetector`** (`modules/textdetector/detector_comic-text-and-bubble-detector.py`)
+   - Extend `_load_model_keys` to include `_ctd_detector`.
+   - Add `self._ctd_detector = None` in `__init__`.
+   - Cache CTD sub-detector in `_detect()`.
+   - Reset `_ctd_detector` in `updateParam` on model/device change.
+
+## [Dependencies]
+
+No new dependencies. No version changes. The existing `pyphen`, `transformers`, `torch`, `paddleocr` (optional), and `ctd` modules are unchanged.
+
+## [Testing]
+
+### New tests
+
+1. **`tests/test_lazy_loading.py`** — new test file verifying:
+   - `ModuleConfig.load_model_on_demand` defaults to `True`.
+   - `PaddleOCRModule.__init__` does NOT call `_load_model()` (model attr is `None` after construction).
+   - `PaddleOCRModule` defines `_load_model_keys = {'model'}`.
+   - `ComicTextAndBubbleDetector.__init__` sets `_ctd_detector = None`.
+   - `ComicTextAndBubbleDetector._load_model_keys` includes both `pipe` and `_ctd_detector`.
+   - `ComicTextAndBubbleDetector._detect` reuses the cached `_ctd_detector` (mock `ComicTextDetector` and assert it is constructed only once across two `_detect` calls).
+
+### Existing tests
+
+- Run `myenv\Scripts\python -m pytest tests/ui/ -v` to ensure no regressions in UI tests.
+- Run `myenv\Scripts\python -m pytest tests/ -v` for the full suite.
+
+### Manual validation
+
+- Launch the app with `& "j:\Comic translate\BallonsTranslator\myenv\Scripts\python.exe" launch.py`.
+- Verify no model loading happens at startup (check log for absence of "Loaded HF object-detection model" / "Loading PaddleOCR model" messages).
+- Run a detection pass and verify the HF model + CTD sub-detector load on first `detect()` call.
+- Toggle the "Load models on demand" checkbox off and verify models load at startup again.
+
+## [Implementation Order]
+
+1. Change `load_model_on_demand` default to `True` in `utils/config.py`.
+2. Fix `modules/ocr/ocr_paddle.py`: add `_load_model_keys`, remove eager `_load_model()` from `__init__`, update `updateParam`.
+3. Fix `modules/textdetector/detector_comic-text-and-bubble-detector.py`: cache CTD sub-detector, extend `_load_model_keys`, update `updateParam`.
+4. Add `tests/test_lazy_loading.py` with the new tests.
+5. Run the full test suite and manual validation.

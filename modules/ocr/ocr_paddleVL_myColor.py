@@ -203,15 +203,56 @@ class PaddleOCRVLMy(OCRBase):
 
     def updateParam(self, param_key: str, param_content):
         super().updateParam(param_key, param_content)
-        # if param_key == 'model_path':
-        #     model = AutoModelForCausalLM.from_pretrained(
-        #         self.params['model_path']['value'],
-        #         trust_remote_code=True,
-        #         dtype=torch.float16 if self.device == "cuda" else torch.float32
-        #         # dtype=torch.bfloat16,
-        #     ).to(self.device).eval()
+        if param_key == 'model_path':
+            # Eagerly reload model when model_path changes.
+            try:
+                if self.model is not None:
+                    try:
+                        del self.model
+                    except Exception:
+                        pass
+                self.model = None
+                self.processor = None
+                # reset mit_model so it will be recreated on next load
+                try:
+                    if getattr(self, 'mit_model', None) is not None:
+                        del self.mit_model
+                except Exception:
+                    pass
+                self.mit_model = None
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    self._load_model()
+                    # Log successful reload
+                    try:
+                        self.logger.info(f"Reloaded OCR model from {self.params.get('model_path', {}).get('value', '').strip() or MODEL_PATH}")
+                    except Exception:
+                        pass
+                except Exception:
+                    raise
+            except Exception as e:
+                self.logger.error(f"Failed to load model from new model_path: {e}", exc_info=self.debug_mode)
+                self.model = None
+                self.processor = None
+                self.mit_model = None
+                self.module_init_report = {
+                    'module': 'PaddleOCRVLMyColor',
+                    'device': self.device,
+                    'model_dir': self.params.get('model_path', {}).get('value', '').strip() or MODEL_PATH,
+                    'success': False,
+                    'error': str(e),
+                }
+            return
         device = self.params['device']['value']
         if self.device != device and self.model is not None:
-            self.model.to(device)
+            try:
+                self.model.to(device)
+            except Exception as e:
+                self.logger.error(f"Failed to move model to device {device}: {e}")
+        self.device = device
 
 
