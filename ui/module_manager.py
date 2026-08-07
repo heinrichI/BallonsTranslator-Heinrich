@@ -327,7 +327,10 @@ class ImgtransThread(QThread):
             self.finish_blktrans.emit(mode, blk_ids)
 
         if mode != 0 and mode < 3:
-            self.translate_thread.module.translate_textblk_lst(blk_list)
+            try:
+                self.translate_thread.module.translate_textblk_lst(blk_list)
+            except Exception as e:
+                create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
             self.finish_blktrans.emit(mode, blk_ids)
         if mode > 1:
             im_h, im_w = tgt_img.shape[:2]
@@ -452,7 +455,11 @@ class ImgtransThread(QThread):
                 if self.parallel_trans:
                     self.translate_thread.push_pagekey_queue(imgname)
                 elif not low_vram_trans:
-                    self.translator.translate_textblk_lst(blk_list)
+                    try:
+                        self.translator.translate_textblk_lst(blk_list)
+                    except Exception as e:
+                        create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
+                        return
                     self.translate_counter += 1
                     self.update_translate_progress.emit(self.translate_counter)
                         
@@ -478,7 +485,11 @@ class ImgtransThread(QThread):
             for imgname in self.pages:
                 LOGGER.debug(f'imgtrans_pipeline translate {imgname}')
                 blk_list = self.imgtrans_proj.pages[imgname]
-                self.translator.translate_textblk_lst(blk_list)
+                try:
+                    self.translator.translate_textblk_lst(blk_list)
+                except Exception as e:
+                    create_error_dialog(e, self.tr('Translation Failed.'), 'TranslationFailed')
+                    return
                 self.translate_counter += 1
                 self.update_translate_progress.emit(self.translate_counter)
 

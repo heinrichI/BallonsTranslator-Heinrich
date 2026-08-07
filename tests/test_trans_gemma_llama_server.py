@@ -24,6 +24,8 @@ from modules.translators.trans_llm_api_transgemma import (
     TransGemmaTranslator,
     TranslationElement,
     TranslationResponse,
+    TranslationAbortedError,
+    MAX_CONSECUTIVE_CONNECTION_ERRORS,
     _normalize_translation_payload,
 )
 from utils import shared
@@ -620,6 +622,107 @@ def test_translate_single_no_dialog_on_fallback(monkeypatch):
     # Graceful fallback must NOT pop an error dialog.
     assert translations == ["Hello"]
     mock_dialog.assert_not_called()
+
+
+# ---------- unit: abort whole run after repeated connection errors ----------
+
+def test_request_translation_aborts_after_threshold(monkeypatch):
+    """4 consecutive connection errors raise TranslationAbortedError."""
+    tr = make_translator()
+    tr.client = SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kw: (_ for _ in ()).throw(httpx.ConnectError("server down"))
+    ))
+    monkeypatch.setattr(tr, "_initialize_client", lambda api_key: True)
+    monkeypatch.setattr(tr, "_fetch_context_window", lambda: None)
+
+    # First 3 failures raise the underlying ConnectionError (counted, not aborted).
+    for _ in range(MAX_CONSECUTIVE_CONNECTION_ERRORS):
+        with pytest.raises(httpx.ConnectError):
+            tr._request_translation("Hello", show_dialog=False)
+    assert tr.connection_error_count == MAX_CONSECUTIVE_CONNECTION_ERRORS
+
+    # 4th failure exceeds the threshold -> abort.
+    with pytest.raises(TranslationAbortedError):
+        tr._request_translation("Hello", show_dialog=False)
+
+
+def test_request_translation_resets_counter_on_success(monkeypatch):
+    """A successful request resets the counter, so a flaky server does not abort."""
+    tr = make_translator()
+    calls = {"n": 0}
+
+    def flaky_create(**kw):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise httpx.ConnectError("transient")
+        return FakeCompletion('{"translations":[{"id":1,"translation":"Привет"}]}')
+
+    tr.client = SimpleNamespace(completions=SimpleNamespace(create=flaky_create))
+    monkeypatch.setattr(tr, "_initialize_client", lambda api_key: True)
+    monkeypatch.setattr(tr, "_fetch_context_window", lambda: None)
+
+    # Two failures, then a success -> counter resets to 0.
+    for _ in range(2):
+        with pytest.raises(httpx.ConnectError):
+            tr._request_translation("Hello", show_dialog=False)
+    assert tr.connection_error_count == 2
+    resp = tr._request_translation("Hello", show_dialog=False)
+    assert resp.translations[0].translation == "Привет"
+    assert tr.connection_error_count == 0
+
+
+def test_translate_single_reraises_abort(monkeypatch):
+    """_translate_single must NOT fall back to source text on TranslationAbortedError."""
+    tr = make_translator()
+
+    def fake_request(text, show_dialog=True, srcs=None):
+        raise TranslationAbortedError("abort")
+
+    monkeypatch.setattr(tr, "_request_translation", fake_request)
+    translations = [""]
+    with pytest.raises(TranslationAbortedError):
+        tr._translate_single("Hello", 0, translations)
+    # No fallback happened.
+    assert translations == [""]
+
+
+def test_translate_batch_reraises_abort_no_split(monkeypatch):
+    """_translate_batch must re-raise TranslationAbortedError without binary-splitting."""
+    tr = make_translator()
+    calls = []
+
+    def fake_request(text, show_dialog=True, srcs=None):
+        calls.append(text)
+        raise TranslationAbortedError("abort")
+
+    monkeypatch.setattr(tr, "_request_translation", fake_request)
+    translations = [""] * 2
+    with pytest.raises(TranslationAbortedError):
+        tr._translate_batch(["Hello", "Bye"], [0, 1], translations)
+    # Exactly one request — no recursive split.
+    assert len(calls) == 1
+
+
+def test_translate_propagates_abort(monkeypatch):
+    """_translate propagates TranslationAbortedError so the whole page run stops."""
+    tr = make_translator()
+
+    def fake_request(text, show_dialog=True, srcs=None):
+        raise TranslationAbortedError("abort")
+
+    monkeypatch.setattr(tr, "_request_translation", fake_request)
+    with pytest.raises(TranslationAbortedError):
+        tr._translate(["Hello", "Bye"])
+
+
+def test_is_connection_error_helper():
+    tr = make_translator()
+    assert tr._is_connection_error(ConnectionError("x")) is True
+    assert tr._is_connection_error(httpx.ConnectError("x")) is True
+    assert tr._is_connection_error(httpx.TimeoutException("x")) is True
+    # Server-side API errors are NOT connection errors.
+    assert tr._is_connection_error(ValueError("bad json")) is False
+    assert tr._is_connection_error(RuntimeError("boom")) is False
 
 
 # ---------- live integration (requires llama-server on 127.0.0.1:1234) ----------

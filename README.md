@@ -35,6 +35,24 @@ preview
 
 * Auto Font Sizing
   - Translation pipeline auto-adjusts font size to fill balloon regions with overlap-check layout.
+  
+# FineTune PaddleOCR-VL
+
+Для улучшения работы локального OCR я использую следующее:
+Сохраняю изображения через Save PNG меню.
+И генерирую с похожими шрифтами с помошью
+https://github.com/heinrichI/Genereator-For-Detection
+
+А потом делаю fine-tune PaddleOCR-VL с помошью:
+https://github.com/heinrichI/PaddleOCR-VL-1.6-For-Comics
+
+To improve local OCR performance, I use the following:
+I save images using the Save PNG menu.
+And generate them with similar fonts using
+https://github.com/heinrichI/Genereator-For-Detection
+
+Then I fine-tune PaddleOCR-VL using:
+https://github.com/heinrichI/PaddleOCR-VL-1.6-For-Comics
 
 # Installation
 

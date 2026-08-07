@@ -4,7 +4,7 @@ import logging
 import numpy as np
 from typing import List, Union, Tuple
 
-from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent
+from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent, QMenu, QAction
 from qtpy.QtCore import Qt, QRect, QRectF, QPointF, Signal, QSizeF
 from qtpy.QtGui import (QGradient, QKeyEvent, QFont, QTextCursor, QPixmap, QPainterPath, QTextDocument,
                        QInputMethodEvent, QPainter, QPen, QColor, QTextCharFormat, QTextDocument, QLinearGradient,
@@ -57,6 +57,7 @@ class TextBlkItem(QGraphicsTextItem):
     undo_signal = Signal()
     push_undo_stack = Signal(int, bool)
     propagate_user_edited = Signal(int, str, bool)
+    toggle_flow_mode_requested = Signal(int)
 
     def __init__(self, blk: TextBlock = None, idx: int = 0, set_format=True, show_rect=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -147,44 +148,80 @@ class TextBlkItem(QGraphicsTextItem):
             self.update()
 
     def paint_stroke(self, painter: QPainter):
+        # Render document to image, then apply stroke using QPainterPathStroker
+        from qtpy.QtGui import QImage, QPainterPath, QPainterPathStroker
+        from .misc import pixmap2ndarray
+        import cv2
+        import numpy as np
+        
+        # Render text without stroke to image
         doc = QTextDocument()
         doc.setUndoRedoEnabled(False)
         doc.setDocumentMargin(self.document().documentMargin())
         doc.setDefaultFont(self.document().defaultFont())
         doc.setHtml(self.document().toHtml())
         doc.setDefaultTextOption(self.document().defaultTextOption())
-        cursor = QTextCursor(doc)
-        block = doc.firstBlock()
-        stroke_pen = QPen(self.stroke_qcolor, 0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        letter_spacing = self.fontformat.letter_spacing * 100
-        while block.isValid():
-            it = block.begin()
-            while not it.atEnd():
-                fragment = it.fragment()
-                cfmt = fragment.charFormat()
-                sw = pt2px(cfmt.fontPointSize()) * self.fontformat.stroke_width
-                stroke_pen.setWidthF(sw)
-                pos1 = fragment.position()
-                pos2 = pos1 + fragment.length()
-                cursor.setPosition(pos1)
-                cursor.setPosition(pos2, QTextCursor.MoveMode.KeepAnchor)
-                cfmt.setTextOutline(stroke_pen)
-                if letter_spacing != 100 and not self.fontformat.vertical:
-                    cfmt.setFontLetterSpacingType(QFont.SpacingType.PercentageSpacing)
-                    cfmt.setFontLetterSpacing(letter_spacing)
-                cursor.mergeCharFormat(cfmt)
-                it += 1
-            block = block.next()
 
         layout = VerticalTextDocumentLayout(doc, self.fontformat) if self.fontformat.vertical \
             else HorizontalTextDocumentLayout(doc, self.fontformat)
         layout._draw_offset = self.layout._draw_offset
+        # Copy flow offsets only if they exist (horizontal layout only)
+        if hasattr(self.layout, '_line_left_offsets'):
+            layout._line_left_offsets = self.layout._line_left_offsets
+        if hasattr(self.layout, '_line_right_offsets'):
+            layout._line_right_offsets = self.layout._line_right_offsets
+        if hasattr(self.layout, '_left_boundary_fn'):
+            layout._left_boundary_fn = self.layout._left_boundary_fn
+        if hasattr(self.layout, '_right_boundary_fn'):
+            layout._right_boundary_fn = self.layout._right_boundary_fn
         layout._is_painting_stroke = True
         layout.setMaxSize(self.layout.max_width, self.layout.max_height, False)
         doc.setDocumentLayout(layout)
-
         layout.relayout_on_changed = False
-        doc.drawContents(painter)
+        
+        # Render to image
+        size = self.layout.documentSize().toSize()
+        text_img = QImage(size, QImage.Format.Format_ARGB32)
+        text_img.fill(Qt.GlobalColor.transparent)
+        text_painter = QPainter(text_img)
+        doc.drawContents(text_painter)
+        text_painter.end()
+        
+        # Apply stroke using morphological dilation
+        try:
+            text_array = pixmap2ndarray(text_img, keep_alpha=True)
+            if text_array is not None and text_array.size > 0:
+                alpha = text_array[..., -1]
+                stroke_width = int(pt2px(self.fontformat.font_size) * self.fontformat.stroke_width)
+                if stroke_width > 0:
+                    # Create stroke by dilating the alpha channel
+                    kernel_size = max(3, int(stroke_width * 0.3) * 2 + 1)
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+                    stroke_alpha = cv2.dilate(alpha, kernel, iterations=1)
+                    
+                    # Create stroke image with stroke color
+                    stroke_array = text_array.copy()
+                    stroke_array[..., -1] = stroke_alpha
+                    # Set RGB only where alpha > 0
+                    mask = stroke_alpha > 0
+                    stroke_array[..., 0] = np.where(mask, self.stroke_qcolor.red(), stroke_array[..., 0])
+                    stroke_array[..., 1] = np.where(mask, self.stroke_qcolor.green(), stroke_array[..., 1])
+                    stroke_array[..., 2] = np.where(mask, self.stroke_qcolor.blue(), stroke_array[..., 2])
+                    
+                    # Convert back to QImage and draw stroke first
+                    # stroke_array is RGBA byte order (from pixmap2ndarray) —
+                    # declaring it as ARGB32 would swap R and B channels.
+                    stroke_img = QImage(stroke_array.data, stroke_array.shape[1], stroke_array.shape[0], QImage.Format.Format_RGBA8888)
+                    painter.drawImage(0, 0, stroke_img)
+                    
+                    # Draw original text on top
+                    painter.drawImage(0, 0, text_img)
+        except Exception as e:
+            # Fallback to original method if post-processing fails
+            LOGGER.error(f"Stroke post-processing failed: {e}")
+            doc.drawContents(painter)
+        
+        layout._is_painting_stroke = False
 
     def repaint_background(self):
         empty = self.document().isEmpty()
@@ -574,7 +611,11 @@ class TextBlkItem(QGraphicsTextItem):
             painter.setPen(pen)
             painter.drawRect(self.unpadRect(br))
         elif draw_rect:
-            pen = QPen(TEXTRECT_SHOW_COLOR, 3 / self.get_scale(), Qt.PenStyle.SolidLine)
+            # Check if in normal mode (not flow mode) and use different color
+            if self.blk and not self.blk.is_flow_mode:
+                pen = QPen(QColor(255, 165, 0, 170), 3 / self.get_scale(), Qt.PenStyle.SolidLine)  # Orange for normal mode
+            else:
+                pen = QPen(TEXTRECT_SHOW_COLOR, 3 / self.get_scale(), Qt.PenStyle.SolidLine)  # Blue for flow mode
             painter.setPen(pen)
             painter.drawRect(self.unpadRect(br))
         painter.restore()
@@ -661,9 +702,45 @@ class TextBlkItem(QGraphicsTextItem):
         if self.textInteractionFlags() != Qt.TextInteractionFlag.TextEditorInteraction:
             self.moving.emit(self)
 
-    # QT 5.15.x causing segmentation fault 
+    # QT 5.15.x causing segmentation fault
     def contextMenuEvent(self, event):
-        return super().contextMenuEvent(event)
+        # Don't show menu if in edit mode
+        if self.is_editting():
+            super().contextMenuEvent(event)
+            return
+
+        event.accept()
+        menu = QMenu()
+        self.injectToggleFlowMenu(menu)
+        menu.exec_(event.globalPos())
+
+    def injectToggleFlowMenu(self, menu: QMenu):
+        """Insert the 'Toggle Flow Mode' action at the top of an existing QMenu."""
+        toggle_flow = QAction(self.tr('Toggle Flow Mode'), menu)
+        toggle_flow.triggered.connect(lambda: self.toggle_flow_mode_requested.emit(self.idx))
+        first_action = menu.actions()[0] if menu.actions() else None
+        if first_action is not None:
+            menu.insertAction(first_action, toggle_flow)
+            sep = QAction(menu)
+            sep.setSeparator(True)
+            menu.insertAction(first_action, sep)
+        else:
+            menu.addAction(toggle_flow)
+            menu.addSeparator()
+
+    def showNormalContextMenu(self, scene_pos: QPointF, screen_pos):
+        """Show the standard canvas context menu with the flow-mode toggle on top.
+
+        Used by TextBlkShapeControl.handleContextMenu for normal (non-flow)
+        blocks, mirroring FlowTextBlkItem.showFlowContextMenu.
+        """
+        self.setSelected(True)
+        scene = self.scene()
+        if scene is not None and hasattr(scene, 'build_context_menu') and hasattr(scene, 'exec_context_menu'):
+            std_menu, actions = scene.build_context_menu()
+            self.injectToggleFlowMenu(std_menu)
+            screen_pt = screen_pos.toPoint() if hasattr(screen_pos, 'toPoint') else screen_pos
+            scene.exec_context_menu(std_menu, actions, screen_pt)
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:

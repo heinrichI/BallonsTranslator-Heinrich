@@ -178,42 +178,23 @@ class LeftBar(Widget):
         if self.recent_proj_list == proj_list:
             return
 
-        actionlist = self.recentMenu.actions()
-        if len(self.recent_proj_list) == 0:
-            self.recent_proj_list.append(proj_list.pop())
-            topAction = QAction(self.recent_proj_list[-1], self)
-            topAction.triggered.connect(self.recentActionTriggered)
-            self.recentMenu.addAction(topAction)
-        else:
-            topAction = actionlist[0]
-        for proj in proj_list[::-1]:
-            try:    # remove duplicated
-                idx = self.recent_proj_list.index(proj)
-                if idx == 0:
-                    continue
-                del self.recent_proj_list[idx]
-                self.recentMenu.removeAction(self.recentMenu.actions()[idx])
-                if len(self.recent_proj_list) == 0:
-                    topAction = QAction(proj, self)
-                    self.recentMenu.addAction(topAction)
-                    topAction.triggered.connect(self.recentActionTriggered)
-                    continue
-            except ValueError:
-                pass
-            newTop = QAction(proj, self)
-            self.recentMenu.insertAction(topAction, newTop)
-            newTop.triggered.connect(self.recentActionTriggered)
-            self.recent_proj_list.insert(0, proj)
-            topAction = newTop
-
         MAXIUM_RECENT_PROJ_NUM = 14
-        actionlist = self.recentMenu.actions()
-        num_to_remove = len(actionlist) - MAXIUM_RECENT_PROJ_NUM
-        if num_to_remove > 0:
-            actions_to_remove = actionlist[-num_to_remove:]
-            for action in actions_to_remove:
-                self.recentMenu.removeAction(action)
-                self.recent_proj_list.pop()
+        # Newly opened projects go to the top, duplicates are dropped, and a
+        # project that is not in the list yet is the normal case for a new
+        # folder -- never rely on list.index() raising or not raising here.
+        new_list = []
+        for proj in list(proj_list) + list(self.recent_proj_list):
+            if proj not in new_list:
+                new_list.append(proj)
+        self.recent_proj_list[:] = new_list[:MAXIUM_RECENT_PROJ_NUM]
+
+        # Rebuild the menu from the list so the list and the menu can never
+        # get out of sync (which used to raise ValueError in list.index()).
+        self.recentMenu.clear()
+        for proj in self.recent_proj_list:
+            action = QAction(proj, self)
+            action.triggered.connect(self.recentActionTriggered)
+            self.recentMenu.addAction(action)
 
         self.save_config.emit()
 
@@ -223,8 +204,10 @@ class LeftBar(Widget):
             self.updateRecentProjList(path)
             self.open_dir.emit(path)
         else:
-            self.recent_proj_list.remove(path)
+            if path in self.recent_proj_list:
+                self.recent_proj_list.remove(path)
             self.recentMenu.removeAction(self.sender())
+            self.save_config.emit()
         
     def onOpenFolder(self) -> None:
         

@@ -50,6 +50,7 @@ class TextBlock:
     right_points: List = field(default_factory=lambda: [])  # same
 
     deprecated_attributes: dict = field(default_factory = lambda: dict())
+    is_flow_mode: bool = True  # True = FlowTextBlkItem, False = TextBlkItem
 
     @property
     def vertical(self):

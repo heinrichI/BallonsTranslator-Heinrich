@@ -604,8 +604,11 @@ class SceneTextManager(QObject):
             if self.auto_textlayout_flag and not blk.vertical:
                 translation = blk.translation
                 blk.translation = ''
-            _debug("  creating FlowTextBlkItem with blk.xyxy=%s", blk.xyxy if blk else "None")
-            blk_item = FlowTextBlkItem(blk, len(self.textblk_item_list), show_rect=self.canvas.textblock_mode)
+            _debug("  creating %s with blk.xyxy=%s", "FlowTextBlkItem" if blk.is_flow_mode else "TextBlkItem", blk.xyxy if blk else "None")
+            if blk.is_flow_mode:
+                blk_item = FlowTextBlkItem(blk, len(self.textblk_item_list), show_rect=self.canvas.textblock_mode)
+            else:
+                blk_item = TextBlkItem(blk, len(self.textblk_item_list), show_rect=self.canvas.textblock_mode)
             if translation:
                 blk.translation = translation
                 rst = self.layout_textblk(blk_item, text=translation)
@@ -646,6 +649,101 @@ class SceneTextManager(QObject):
         """Resolve overlaps between new_item and existing blocks."""
         self.overlap_resolver.resolve_overlaps(new_item, self.textblk_item_list)
 
+    def toggle_block_flow_mode(self, blk_idx: int):
+        """Convert FlowTextBlkItem to TextBlkItem or vice versa."""
+        from ui.flow_textitem import FlowTextBlkItem
+
+        if blk_idx < 0 or blk_idx >= len(self.textblk_item_list):
+            return
+
+        blk_item = self.textblk_item_list[blk_idx]
+        if blk_item is None:
+            return
+
+        if isinstance(blk_item, FlowTextBlkItem):
+            # Convert to TextBlkItem
+            blk = blk_item.blk
+            idx = blk_item.idx
+            pos = blk_item.pos()
+            rotation = blk_item.rotation()
+            show_rect = blk_item.draw_rect
+
+            # End editing before removing the item
+            if blk_item.isEditing():
+                blk_item.endEdit()
+                self.canvas.editing_textblkitem = None
+
+            # Remove from scene and list
+            self.canvas.remove_item(blk_item)
+            self.textblk_item_list[idx] = None
+
+            # Create TextBlkItem
+            from ui.textitem import TextBlkItem
+            new_blk_item = TextBlkItem(blk, idx, show_rect=show_rect)
+            new_blk_item.setPos(pos)
+            new_blk_item.setRotation(rotation)
+            self.canvas.add_item_to_text_layer(new_blk_item)
+            self.textblk_item_list[idx] = new_blk_item
+
+            # Reconnect signals
+            self._reconnect_block_signals(new_blk_item)
+
+            # Update block data
+            blk.is_flow_mode = False
+        else:
+            # Convert to FlowTextBlkItem
+            blk = blk_item.blk
+            idx = blk_item.idx
+            pos = blk_item.pos()
+            rotation = blk_item.rotation()
+            show_rect = blk_item.draw_rect
+
+            # End editing before removing the item
+            if blk_item.isEditing():
+                blk_item.endEdit()
+                self.canvas.editing_textblkitem = None
+
+            # Remove from scene and list
+            self.canvas.remove_item(blk_item)
+            self.textblk_item_list[idx] = None
+
+            # Create FlowTextBlkItem
+            new_blk_item = FlowTextBlkItem(blk, idx, show_rect=show_rect)
+            new_blk_item.setPos(pos)
+            new_blk_item.setRotation(rotation)
+            self.canvas.add_item_to_text_layer(new_blk_item)
+            self.textblk_item_list[idx] = new_blk_item
+
+            # Reconnect signals
+            self._reconnect_block_signals(new_blk_item)
+
+            # Update block data
+            blk.is_flow_mode = True
+
+        # Update shape control
+        self.txtblkShapeControl.setBlkItem(new_blk_item)
+        # Ensure the block is selected so handles are visible
+        new_blk_item.setSelected(True)
+
+    def _reconnect_block_signals(self, blk_item: TextBlkItem):
+        """Reconnect all signals for a block item."""
+        blk_item.begin_edit.connect(self.onTextBlkItemBeginEdit)
+        blk_item.end_edit.connect(self.onTextBlkItemEndEdit)
+        blk_item.hover_enter.connect(self.onTextBlkItemHoverEnter)
+        blk_item.leftbutton_pressed.connect(self.onLeftbuttonPressed)
+        blk_item.moving.connect(self.onTextBlkItemMoving)
+        blk_item.moved.connect(self.onTextBlkItemMoved)
+        blk_item.reshaped.connect(self.onTextBlkItemReshaped)
+        blk_item.rotated.connect(self.onTextBlkItemRotated)
+        blk_item.push_undo_stack.connect(self.on_push_textitem_undostack)
+        blk_item.undo_signal.connect(self.on_textedit_undo)
+        blk_item.redo_signal.connect(self.on_textedit_redo)
+        blk_item.propagate_user_edited.connect(self.on_propagate_textitem_edit)
+        blk_item.doc_size_changed.connect(self.onTextBlkItemSizeChanged)
+        blk_item.pasted.connect(self.onBlkitemPaste)
+        if hasattr(blk_item, 'toggle_flow_mode_requested'):
+            blk_item.toggle_flow_mode_requested.connect(self.toggle_block_flow_mode)
+
     def addTextBlkItem(self, textblk_item: TextBlkItem) -> TextBlkItem:
         self.textblk_item_list.append(textblk_item)
         self.canvas.add_item_to_text_layer(textblk_item)
@@ -663,6 +761,8 @@ class SceneTextManager(QObject):
         textblk_item.propagate_user_edited.connect(self.on_propagate_textitem_edit)
         textblk_item.doc_size_changed.connect(self.onTextBlkItemSizeChanged)
         textblk_item.pasted.connect(self.onBlkitemPaste)
+        if hasattr(textblk_item, 'toggle_flow_mode_requested'):
+            textblk_item.toggle_flow_mode_requested.connect(self.toggle_block_flow_mode)
         return textblk_item
 
     def _on_source_text_changed(self):

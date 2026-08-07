@@ -68,6 +68,7 @@ class FlowControlHandle(QGraphicsEllipseItem):
             self._drag_start_pos = event.scenePos()
             blk_item = self.ctrl.blk_item
             if blk_item is not None:
+                blk_item.setSelected(True)
                 blk_item.startReshape()
         event.accept()
 
@@ -166,6 +167,7 @@ class FlowHResizeHandle(QGraphicsItem):
             self._last_scene_x = event.scenePos().x()
             blk_item = self.ctrl.blk_item
             if blk_item is not None:
+                blk_item.setSelected(True)
                 blk_item.startReshape()
         event.accept()
 
@@ -264,6 +266,7 @@ class FlowResizeHandle(QGraphicsItem):
             self._last_scene_y = event.scenePos().y()
             blk_item = self.ctrl.blk_item
             if blk_item is not None:
+                blk_item.setSelected(True)
                 blk_item.startReshape()
         event.accept()
 
@@ -355,6 +358,7 @@ class FlowRotationHandle(QGraphicsEllipseItem):
             self._dragging = True
             blk_item = self.ctrl.blk_item
             if blk_item is not None:
+                blk_item.setSelected(True)
                 center = blk_item.mapToScene(blk_item.boundingRect().center())
                 rotate_vec = event.scenePos() - center
                 rotation = np.rad2deg(math.atan2(rotate_vec.y(), rotate_vec.x()))
@@ -491,6 +495,17 @@ class FlowShapeControl(QGraphicsItem):
             self._dragging = True
             self._drag_start_pos = event.scenePos()
             self._block_start_pos = self.blk_item.pos()
+            # The control covers the block, so the underlying TextBlkItem never
+            # receives the press. Mirror TextBlkItem.mousePressEvent so clicking
+            # a flow block selects it and clears the previous selection (unless
+            # Ctrl is held for multi-select).
+            blk_item = self.blk_item
+            blk_item.oldPos = blk_item.pos()
+            if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier) and self.scene() is not None:
+                self.scene().clearSelection()
+            blk_item.setSelected(True)
+            if hasattr(blk_item, 'leftbutton_pressed'):
+                blk_item.leftbutton_pressed.emit(blk_item.idx)
         event.accept()
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):

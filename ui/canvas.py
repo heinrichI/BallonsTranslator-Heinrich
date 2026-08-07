@@ -18,6 +18,7 @@ from .misc import ndarray2pixmap, QKEY, QNUMERIC_KEYS, ARROWKEY2DIRECTION
 from .textitem import TextBlkItem, TextBlock
 from .texteditshapecontrol import TextBlkShapeControl
 from .flow_shapecontrol import FlowShapeControl
+from .shape_control_switcher import ShapeControlSwitcher
 from .flow_textitem import FlowTextBlkItem
 from .custom_widget import ScrollBar, FadeLabel
 from .image_edit import ImageEditMode, DrawingLayer, StrokeImgItem
@@ -252,7 +253,12 @@ class Canvas(QGraphicsScene):
         self.scaleFactorLabel.setText('100%')
         self.scaleFactorLabel.gv = self.gv
 
-        self.txtblkShapeControl = FlowShapeControl(self.gv)
+        self.flowShapeControl = FlowShapeControl(self.gv)
+        self.textBlkShapeControl = TextBlkShapeControl(self.gv)
+        # Switcher delegates to the flow control (FlowTextBlkItem) or the legacy
+        # control (TextBlkItem) depending on the block type, keeping all call
+        # sites working through the single txtblkShapeControl attribute.
+        self.txtblkShapeControl = ShapeControlSwitcher(self.flowShapeControl, self.textBlkShapeControl, self)
         
         self.baseLayer = QGraphicsRectItem()
         pen = QPen()
@@ -276,7 +282,8 @@ class Canvas(QGraphicsScene):
         self.inpaintLayer.setParentItem(self.baseLayer)
         self.drawingLayer.setParentItem(self.baseLayer)
         self.textLayer.setParentItem(self.baseLayer)
-        self.txtblkShapeControl.setParentItem(self.baseLayer)
+        self.flowShapeControl.setParentItem(self.baseLayer)
+        self.textBlkShapeControl.setParentItem(self.baseLayer)
 
         self.scalefactor_changed.connect(self.onScaleFactorChanged)
         self.selectionChanged.connect(self.on_selection_changed)

@@ -15,6 +15,11 @@ from utils.message import create_error_dialog, create_yes_no_dialog
 
 MAX_LEN_APPROX = 36000
 
+# Stop the whole translation run after this many consecutive connection errors.
+# The counter resets on the first successful request, so rare transient failures
+# do not abort the session.
+MAX_CONSECUTIVE_CONNECTION_ERRORS = 3
+
 # Token-budget constants for whole-first batching (see _pack_batches).
 PROMPT_OVERHEAD = 150          # tokens for the _build_llama_prompt template
 BATCH_SAFETY_FACTOR = 0.9      # 10% safety margin when packing
@@ -30,6 +35,15 @@ class InvalidNumTranslations(Exception):
 
 class TranslationIntegrityError(Exception):
     """Exception raised when a translation fragment is suspiciously short or empty."""
+    pass
+
+class TranslationAbortedError(Exception):
+    """Raised when the server is unreachable too many times in a row.
+
+    This exception is deliberately NOT swallowed by the retry/fallback logic in
+    _translate_single / _translate_batch. It propagates all the way up to the
+    pipeline loop, which stops the whole translation run (all pages).
+    """
     pass
 
 class TranslationElement(BaseModel):
@@ -203,6 +217,7 @@ class TransGemmaTranslator(BaseTranslator):
         self.key_usage = {}
         self.client = None
         self.n_ctx = None
+        self.connection_error_count = 0
 
     def _initialize_client(self, api_key_to_use: str) -> bool:
         endpoint = self.endpoint
@@ -223,6 +238,48 @@ class TransGemmaTranslator(BaseTranslator):
             self.logger.error(f"Failed to initialize OpenAI client: {e}")
             self.client = None
             return False
+
+    def _record_connection_error(self, e: Exception) -> None:
+        """Count a connection failure and abort the whole run after the threshold.
+
+        The counter is reset on the first successful request, so a flaky server
+        that recovers does not abort the session. Once the threshold is exceeded,
+        a TranslationAbortedError is raised and propagates up to the pipeline loop,
+        stopping the translation of all remaining pages.
+        """
+        self.connection_error_count += 1
+        self.logger.warning(
+            f"Connection error {self.connection_error_count}/{MAX_CONSECUTIVE_CONNECTION_ERRORS}: {e}"
+        )
+        if self.connection_error_count > MAX_CONSECUTIVE_CONNECTION_ERRORS:
+            raise TranslationAbortedError(
+                f"Server unreachable after {self.connection_error_count} consecutive connection errors. "
+                f"Stopping the whole translation run."
+            ) from e
+
+    @staticmethod
+    def _is_connection_error(e: Exception) -> bool:
+        """True when the exception indicates a connection/transport failure.
+
+        Only these count toward the consecutive-error threshold that aborts the
+        whole translation run. Server-side API failures (HTTP 4xx/5xx) are NOT
+        treated as connection errors and keep the normal retry/fallback behavior.
+        """
+        if isinstance(e, (ConnectionError, httpx.TransportError)):
+            return True
+        try:
+            import openai
+            if isinstance(e, openai.APIConnectionError):
+                return True
+        except (ImportError, AttributeError):
+            pass
+        return False
+
+    def _reset_connection_errors(self) -> None:
+        """Reset the consecutive connection-error counter after a successful request."""
+        if self.connection_error_count:
+            self.logger.info(f"Connection error counter reset (was {self.connection_error_count}).")
+        self.connection_error_count = 0
 
     def _fetch_context_window(self) -> None:
         """Fetch the server's context window (n_ctx) once and cache it in self.n_ctx.
@@ -426,7 +483,9 @@ class TransGemmaTranslator(BaseTranslator):
             src_by_id[1] = text
 
         if not self._initialize_client(current_api_key):
-             raise ConnectionError("Failed to initialize API client.")
+            client_error = ConnectionError("Failed to initialize API client.")
+            self._record_connection_error(client_error)
+            raise client_error
 
         self._fetch_context_window()
 
@@ -464,9 +523,12 @@ class TransGemmaTranslator(BaseTranslator):
                 completion = self.client.chat.completions.create(**api_args)
             except Exception as e:
                 self.logger.error(f"API request failed: {e}")
+                if self._is_connection_error(e):
+                    self._record_connection_error(e)
                 if show_dialog:
                     create_error_dialog(e, 'Translation failed.')
                 raise
+            self._reset_connection_errors()
 
             if completion.choices and completion.choices[0].message and completion.choices[0].message.content:
                 raw_content = completion.choices[0].message.content
@@ -492,9 +554,12 @@ class TransGemmaTranslator(BaseTranslator):
                 completion = self.client.completions.create(**api_args)
             except Exception as e:
                 self.logger.error(f"API request failed: {e}")
+                if self._is_connection_error(e):
+                    self._record_connection_error(e)
                 if show_dialog:
                     create_error_dialog(e, 'Translation failed.')
                 raise
+            self._reset_connection_errors()
 
             if completion.choices and completion.choices[0].text:
                 raw_content = completion.choices[0].text
@@ -547,10 +612,14 @@ class TransGemmaTranslator(BaseTranslator):
         # a dialog is only shown for genuine, unrecoverable errors.
         try:
             parsed = self._request_translation(src, show_dialog=False)
+        except TranslationAbortedError:
+            raise
         except Exception as e:
             self.logger.warning(f"ID {idx}: request failed ({e}). Retrying once...")
             try:
                 parsed = self._request_translation(src, show_dialog=False)
+            except TranslationAbortedError:
+                raise
             except Exception as e2:
                 self.logger.warning(f"ID {idx}: retry failed ({e2}). Falling back to source text.")
                 translations[idx] = src
@@ -616,6 +685,8 @@ class TransGemmaTranslator(BaseTranslator):
             parsed = self._request_translation(self._batch_text(srcs), show_dialog=False, srcs=srcs)
             result = self._ordered_translations(parsed, len(srcs))
             problems = self._find_problems(srcs, result)
+        except TranslationAbortedError:
+            raise
         except Exception as e:
             self.logger.warning(f"Batch of {len(srcs)} failed: {e}. Splitting.")
             problems = list(range(len(srcs)))

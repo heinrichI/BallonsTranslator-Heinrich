@@ -350,6 +350,23 @@ class TextBlkShapeControl(QGraphicsRectItem):
             for ctrlb in self.ctrlblock_group:
                 ctrlb.show()
 
+    def handleContextMenu(self, scene_pos, screen_pos) -> bool:
+        """Handle right-click on a normal TextBlkItem (non-flow).
+
+        Mirrors FlowShapeControl.handleContextMenu: if a TextBlkItem is under
+        the cursor, show the standard canvas menu with the flow-mode toggle.
+        Returns True if handled, False to fall through to the default menu.
+        """
+        from .flow_textitem import FlowTextBlkItem
+
+        if self.scene() is None:
+            return False
+        for item in self.scene().items(scene_pos):
+            if isinstance(item, TextBlkItem) and not isinstance(item, FlowTextBlkItem):
+                item.showNormalContextMenu(scene_pos, screen_pos)
+                return True
+        return False
+
 # Alias: use FlowShapeControl as the active TextBlkShapeControl
 try:
     from .flow_shapecontrol import FlowShapeControl  # noqa: F401

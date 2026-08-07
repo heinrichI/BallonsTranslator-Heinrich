@@ -907,6 +907,23 @@ class FlowTextBlkItem(TextBlkItem):
         Called by FlowShapeControl.handleContextMenu() to build the
         combined context menu.
         """
+        # Always add toggle flow mode action
+        toggle_flow = QAction("Toggle Flow Mode", menu)
+        toggle_flow.triggered.connect(lambda: self.toggle_flow_mode_requested.emit(self.idx))
+
+        first_action = menu.actions()[0] if menu.actions() else None
+
+        # Insert toggle action at the very top
+        if first_action is not None:
+            menu.insertAction(first_action, toggle_flow)
+            # Insert separator after toggle
+            sep = QAction(menu)
+            sep.setSeparator(True)
+            menu.insertAction(first_action, sep)
+        else:
+            menu.addAction(toggle_flow)
+            sep = menu.addSeparator()
+
         if not self._left_points or not self._right_points:
             return
 
@@ -919,19 +936,12 @@ class FlowTextBlkItem(TextBlkItem):
         add_left.triggered.connect(lambda checked, y=click_y: self.add_point_left(y))
         add_right.triggered.connect(lambda checked, y=click_y: self.add_point_right(y))
 
-        # Insert at top: we want [add_left, add_right, sep, original_actions...]
-        # insertAction(before, action) inserts action BEFORE before.
-        # So we add in reverse order.
-        first_action = menu.actions()[0] if menu.actions() else None
-
-        # Step 1: insert separator before first_action
-        sep = QAction(menu)
-        sep.setSeparator(True)
+        # Insert after the separator: we want [toggle, sep, add_left, add_right, sep, original_actions...]
+        # Find the separator we just added
         if first_action is not None:
-            menu.insertAction(first_action, sep)
-            # Step 2: insert add_right before sep
+            # Insert add_right before sep
             menu.insertAction(sep, add_right)
-            # Step 3: insert add_left before add_right
+            # Insert add_left before add_right
             menu.insertAction(add_right, add_left)
         else:
             # Menu is empty — just add actions
@@ -984,7 +994,11 @@ class FlowTextBlkItem(TextBlkItem):
                 painter.setPen(pen)
                 painter.drawRect(self.unpadRect(br))
             elif draw_rect:
-                pen = QPen(TEXTRECT_SHOW_COLOR, 3 / self.get_scale(), Qt.PenStyle.SolidLine)
+                # Check if in normal mode (not flow mode) and use different color
+                if self.blk and not self.blk.is_flow_mode:
+                    pen = QPen(QColor(255, 165, 0, 170), 3 / self.get_scale(), Qt.PenStyle.SolidLine)  # Orange for normal mode
+                else:
+                    pen = QPen(TEXTRECT_SHOW_COLOR, 3 / self.get_scale(), Qt.PenStyle.SolidLine)  # Blue for flow mode
                 painter.setPen(pen)
                 painter.drawRect(self.unpadRect(br))
         painter.restore()
