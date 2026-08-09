@@ -535,6 +535,8 @@ class ImgtransThread(QThread):
             else:
                 ref_counter = min(ref_counter, self.translate_counter)
 
+        # Clamp to valid page range — prevents IndexError from stale/racy counters
+        ref_counter = min(ref_counter, self.num_pages)
         return ref_counter - 1
 
 
@@ -758,8 +760,9 @@ class ModuleManager(QObject):
         if ri != self.last_finished_index:
             self.last_finished_index = ri
             keys_list = list(self.pages.keys())
-            key_at_index = keys_list[ri]
-            self.page_trans_finished.emit(key_at_index)
+            if 0 <= ri < len(keys_list):
+                key_at_index = keys_list[ri]
+                self.page_trans_finished.emit(key_at_index)
         if progress == 100:
             self.finishImgtransPipeline()
 
@@ -772,8 +775,9 @@ class ModuleManager(QObject):
         if ri != self.last_finished_index:
             self.last_finished_index = ri
             keys_list = list(self.pages.keys())
-            key_at_index = keys_list[ri]
-            self.page_trans_finished.emit(key_at_index)
+            if 0 <= ri < len(keys_list):
+                key_at_index = keys_list[ri]
+                self.page_trans_finished.emit(key_at_index)
         if progress == 100:
             self.finishImgtransPipeline()
 
@@ -786,8 +790,9 @@ class ModuleManager(QObject):
         if ri != self.last_finished_index:
             self.last_finished_index = ri
             keys_list = list(self.pages.keys())
-            key_at_index = keys_list[ri]
-            self.page_trans_finished.emit(key_at_index)
+            if 0 <= ri < len(keys_list):
+                key_at_index = keys_list[ri]
+                self.page_trans_finished.emit(key_at_index)
         if progress == 100:
             self.finishImgtransPipeline()
 
@@ -800,8 +805,9 @@ class ModuleManager(QObject):
         if ri != self.last_finished_index:
             self.last_finished_index = ri
             keys_list = list(self.pages.keys())
-            key_at_index = keys_list[ri]
-            self.page_trans_finished.emit(key_at_index)
+            if 0 <= ri < len(keys_list):
+                key_at_index = keys_list[ri]
+                self.page_trans_finished.emit(key_at_index)
         if progress == 100:
             self.finishImgtransPipeline()
 
