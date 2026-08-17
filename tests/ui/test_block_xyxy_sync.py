@@ -28,7 +28,6 @@ from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from qtpy.QtWidgets import QApplication, QGraphicsScene, QGraphicsView
 from qtpy.QtCore import Qt, QPointF
 
 from utils.textblock import TextBlock
@@ -36,26 +35,7 @@ from ui.flow_textitem import FlowTextBlkItem
 from ui.textitem import TextBlkItem
 
 
-# ── Фикстуры ──────────────────────────────────────────────────
-
-@pytest.fixture(scope="session")
-def qapp():
-    """Один QApplication на всю сессию (offscreen)."""
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    yield app
-
-
-@pytest.fixture
-def scene(qapp):
-    """Свежая QGraphicsScene для каждого теста."""
-    s = QGraphicsScene()
-    view = QGraphicsView(s)
-    view.resize(2000, 2000)
-    yield s
-    s.clear()
-
+# ── Helpers (фикстуры qapp/scene — tests/ui/conftest.py) ──────────────
 
 def _make_blk(xyxy=(0, 0, 400, 200), text="Hello world test text", font_size=24.0):
     """Создать TextBlock с заданными координатами."""
@@ -600,9 +580,13 @@ class TestCoordinateInvariant:
     Если какое-то место обновилось, а другое нет — invariant-тест поймает.
     """
 
-    def test_invariant_after_move(self, scene):
-        """После перемещения координаты согласованы."""
+    # ── Фабрики операций для параметризованного теста ─────────
+
+    @staticmethod
+    def _move_item(scene, undo=False):
+        """Переместить блок через MoveBlkItemsCommand (и undo при запросе)."""
         from ui.textedit_commands import MoveBlkItemsCommand
+
         item = _make_flow_item(scene, xyxy=(100, 100, 300, 200))
         shape_ctrl = MagicMock()
         shape_ctrl.blk_item = item
@@ -611,56 +595,90 @@ class TestCoordinateInvariant:
         item.setPos(QPointF(old_pos.x() + 100, old_pos.y() + 50))
         cmd = MoveBlkItemsCommand([item], shape_ctrl)
         cmd.redo()
-        _assert_coords_consistent(item)
+        if undo:
+            cmd.undo()
+        return item
 
-    def test_invariant_after_undo_move(self, scene):
-        """После undo перемещения координаты согласованы."""
-        from ui.textedit_commands import MoveBlkItemsCommand
-        item = _make_flow_item(scene, xyxy=(100, 100, 300, 200))
-        shape_ctrl = MagicMock()
-        shape_ctrl.blk_item = item
-
-        old_pos = item.pos()
-        item.setPos(QPointF(old_pos.x() + 100, old_pos.y() + 50))
-        cmd = MoveBlkItemsCommand([item], shape_ctrl)
-        cmd.redo()
-        cmd.undo()
-        _assert_coords_consistent(item)
-
-    def test_invariant_after_flow_resize_right(self, scene):
-        """После сужения правой границы координаты согласованы."""
+    @staticmethod
+    def _resize_item(scene, side):
+        """Ресайз flow-блока переносом контрольных точек стороны `side`."""
         item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
-        for i, pt in enumerate(item._right_points):
-            item._right_points[i] = QPointF(200, pt.y())
+        if side == "right":
+            for i, pt in enumerate(item._right_points):
+                item._right_points[i] = QPointF(200, pt.y())
+        elif side == "left":
+            for i, pt in enumerate(item._left_points):
+                item._left_points[i] = QPointF(80, pt.y())
+        elif side == "top":
+            for i, pt in enumerate(item._left_points):
+                item._left_points[i] = QPointF(pt.x(), pt.y() + 30)
+            for i, pt in enumerate(item._right_points):
+                item._right_points[i] = QPointF(pt.x(), pt.y() + 30)
+        elif side == "bottom":
+            for i, pt in enumerate(item._left_points):
+                item._left_points[i] = QPointF(pt.x(), pt.y() - 30)
+            for i, pt in enumerate(item._right_points):
+                item._right_points[i] = QPointF(pt.x(), pt.y() - 30)
+        else:
+            raise ValueError(f"unknown side: {side}")
         item._update_flow_layout()
-        _assert_coords_consistent(item)
+        return item
 
-    def test_invariant_after_flow_resize_left(self, scene):
-        """После сужения левой границы координаты согласованы."""
-        item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
+    @staticmethod
+    def _reshape_item(scene, undo=False):
+        """Drag flow-хендла через ReshapeItemCommand, как в production.
+
+        QUndoStack при push вызывает redo() ровно один раз — этот вызов
+        no-op по дизайну (idx-guard), поэтому элемент остаётся в
+        перетянутом состоянии. Пред-драг снапшоты — в
+        _old_left_points/_old_right_points, как в startReshape().
+        """
+        from copy import deepcopy
+        from ui.textedit_commands import ReshapeItemCommand
+
+        item = _make_flow_item(scene, xyxy=(100, 100, 500, 200))
+        item.oldRect = item.absBoundingRect(qrect=True)
+        item._old_left_points = deepcopy(item._left_points)
+        item._old_right_points = deepcopy(item._right_points)
+
+        # Drag: сузить левую границу
         for i, pt in enumerate(item._left_points):
             item._left_points[i] = QPointF(80, pt.y())
         item._update_flow_layout()
-        _assert_coords_consistent(item)
 
-    def test_invariant_after_flow_resize_top(self, scene):
-        """После смещения верхней границы вниз координаты согласованы."""
-        item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
-        for i, pt in enumerate(item._left_points):
-            item._left_points[i] = QPointF(pt.x(), pt.y() + 30)
-        for i, pt in enumerate(item._right_points):
-            item._right_points[i] = QPointF(pt.x(), pt.y() + 30)
-        item._update_flow_layout()
-        _assert_coords_consistent(item)
+        cmd = ReshapeItemCommand(item)
+        cmd.redo()  # no-op по дизайну — зеркалит QUndoStack push
+        if undo:
+            cmd.undo()
+        return item
 
-    def test_invariant_after_flow_resize_bottom(self, scene):
-        """После смещения нижней границы вниз координаты согласованы."""
-        item = _make_flow_item(scene, xyxy=(0, 0, 400, 200))
-        for i, pt in enumerate(item._left_points):
-            item._left_points[i] = QPointF(pt.x(), pt.y() - 30)
-        for i, pt in enumerate(item._right_points):
-            item._right_points[i] = QPointF(pt.x(), pt.y() - 30)
-        item._update_flow_layout()
+    def _apply_operation(self, scene, operation):
+        if operation == "move":
+            return self._move_item(scene)
+        if operation == "undo_move":
+            return self._move_item(scene, undo=True)
+        if operation.startswith("resize_"):
+            return self._resize_item(scene, operation[len("resize_"):])
+        if operation in ("reshape", "undo_reshape"):
+            return self._reshape_item(scene, undo=(operation == "undo_reshape"))
+        raise ValueError(f"unknown operation: {operation}")
+
+    @pytest.mark.parametrize(
+        "operation",
+        [
+            "move",
+            "undo_move",
+            "resize_right",
+            "resize_left",
+            "resize_top",
+            "resize_bottom",
+            "reshape",
+            "undo_reshape",
+        ],
+    )
+    def test_invariant_after_operation(self, scene, operation):
+        """После любой операции с координатами blk.xyxy == absBoundingRect()."""
+        item = self._apply_operation(scene, operation)
         _assert_coords_consistent(item)
 
     def test_invariant_after_move_then_resize(self, scene):

@@ -21,7 +21,6 @@ import pytest
 # Qt imports — must happen AFTER setting platform, so we force it here
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from qtpy.QtWidgets import QApplication, QGraphicsScene, QGraphicsView
 from qtpy.QtCore import Qt, QRectF, QPointF
 from qtpy.QtGui import QTextCursor
 
@@ -33,27 +32,7 @@ from unittest.mock import MagicMock
 from ui.overlap_resolver import OverlapResolver
 
 
-# ── Session-scoped QApplication ───────────────────────────────
-
-@pytest.fixture(scope="session")
-def qapp():
-    """Single QApplication for the whole test session (offscreen)."""
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    yield app
-
-
-@pytest.fixture
-def scene(qapp):
-    """Fresh QGraphicsScene for each test."""
-    s = QGraphicsScene()
-    # Add a view so items get valid screen transforms
-    view = QGraphicsView(s)
-    view.resize(2000, 2000)
-    yield s
-    s.clear()
-
+# ── Helpers (qapp/scene fixtures — tests/ui/conftest.py) ───────
 
 def _make_blk(xyxy=(0, 0, 400, 200), text="Hello world test text", font_size=24.0):
     """Helper: create a TextBlock with sensible defaults."""
@@ -643,16 +622,31 @@ class TestAutoFontAdjustFlag:
         )
 
     def test_low_font_disables_auto_adjust(self, scene):
-        """Block with font_size <= 50px gets _auto_font_adjust=False after init (Fix C)."""
-        text = "Hello world"
-        blk = _make_blk(xyxy=(0, 0, 400, 200), text=text, font_size=14.0)
-        item = FlowTextBlkItem(blk, idx=0)
-        scene.addItem(item)
-        item.setPlainText("Hello world")
+        """Block with auto-layout disabled in settings gets _auto_font_adjust=False after init."""
+        from utils.config import pcfg
+        
+        # Save original setting
+        orig_fntsize_flag = pcfg.let_fntsize_flag
+        orig_autolayout_flag = pcfg.let_autolayout_flag
+        
+        try:
+            # Set manual font size mode (let_fntsize_flag == 1)
+            pcfg.let_fntsize_flag = 1
+            pcfg.let_autolayout_flag = True
+            
+            text = "Hello world"
+            blk = _make_blk(xyxy=(0, 0, 400, 200), text=text, font_size=14.0)
+            item = FlowTextBlkItem(blk, idx=0)
+            scene.addItem(item)
+            item.setPlainText("Hello world")
 
-        assert item._auto_font_adjust is False, (
-            "Font <= 50px should disable auto-adjust to prevent grow re-inflation"
-        )
+            assert item._auto_font_adjust is False, (
+                "Manual font size mode should disable auto-adjust"
+            )
+        finally:
+            # Restore original settings
+            pcfg.let_fntsize_flag = orig_fntsize_flag
+            pcfg.let_autolayout_flag = orig_autolayout_flag
 
     def test_manual_font_change_disables_auto_adjust(self, scene):
         """User font change via setFontSize should set _auto_font_adjust=False.
@@ -2384,3 +2378,225 @@ class TestVerticalCenterAlignment:
         """Force a synchronous horizontal layout pass."""
         item.layout.reLayoutEverything()
         item.layout.reLayout()
+
+
+class TestPlainBlockAutoAdjust:
+    """Plain TextBlkItem now auto-adjusts font on handle resize (Flow→Text toggle)."""
+
+    def _make_plain_item(self, scene, xyxy=(0, 0, 400, 200), text="Hello world test", font_size=24.0):
+        from ui.textitem import TextBlkItem
+        blk = _make_blk(xyxy, text, font_size)
+        item = TextBlkItem(blk, idx=0, show_rect=False)
+        scene.addItem(item)
+        item.setPlainText(text)
+        return item
+
+    def test_plain_item_has_auto_font_adjust(self, scene):
+        """Plain TextBlkItem exposes _auto_font_adjust and font_adjuster."""
+        item = self._make_plain_item(scene)
+        assert item._auto_font_adjust is True
+        assert item.font_adjuster is not None
+        assert item.font_adjuster.shrink is not None
+
+    def _stabilize(self, item):
+        """Force a synchronous layout pass so max_font_size/shrink_height are valid.
+        Plain blocks auto-adjust inside set_size(); call it once to stabilize."""
+        item.set_size(item._display_rect.width(), item._display_rect.height(),
+                      set_layout_maxsize=True)
+
+    def test_plain_item_shrinks_on_narrow(self, scene):
+        """Narrowing a plain block via set_size triggers font shrink."""
+        item = self._make_plain_item(scene, xyxy=(0, 0, 400, 100), text="A" * 60, font_size=24.0)
+        # Force initial layout so max_font_size is computed
+        self._stabilize(item)
+        font_before = item.layout.max_font_size()
+
+        # Narrow the block — this should trigger _auto_adjust_font → shrink
+        item.set_size(120, 100, set_layout_maxsize=True)
+        font_after = item.layout.max_font_size()
+        assert font_after < font_before, (
+            f"Plain block should shrink font on narrow: before={font_before:.1f} after={font_after:.1f}"
+        )
+
+    def test_plain_item_shrinks_on_setrect(self, scene):
+        """Narrowing via setRect (the real handle-drag path) triggers shrink.
+
+        Regression: setRect calls layout.setMaxSize which, on overflow, emits
+        size_enlarged → on_document_enlarged → set_size, expanding _display_rect.
+        _auto_adjust_font must shrink against the intended size, not the
+        expanded one.
+        """
+        item = self._make_plain_item(scene, xyxy=(0, 0, 400, 100), text="A" * 60, font_size=24.0)
+        self._stabilize(item)
+        font_before = item.layout.max_font_size()
+        item.setRect(QRectF(0, 0, 120, 100))
+        font_after = item.layout.max_font_size()
+        assert font_after < font_before, (
+            f"setRect should shrink font on narrow: before={font_before:.1f} after={font_after:.1f}"
+        )
+
+    @staticmethod
+    def _tall_fitting_text():
+        """8 short lines: width fits comfortably (no width overflow), but the
+        natural height (~450px at 24px font) overflows a 200px block, so the
+        item bounces to its natural height before the resize."""
+        return "\n".join(["A" * 20] * 8)
+
+    def test_plain_item_shrinks_on_height_reduce(self, scene):
+        """Reducing the height (same width) via setRect triggers font shrink.
+
+        Regression (user report: 'narrowing shrinks the font, height reduce
+        does not'): set_size() mutates _display_rect in place, and the
+        bounce-back (setMaxSize → size_enlarged → set_size) restores the
+        natural height into the very QRectF passed to setRect(). When the
+        block was already at its natural height, the hook's change detection
+        (rect.height() vs old_h) saw no change and skipped the shrink, while
+        width resizes still worked.
+        """
+        item = self._make_plain_item(scene, xyxy=(0, 0, 400, 200),
+                                     text=self._tall_fitting_text(), font_size=24.0)
+        self._stabilize(item)
+        font_before = item.layout.max_font_size()
+        natural = item.layout.shrink_height  # text height at font_before
+        # Precondition: the block must already sit at its natural height
+        # (the exact state of the reported bug).
+        assert item._display_rect.height() > natural * 0.9, (
+            f"Precondition: block at natural height, got "
+            f"{item._display_rect.height():.1f} vs natural {natural:.1f}"
+        )
+
+        # Same width, smaller height (scale 0.66 → font ~12pt, above MIN)
+        target_h = natural * 0.66
+        item.setRect(QRectF(0, 0, 400, target_h))
+        font_after = item.layout.max_font_size()
+        assert font_after < font_before, (
+            f"setRect should shrink font on height reduce: before={font_before:.1f} after={font_after:.1f}"
+        )
+
+    def test_plain_item_height_reduce_no_bounce_back(self, scene):
+        """After reducing the height, the block keeps the intended size.
+
+        setMaxSize() expands _display_rect back to the natural text height on
+        overflow (size_enlarged). After the font is shrunk to fit, the
+        intended (smaller) height must be restored, not the natural one.
+        """
+        item = self._make_plain_item(scene, xyxy=(0, 0, 400, 200),
+                                     text=self._tall_fitting_text(), font_size=24.0)
+        self._stabilize(item)
+        natural = item.layout.shrink_height
+        target_h = natural * 0.66
+        item.setRect(QRectF(0, 0, 400, target_h))
+        h = item._display_rect.height()
+        assert h <= target_h + 4, (
+            f"Block should keep the intended height after reduce, got {h:.1f}"
+        )
+
+    def test_plain_item_no_auto_adjust_when_global_font_size(self, scene):
+        """'Font Size: use global setting' (pcfg.let_fntsize_flag=1) disables
+        auto font adjust: height reduce must NOT shrink the font.
+        """
+        from utils.config import pcfg
+        orig = pcfg.let_fntsize_flag
+        try:
+            pcfg.let_fntsize_flag = 1
+            item = self._make_plain_item(scene, xyxy=(0, 0, 400, 200),
+                                         text=self._tall_fitting_text(), font_size=24.0)
+            self._stabilize(item)
+            font_before = item.layout.max_font_size()
+            natural = item.layout.shrink_height
+            item.setRect(QRectF(0, 0, 400, natural * 0.66))
+            font_after = item.layout.max_font_size()
+            assert font_after == font_before, (
+                f"'use global setting' must not auto-shrink: "
+                f"before={font_before:.1f} after={font_after:.1f}"
+            )
+        finally:
+            pcfg.let_fntsize_flag = orig
+
+    def test_plain_item_font_size_locked(self, scene):
+        """Per-block font lock (context menu): resize must not change the
+        font, but an explicit panel change (setFontSize) still works.
+        """
+        item = self._make_plain_item(scene, xyxy=(0, 0, 400, 200),
+                                     text=self._tall_fitting_text(), font_size=24.0)
+        self._stabilize(item)
+        item._font_size_locked = True
+        font_before = item.layout.max_font_size()
+        natural = item.layout.shrink_height
+        item.setRect(QRectF(0, 0, 400, natural * 0.66))
+        font_after = item.layout.max_font_size()
+        assert font_after == font_before, (
+            f"Locked block must not auto-shrink: before={font_before:.1f} after={font_after:.1f}"
+        )
+        # Explicit change from the font panel is still allowed
+        item.setFontSize(10.0)
+        assert abs(item.layout.max_font_size() - 10.0) < 0.01, (
+            f"Explicit setFontSize must work on a locked block, "
+            f"got {item.layout.max_font_size():.2f}"
+        )
+
+    def test_plain_item_narrow_no_bounce_back(self, scene):
+        """After narrowing, the block keeps the intended height (no bounce-back)."""
+        item = self._make_plain_item(scene, xyxy=(0, 0, 400, 100), text="A" * 40, font_size=24.0)
+        self._stabilize(item)
+        item.setRect(QRectF(0, 0, 150, 100))
+        h = item._display_rect.height()
+        assert abs(item._display_rect.width() - 150) <= 4
+        assert h <= 100 + 4, (
+            f"Block should keep the intended height after narrow, got {h:.1f}"
+        )
+
+    def test_plain_item_auto_font_adjust_flag(self, scene):
+        """With _auto_font_adjust=False, set_size must NOT shrink."""
+        item = self._make_plain_item(scene, xyxy=(0, 0, 400, 100), text="A" * 60, font_size=24.0)
+        self._stabilize(item)
+        item._auto_font_adjust = False
+        font_before = item.layout.max_font_size()
+        item.set_size(120, 100, set_layout_maxsize=True)
+        font_after = item.layout.max_font_size()
+        assert abs(font_after - font_before) < 1.0, (
+            f"Auto-adjust disabled should not change font: before={font_before:.1f} after={font_after:.1f}"
+        )
+
+    def test_plain_item_set_size_auto_font_adjust_param(self, scene):
+        """set_size(..., auto_font_adjust=False) suppresses shrink during binary search."""
+        item = self._make_plain_item(scene, xyxy=(0, 0, 400, 100), text="A" * 60, font_size=24.0)
+        self._stabilize(item)
+        font_before = item.layout.max_font_size()
+        item.set_size(120, 100, set_layout_maxsize=True, auto_font_adjust=False)
+        font_after = item.layout.max_font_size()
+        assert abs(font_after - font_before) < 1.0, (
+            f"auto_font_adjust=False should suppress shrink: before={font_before:.1f} after={font_after:.1f}"
+        )
+
+
+class TestToggleAutoAdjustSync:
+    """Flow→Text toggle must carry over _auto_font_adjust."""
+
+    def test_toggle_preserves_auto_font_adjust(self, scene):
+        """A block that was manually sized (auto_adjust=False) keeps it off after toggle."""
+        from ui.textitem import TextBlkItem
+        from ui.flow_textitem import FlowTextBlkItem
+
+        # Create a flow block, then simulate user manual font change (disables auto-adjust)
+        blk = _make_blk(xyxy=(0, 0, 400, 200), text="Hello world", font_size=80.0)
+        flow_item = FlowTextBlkItem(blk, idx=0)
+        scene.addItem(flow_item)
+        flow_item._update_flow_layout()
+        flow_item.setFontSize(20.0)  # Simulate user font change
+        assert flow_item._auto_font_adjust is False
+
+        # Now simulate the toggle: FlowTextBlkItem → TextBlkItem
+        pos = flow_item.pos()
+        rotation = flow_item.rotation()
+        show_rect = flow_item.draw_rect
+        scene.removeItem(flow_item)
+        plain_item = TextBlkItem(blk, 0, show_rect=show_rect)
+        plain_item.setPos(pos)
+        plain_item.setRotation(rotation)
+        # Mirror SceneTextManager.toggle_block_flow_mode flag carry-over
+        plain_item._auto_font_adjust = flow_item._auto_font_adjust
+
+        assert plain_item._auto_font_adjust is False, (
+            "Manually-sized block must keep auto-adjust disabled after toggle"
+        )

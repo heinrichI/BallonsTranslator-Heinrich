@@ -5,8 +5,7 @@ import torch
 from typing import List
 
 from .base import OCRBase, register_OCR, DEFAULT_DEVICE, DEVICE_SELECTOR, TextBlock
-
-from collections import Counter
+from modules.ocr.utils import is_garbage_text
 
 # MODEL_PATH = 'j:/Comic translate/PaddleOCR-VL-For-Manga/PaddleOCR-VL'
 # MODEL_PATH = 'j:/Comic translate/PaddleOCR-VL-For-Manga/Archie-0.0004'
@@ -37,56 +36,7 @@ class PaddleOCRVLMy(OCRBase):
         self.processor = None
 
     def is_garbage(self, text, min_len=18):
-        if not text: return False
-        
-        # Remove whitespace to analyze actual characters
-        clean_text = "".join(text.split())
-        if len(clean_text) < min_len: 
-            return False  # Короткие фразы типа "MMMF" игнорируем
-        # self.logger.debug(f"clean_text={clean_text})")
-            
-        # Count characters
-        counts = Counter(clean_text)
-        most_common = counts.most_common(1)
-        char, count = most_common[0]
-        
-        # NEW: Calculate how "diverse" the text is
-        unique_count = len(counts)
-        # self.logger.debug(
-        #     "Analysis: most_char=%r (%d), total=%d, unique_chars=%d",
-        #     char, count, len(clean_text), unique_count
-        # )
-       
-         # 1. Original check: Single character dominance
-        if count / len(clean_text) > 0.6:
-            self.logger.warning("Flagged: Single character dominance")
-            return True
-        
-        # 2. NEW: Low diversity check (e.g., only [X] repeating)
-        # If string is long but uses very few unique characters
-        if len(clean_text) > 30 and unique_count <= 4:
-            self.logger.warning(f"Flagged: Low character diversity ({unique_count} unique chars)")
-            return True
-
-        # 3. Top-N character dominance (catches [n][n][n]..., ♪♪♪, etc.)
-        #    Normal English text: top-3 chars ≈ 25-35%
-        #    Repetitive garbage:  top-3 chars ≈ 80-99%
-        if len(clean_text) > 30:
-            top3_count = sum(c for _, c in counts.most_common(3))
-            top3_ratio = top3_count / len(clean_text)
-            if top3_ratio > 0.75:
-                self.logger.warning(
-                    f"Flagged: Top-3 chars cover {top3_ratio:.0%} of text "
-                    f"({counts.most_common(3)})"
-                )
-                return True
-
-        # 4. Repeated short pattern (catches any 1-6 char pattern repeated 20+ times)
-        if re.search(r'(.{1,6})\s*(\1[\s]*){19,}', text):
-            self.logger.warning("Flagged: Repeated short pattern")
-            return True
-    
-        return False
+        return is_garbage_text(text, min_len=min_len, logger=self.logger)
 
     def ocr_img(self, img: np.ndarray) -> str:
         # save ballons

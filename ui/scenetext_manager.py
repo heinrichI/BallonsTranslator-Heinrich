@@ -2,6 +2,7 @@
 from typing import List, Union, Tuple
 import numpy as np
 import copy
+import logging
 
 from qtpy.QtWidgets import QApplication, QWidget, QGraphicsItem
 from qtpy.QtCore import QObject, QRectF, Qt, Signal, QPointF, QPoint
@@ -653,12 +654,19 @@ class SceneTextManager(QObject):
         """Convert FlowTextBlkItem to TextBlkItem or vice versa."""
         from ui.flow_textitem import FlowTextBlkItem
 
+        logging.debug(f"[TOGGLE] toggle_block_flow_mode called with idx={blk_idx}")
+        logging.debug(f"[TOGGLE] let_fntsize_flag={pcfg.let_fntsize_flag}, let_autolayout_flag={pcfg.let_autolayout_flag}")
+        logging.debug(f"[TOGGLE] Total blocks: {len(self.textblk_item_list)}")
+
         if blk_idx < 0 or blk_idx >= len(self.textblk_item_list):
+            logging.debug(f"[TOGGLE] Invalid idx={blk_idx}, returning")
             return
 
         blk_item = self.textblk_item_list[blk_idx]
         if blk_item is None:
+            logging.debug(f"[TOGGLE] blk_item is None for idx={blk_idx}, returning")
             return
+        logging.debug(f"[TOGGLE] blk_item type: {type(blk_item).__name__}")
 
         if isinstance(blk_item, FlowTextBlkItem):
             # Convert to TextBlkItem
@@ -679,7 +687,9 @@ class SceneTextManager(QObject):
 
             # Create TextBlkItem
             from ui.textitem import TextBlkItem
+            logging.debug(f"[TOGGLE] Creating TextBlkItem with idx={idx}")
             new_blk_item = TextBlkItem(blk, idx, show_rect=show_rect)
+            logging.debug(f"[TOGGLE] TextBlkItem created, _auto_font_adjust={new_blk_item._auto_font_adjust}, has font_adjuster={new_blk_item.font_adjuster is not None}")
             new_blk_item.setPos(pos)
             new_blk_item.setRotation(rotation)
             self.canvas.add_item_to_text_layer(new_blk_item)
@@ -690,6 +700,10 @@ class SceneTextManager(QObject):
 
             # Update block data
             blk.is_flow_mode = False
+            # Carry over auto-adjust preference so a user who manually set the
+            # font (auto-adjust disabled) keeps it disabled after the toggle.
+            new_blk_item._auto_font_adjust = blk_item._auto_font_adjust
+            new_blk_item._font_size_locked = blk_item._font_size_locked
         else:
             # Convert to FlowTextBlkItem
             blk = blk_item.blk
@@ -708,7 +722,9 @@ class SceneTextManager(QObject):
             self.textblk_item_list[idx] = None
 
             # Create FlowTextBlkItem
+            logging.debug(f"[TOGGLE] Creating FlowTextBlkItem with idx={idx}")
             new_blk_item = FlowTextBlkItem(blk, idx, show_rect=show_rect)
+            logging.debug(f"[TOGGLE] FlowTextBlkItem created, _auto_font_adjust={new_blk_item._auto_font_adjust}, has font_adjuster={new_blk_item.font_adjuster is not None}")
             new_blk_item.setPos(pos)
             new_blk_item.setRotation(rotation)
             self.canvas.add_item_to_text_layer(new_blk_item)
@@ -719,6 +735,10 @@ class SceneTextManager(QObject):
 
             # Update block data
             blk.is_flow_mode = True
+            # Carry over auto-adjust preference so a user who manually set the
+            # font (auto-adjust disabled) keeps it disabled after the toggle.
+            new_blk_item._auto_font_adjust = blk_item._auto_font_adjust
+            new_blk_item._font_size_locked = blk_item._font_size_locked
 
         # Update shape control
         self.txtblkShapeControl.setBlkItem(new_blk_item)
@@ -742,6 +762,7 @@ class SceneTextManager(QObject):
         blk_item.doc_size_changed.connect(self.onTextBlkItemSizeChanged)
         blk_item.pasted.connect(self.onBlkitemPaste)
         if hasattr(blk_item, 'toggle_flow_mode_requested'):
+            logging.debug(f"[TOGGLE] Connecting toggle_flow_mode_requested signal for idx={blk_item.idx}")
             blk_item.toggle_flow_mode_requested.connect(self.toggle_block_flow_mode)
 
     def addTextBlkItem(self, textblk_item: TextBlkItem) -> TextBlkItem:
@@ -762,6 +783,7 @@ class SceneTextManager(QObject):
         textblk_item.doc_size_changed.connect(self.onTextBlkItemSizeChanged)
         textblk_item.pasted.connect(self.onBlkitemPaste)
         if hasattr(textblk_item, 'toggle_flow_mode_requested'):
+            logging.debug(f"[TOGGLE] Connecting toggle_flow_mode_requested signal in addTextBlkItem for idx={textblk_item.idx}")
             textblk_item.toggle_flow_mode_requested.connect(self.toggle_block_flow_mode)
         return textblk_item
 

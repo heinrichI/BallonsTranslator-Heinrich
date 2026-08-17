@@ -9,7 +9,7 @@ from transformers import AutoProcessor, AutoModelForImageTextToText
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from .base import OCRBase, register_OCR, DEFAULT_DEVICE, DEVICE_SELECTOR, TextBlock
-from collections import Counter
+from modules.ocr.utils import is_garbage_text
 
 LOCAL_MODEL_DIR = r"data/models/paddle_ocr_vl_16"
 
@@ -156,31 +156,7 @@ class PaddleOCRVL16(OCRBase):
         return model_path if model_path else LOCAL_MODEL_DIR
 
     def is_garbage(self, text, min_len=18):
-        if not text:
-            return False
-        clean_text = "".join(text.split())
-        if len(clean_text) < min_len:
-            return False
-        counts = Counter(clean_text)
-        most_common = counts.most_common(1)
-        char, count = most_common[0]
-        unique_count = len(counts)
-        if count / len(clean_text) > 0.6:
-            self.logger.warning("Flagged: Single character dominance")
-            return True
-        if len(clean_text) > 30 and unique_count <= 4:
-            self.logger.warning(f"Flagged: Low character diversity ({unique_count} unique chars)")
-            return True
-        if len(clean_text) > 30:
-            top3_count = sum(c for _, c in counts.most_common(3))
-            top3_ratio = top3_count / len(clean_text)
-            if top3_ratio > 0.75:
-                self.logger.warning(f"Flagged: Top-3 chars cover {top3_ratio:.0%} of text ({counts.most_common(3)})")
-                return True
-        if re.search(r'(.{1,6})\s*(\1[\s]*){19,}', text):
-            self.logger.warning("Flagged: Repeated short pattern")
-            return True
-        return False
+        return is_garbage_text(text, min_len=min_len, logger=self.logger)
 
     def ocr_img(self, img: np.ndarray) -> str:
         self._load_model()

@@ -25,24 +25,14 @@ if ROOT not in sys.path:
 
 import pytest
 from unittest.mock import MagicMock, patch
-from qtpy.QtWidgets import QApplication, QUndoCommand
+from qtpy.QtWidgets import QUndoCommand
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from ui.undo_manager import UndoManager
 
 
-# ── Фикстуры ──────────────────────────────────────────────────
-
-@pytest.fixture(scope="session")
-def qapp():
-    """Один QApplication на всю сессию (offscreen)."""
-    app = QApplication.instance()
-    if app is None:
-        import sys
-        app = QApplication(sys.argv)
-    yield app
-
+# (фикстура qapp — tests/ui/conftest.py)
 
 class _FakeCanvas:
     """Минимальная имитация Canvas для тестирования push_undo_command."""

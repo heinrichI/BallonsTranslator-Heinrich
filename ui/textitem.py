@@ -13,11 +13,14 @@ from qtpy.QtGui import (QGradient, QKeyEvent, QFont, QTextCursor, QPixmap, QPain
 from utils.textblock import TextBlock, FontFormat, TextAlignment, LineSpacingType
 from utils.imgproc_utils import xywh2xyxypoly, rotate_polygons
 from utils.fontformat import FontFormat, px2pt, pt2px
+from utils.shared import LOG_PREFIXES as _LOG_PREFIXES
 from .misc import td_pattern, table_pattern
 from .scene_textlayout import VerticalTextDocumentLayout, HorizontalTextDocumentLayout, SceneTextLayout
 from .text_graphical_effect import apply_shadow_effect
 from .text_format_manager import TextFormatManager
 from .font_size_manager import FontSizeManager
+from .font_auto_adjuster import FontAutoAdjuster
+from utils.config import pcfg
 
 LOGGER = logging.getLogger('BallonTranslator')
 
@@ -92,11 +95,30 @@ class TextBlkItem(QGraphicsTextItem):
         self.block_change_signal = False
 
         self.layout: Union[VerticalTextDocumentLayout, HorizontalTextDocumentLayout] = None
+        # Auto font adjust: True when shrink/grow runs on handle drag.
+        # Set False when user changes font manually (setFontSize) or when
+        # the "Font Size: use global setting" option is selected
+        # (pcfg.let_fntsize_flag == 1) — in that mode the program must not
+        # resize the user's font. Re-evaluated on reshape end and gated in
+        # _auto_adjust_font so a runtime settings change applies immediately.
+        self._auto_font_adjust: bool = (pcfg.let_fntsize_flag != 1)
+        # Per-block font size lock (context menu toggle): while locked,
+        # automatic font adjust (shrink/grow on resize) must not change the
+        # font — only explicit changes from the font panel are allowed.
+        self._font_size_locked: bool = False
+        self.font_adjuster: FontAutoAdjuster = None  # lazily created in _ensure_font_adjuster
+        self._auto_adjusting: bool = False  # re-entrancy guard for auto-adjust loops
+        self._fully_initialized: bool = False  # True after __init__ completes
         self.document().setDocumentMargin(0)
         self.initTextBlock(blk, set_format=set_format)
         self.setBoundingRegionGranularity(0)
         self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable)
         self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+        # Mark fully initialized AFTER initTextBlock/setRect so the first
+        # auto-adjust passes only run on real user resize, not during init.
+        self._fully_initialized = True
+        # Eagerly create the adjuster so the attribute is always usable.
+        self._ensure_font_adjuster()
 
     def inputMethodEvent(self, e: QInputMethodEvent):
         if self.pre_editing == False:
@@ -338,6 +360,11 @@ class TextBlkItem(QGraphicsTextItem):
         self.reshaping = True
 
     def endReshape(self):
+        # Reshape is a user resize action — re-enable auto-adjust so the
+        # NEXT handle drag auto-sizes again (mirrors FlowTextBlkItem).
+        # "Font Size: use global setting" keeps it disabled.
+        if hasattr(self, 'font_adjuster'):
+            self._auto_font_adjust = (pcfg.let_fntsize_flag != 1)
         self.reshaped.emit(self)
         self.reshaping = False
 
@@ -365,14 +392,37 @@ class TextBlkItem(QGraphicsTextItem):
             rect = QRectF(*rect)
         if padding:
             rect = self.padRect(rect)
+        old_w = self._display_rect.width() if self._display_rect is not None else 0
+        old_h = self._display_rect.height() if self._display_rect is not None else 0
         self.setPos(rect.topLeft())
         self.prepareGeometryChange()
         self._display_rect = rect
+        # Capture the intended size BEFORE setMaxSize: when text overflows,
+        # reLayout() emits size_enlarged → on_document_enlarged → set_size,
+        # which expands _display_rect. We must shrink against the user's
+        # intended size, not the expanded one.
+        intended_w = rect.width()
+        intended_h = rect.height()
         self.layout.setMaxSize(rect.width(), rect.height())
         self.setCenterTransform()
         self.blk.xyxy = xywh_to_xyxy(rect)
         if repaint:
             self.repaint_background()
+        # Auto font-adjust on handle drag (plain TextBlkItem).
+        # Only when fully initialized, size actually changed, and auto-adjust
+        # is enabled. FlowTextBlkItem overrides this path with _update_flow_layout.
+        # Use type-name check to avoid NameError from circular import ordering.
+        # NOTE: compare against intended_w/h, NOT rect.width()/height(): the
+        # bounce-back (setMaxSize → size_enlarged → set_size) mutates
+        # self._display_rect in place — the same QRectF object as `rect` here —
+        # restoring the natural height. When the block was already at its
+        # natural height, rect.height() == old_h and the hook would skip the
+        # shrink (height-only resizes did nothing).
+        if (self._fully_initialized
+                and self._auto_font_adjust
+                and (abs(intended_w - old_w) > 0.5 or abs(intended_h - old_h) > 0.5)
+                and type(self).__name__ != 'FlowTextBlkItem'):
+            self._auto_adjust_font(target_w=intended_w, target_h=intended_h)
 
     def documentSize(self):
         return self.layout.documentSize()
@@ -510,6 +560,137 @@ class TextBlkItem(QGraphicsTextItem):
             self.setCenterTransform()
             self.repaint_background()
         self.doc_size_changed.emit(self.idx)
+
+    # ── Auto font-adjust (shared with FlowTextBlkItem) ────────
+
+    def _block_text(self) -> str:
+        """Return first 30 chars of block text for logging filter."""
+        try:
+            return self.document().toPlainText()[:30]
+        except Exception:
+            return ""
+
+    def _should_log(self) -> bool:
+        """True only for blocks whose text starts with a _LOG_PREFIXES entry."""
+        txt = self._block_text()
+        return any(txt.startswith(p) for p in _LOG_PREFIXES)
+
+    def _log(self, msg: str, level: int = logging.DEBUG):
+        """When quiet, log only for blocks matching _LOG_PREFIXES."""
+        if level <= logging.DEBUG and not self._should_log():
+            return
+        LOGGER.log(level, "[%s] %s", self._block_text()[:20], msg)
+
+    def _ensure_font_adjuster(self):
+        """Lazily create the FontAutoAdjuster for this block.
+
+        Plain TextBlkItem (non-flow) uses the same FontAutoAdjuster as
+        FlowTextBlkItem so that handle-drag auto font-shrink/grow works
+        after toggling from flow mode. The adjuster falls back to
+        layout.available_height/width (no control points) — exactly what a
+        plain rectangular block needs.
+        """
+        if self.font_adjuster is None:
+            self.font_adjuster = FontAutoAdjuster(
+                layout=self.layout,
+                document=self.document(),
+                log=self._log,
+                change_font_size=self._font_adjuster_change_size,
+                get_points=lambda: ([], []),  # plain block: no flow points
+                sync_font=self._font_adjuster_sync,
+            )
+        return self.font_adjuster
+
+    def _font_adjuster_change_size(self, factor: float):
+        """Called by FontAutoAdjuster to apply a relative font size change."""
+        adj = self._ensure_font_adjuster()
+        adj._internal_font_change = True
+        try:
+            self.setRelFontSize(factor)
+        finally:
+            adj._internal_font_change = False
+
+    def _font_adjuster_sync(self):
+        """Called by FontAutoAdjuster after font size changes to sync fontformat/blk."""
+        try:
+            doc_font_pt = self.document().defaultFont().pointSizeF()
+            if doc_font_pt > 0:
+                self.font_size_mgr.set(doc_font_pt, source="auto_layout")
+        except Exception:
+            pass
+
+    def _auto_adjust_font(self, target_w: float = None, target_h: float = None):
+        """Run shrink/grow for a plain rectangular block after resize.
+
+        Mirrors FlowTextBlkItem._update_flow_layout's auto-adjust section
+        using the layout's available_height/width as target constraints.
+
+        Args:
+            target_w/target_h: The user's intended block size (full display
+                rect, same convention as setRect/set_size). Passed from
+                setRect/set_size because _display_rect may have been expanded
+                by on_document_enlarged → set_size when text overflowed during
+                setMaxSize (reLayout() expands available_height on overflow).
+        """
+        adj = self._ensure_font_adjuster()
+        # Re-entrancy guard: shrink/grow call setRelFontSize → setFontSize
+        # → squeezeBoundingRect → set_size → _auto_adjust_font.
+        if self._auto_adjusting or not self._fully_initialized:
+            return False
+        if not self._auto_font_adjust:
+            return False
+        # Per-block font lock (context menu): block automatic font changes
+        # while locked. Explicit panel changes go through setFontSize and
+        # are not affected by the lock.
+        if self._font_size_locked:
+            return False
+        # "Font Size: use global setting" (pcfg.let_fntsize_flag == 1) —
+        # never auto-size the font. Checked here (single choke point for the
+        # setRect/set_size hooks) so the setting also wins for items created
+        # before the option was changed at runtime.
+        if pcfg.let_fntsize_flag == 1:
+            return False
+        if not isinstance(self.layout, HorizontalTextDocumentLayout):
+            return False
+        if self._display_rect is None or not self._display_rect.isValid():
+            return False
+
+        self._auto_adjusting = True
+        try:
+            # Reset layout constraints to the intended block size because
+            # reLayout() expands available_height on overflow. Convention
+            # (same as setMaxSize): available = full size - 2*margin,
+            # max = full size. A font that fits here will not re-trigger
+            # size_enlarged when the size is re-asserted below.
+            margin = self.document().documentMargin()
+            if target_h is None:
+                target_h = self._display_rect.height()
+            if target_w is None:
+                target_w = self._display_rect.width()
+            self.layout.available_height = max(target_h - 2*margin, 0)
+            self.layout.max_height = target_h
+            self.layout.available_width = max(target_w - 2*margin, 0)
+            self.layout.max_width = target_w
+            font_changed = adj.shrink()
+            if font_changed:
+                # Undo the size_enlarged bounce-back: setMaxSize expanded
+                # _display_rect to the natural text height, but now that the
+                # font fits, restore the user's intended block size.
+                if (self.layout.shrink_height <= self.layout.available_height
+                        and self.layout.shrink_width <= self.layout.available_width):
+                    self.set_size(target_w, target_h, set_layout_maxsize=True,
+                                  set_blk_size=True, auto_font_adjust=False)
+            # Only grow when shrink did NOT apply — prevents oscillation
+            if adj._auto_grow_enabled and not font_changed:
+                font_changed = adj.grow() or font_changed
+            if font_changed:
+                try:
+                    self.reshaped.emit(self)
+                except Exception:
+                    pass
+            return font_changed
+        finally:
+            self._auto_adjusting = False
 
     def updateUndoSteps(self):
         self.old_undo_steps = self.document().availableUndoSteps()
@@ -712,12 +893,25 @@ class TextBlkItem(QGraphicsTextItem):
         event.accept()
         menu = QMenu()
         self.injectToggleFlowMenu(menu)
+        self.injectFontLockMenu(menu)
         menu.exec_(event.globalPos())
 
     def injectToggleFlowMenu(self, menu: QMenu):
         """Insert the 'Toggle Flow Mode' action at the top of an existing QMenu."""
         toggle_flow = QAction(self.tr('Toggle Flow Mode'), menu)
-        toggle_flow.triggered.connect(lambda: self.toggle_flow_mode_requested.emit(self.idx))
+        LOGGER.debug(f"[TOGGLE_MENU] Adding toggle action for idx={self.idx}, is FlowTextBlkItem=False")
+        def on_toggle_clicked():
+            LOGGER.debug(f"[TOGGLE_ACTION] Toggle clicked for idx={self.idx}")
+            # Try to get SceneTextManager and call toggle directly
+            scene = self.scene()
+            if scene and hasattr(scene, 'st_manager'):
+                LOGGER.debug(f"[TOGGLE_ACTION] Calling toggle_block_flow_mode directly via st_manager")
+                scene.st_manager.toggle_block_flow_mode(self.idx)
+            else:
+                LOGGER.debug(f"[TOGGLE_ACTION] Falling back to signal (scene={scene}, has st_manager={scene and hasattr(scene, 'st_manager')})")
+                self.toggle_flow_mode_requested.emit(self.idx)
+        toggle_flow.triggered.connect(on_toggle_clicked)
+        menu.setProperty('_bt_toggle_flow_action', toggle_flow)
         first_action = menu.actions()[0] if menu.actions() else None
         if first_action is not None:
             menu.insertAction(first_action, toggle_flow)
@@ -739,8 +933,33 @@ class TextBlkItem(QGraphicsTextItem):
         if scene is not None and hasattr(scene, 'build_context_menu') and hasattr(scene, 'exec_context_menu'):
             std_menu, actions = scene.build_context_menu()
             self.injectToggleFlowMenu(std_menu)
+            self.injectFontLockMenu(std_menu)
             screen_pt = screen_pos.toPoint() if hasattr(screen_pos, 'toPoint') else screen_pos
             scene.exec_context_menu(std_menu, actions, screen_pt)
+
+    def injectFontLockMenu(self, menu: QMenu):
+        """Add a checkable 'Lock font size' action to the block context menu.
+
+        While locked, automatic font adjust (shrink/grow on block resize) is
+        blocked for this block. The font size can only be changed explicitly
+        from the font panel (setFontSize is not affected by the lock).
+        """
+        lock = QAction(self.tr('Lock font size'), menu)
+        lock.setCheckable(True)
+        lock.setChecked(getattr(self, '_font_size_locked', False))
+        lock.setToolTip(self.tr(
+            'Block automatic font resizing when this block is resized. '
+            'The font size can only be changed from the font panel.'))
+        lock.toggled.connect(lambda checked: setattr(self, '_font_size_locked', checked))
+        # Place directly next to 'Toggle Flow Mode' (right after it). The
+        # toggle action is tagged by injectToggleFlowMenu / injectFlowMenuItems.
+        actions = menu.actions()
+        toggle = menu.property('_bt_toggle_flow_action')
+        if toggle is not None and toggle in actions:
+            idx = actions.index(toggle)
+            menu.insertAction(actions[idx + 1] if idx + 1 < len(actions) else None, lock)
+        else:
+            menu.addAction(lock)
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1180,6 +1399,15 @@ class TextBlkItem(QGraphicsTextItem):
                 self.font_size_mgr.set(value, source=source)
                 self._user_font_size = pt2px(value)  # Save user's choice
                 caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else '?'
+                # User changed the font manually → disable auto-adjust so
+                # shrink/grow do not override the user's choice. Internal
+                # calls from FontAutoAdjuster (via _internal_font_change
+                # guard in _font_adjuster_change_size) skip this.
+                adj = getattr(self, 'font_adjuster', None)
+                if adj is not None and not adj._internal_font_change:
+                    self._auto_font_adjust = False
+                elif adj is None:
+                    self._auto_font_adjust = False
                 if _is_log_target(self.blk):
                     LOGGER.debug("[FONTSIZE] TEXTITEM setFontSize: idx=%d input_pt=%.1f -> font_size_px=%.1f _auto_font_adjust=%s caller=%s",
                         self.idx, value, pt2px(value), self._auto_font_adjust, caller)
@@ -1293,7 +1521,7 @@ class TextBlkItem(QGraphicsTextItem):
             scale = self.scene().scale_factor
         return scale
             
-    def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True):
+    def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True, auto_font_adjust=True):
         '''
         rotation invariant
         '''
@@ -1303,6 +1531,8 @@ class TextBlkItem(QGraphicsTextItem):
 
         old_w = self._display_rect.width()
         old_h = self._display_rect.height()
+        old_w_changed = abs(old_w - w) > 0.5
+        old_h_changed = abs(old_h - h) > 0.5
 
         oc = self.sceneBoundingRect().center()
         self._display_rect.setWidth(w)
@@ -1338,6 +1568,16 @@ class TextBlkItem(QGraphicsTextItem):
         self.setPos(self.pos() + pos_shift)
         if self.blk is not None and set_blk_size:
             self.blk._bounding_rect = self.absBoundingRect()
+
+        # Auto font-adjust for plain (non-flow) blocks after resize.
+        # TextLayoutManager calls set_size(..., auto_font_adjust=False) during
+        # binary search — that flag suppresses shrink/grow here.
+        if (auto_font_adjust
+                and self._fully_initialized
+                and self._auto_font_adjust
+                and (old_w_changed or old_h_changed)
+                and type(self).__name__ != 'FlowTextBlkItem'):
+            self._auto_adjust_font(target_w=w, target_h=h)
 
 
 # Import alias so other modules can use FlowTextBlkItem as TextBlkItem

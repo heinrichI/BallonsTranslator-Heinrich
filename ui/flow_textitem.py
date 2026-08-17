@@ -52,6 +52,7 @@ from .textitem import TextBlkItem
 from .scene_textlayout import HorizontalTextDocumentLayout
 from .textitem import TEXTRECT_SHOW_COLOR, TEXTRECT_SELECTED_COLOR
 from .font_auto_adjuster import FontAutoAdjuster
+from utils.config import pcfg
 import pyphen
 
 
@@ -248,9 +249,9 @@ class FlowTextBlkItem(TextBlkItem):
             self.font_adjuster.shrink()
             self.font_adjuster._auto_grow_enabled = True
             self.sync_coordinates()
-            # Disable auto-adjust only if font was ALREADY small when loaded
-            # (from a previous session), NOT if it was just shrunk from a large detector size.
-            if not font_was_large and self.blk.fontformat is not None and self.blk.fontformat.font_size <= 50.0:
+            # Disable auto-adjust only if auto-layout is disabled in program settings
+            # This respects the user's preference for manual vs. automatic font sizing
+            if pcfg.let_fntsize_flag == 1 or not pcfg.let_autolayout_flag:
                 self._auto_font_adjust = False
 
         # Shrink even without flow points if font is clearly too big for the bounding rect.
@@ -457,8 +458,14 @@ class FlowTextBlkItem(TextBlkItem):
         except Exception:
             pass
 
-    def _update_flow_layout(self):
-        """Push current boundary functions to the layout engine and repaint."""
+    def _update_flow_layout(self, adjust_font: bool = True):
+        """Push current boundary functions to the layout engine and repaint.
+
+        adjust_font=False skips the font_adjuster shrink/grow pass (and the
+        _auto_font_adjust reset) — used when re-layout is needed but the
+        available space did not change (e.g. alignment change), so the font
+        is not re-grown on every layout pass.
+        """
         from .scene_textlayout import VerticalTextDocumentLayout
 
         # Re-entrancy guard: prevent recursive calls triggered by reLayout()
@@ -466,7 +473,8 @@ class FlowTextBlkItem(TextBlkItem):
         if self._updating_flow:
             return
         # Guard: font_adjuster not yet created during super().__init__() → setVertical()
-        if not hasattr(self, 'font_adjuster'):
+        # Base TextBlkItem initialises font_adjuster to None, so check both.
+        if not hasattr(self, 'font_adjuster') or self.font_adjuster is None:
             return
 
         # Guard: prevent _display_rect changes from docSizeChanged during flow updates
@@ -517,14 +525,18 @@ class FlowTextBlkItem(TextBlkItem):
                 # First shrink if text overflows, then grow if there's room.
                 # Skip auto-adjust when user changed font manually (_auto_font_adjust=False).
                 font_changed = False
-                if self._auto_font_adjust:
-                    font_changed = self.font_adjuster.shrink()
-                    # Only grow when shrink did NOT apply — prevents oscillation
-                    # where grow undoes shrink and triggers another cycle.
-                    if self.font_adjuster._auto_grow_enabled and not font_changed:
-                        font_changed = self.font_adjuster.grow() or font_changed
-                # else:
-                #     _debug("  _update_flow_layout: _auto_font_adjust=False, shrink/grow SKIPPED")
+                if adjust_font:
+                    # "Font Size: use global setting" and the per-block font
+                    # lock (context menu) disable auto font adjust.
+                    if (self._auto_font_adjust and pcfg.let_fntsize_flag != 1
+                            and not self._font_size_locked):
+                        font_changed = self.font_adjuster.shrink()
+                        # Only grow when shrink did NOT apply — prevents oscillation
+                        # where grow undoes shrink and triggers another cycle.
+                        if self.font_adjuster._auto_grow_enabled and not font_changed:
+                            font_changed = self.font_adjuster.grow() or font_changed
+                    # else:
+                    #     _debug("  _update_flow_layout: _auto_font_adjust=False, shrink/grow SKIPPED")
                 if font_changed:
                     # Notify the text panel so it refreshes the font-size display.
                     try:
@@ -536,8 +548,10 @@ class FlowTextBlkItem(TextBlkItem):
                         self.idx, self.fontformat.font_size if self.fontformat else 0,
                         self.blk.fontformat.font_size if self.blk and self.blk.fontformat else 0,
                         self.document().defaultFont().pointSizeF())
-                # Reset so next handle drag auto-adjusts
-                self._auto_font_adjust = True
+                # Reset so next handle drag auto-adjusts (unless the
+                # "Font Size: use global setting" option is selected).
+                if adjust_font:
+                    self._auto_font_adjust = (pcfg.let_fntsize_flag != 1)
 
             elif isinstance(self.layout, VerticalTextDocumentLayout):
                 # Vertical mode: reduce available_height when left handle moves right.
@@ -633,10 +647,15 @@ class FlowTextBlkItem(TextBlkItem):
         offset computed in HorizontalTextDocumentLayout.reLayout() (which
         depends on doc.defaultTextOption().alignment()) would not be
         recalculated until some other event triggers a layout pass.
+
+        adjust_font=False: alignment does not change the available space, so
+        skip the shrink/grow pass — otherwise each alignment change re-grows
+        the font (×1.08 up to 20 steps per pass), eventually wrapping the
+        text via char-level breaks and inflating the block via size_enlarged.
         """
         super().setAlignment(value, restore_cursor=restore_cursor, repaint_background=repaint_background, *args, **kwargs)
         if isinstance(self.layout, HorizontalTextDocumentLayout):
-            self._update_flow_layout()
+            self._update_flow_layout(adjust_font=False)
 
     # ── Font change override ────────────────────────────────────
 
@@ -909,7 +928,19 @@ class FlowTextBlkItem(TextBlkItem):
         """
         # Always add toggle flow mode action
         toggle_flow = QAction("Toggle Flow Mode", menu)
-        toggle_flow.triggered.connect(lambda: self.toggle_flow_mode_requested.emit(self.idx))
+        _debug(f"[TOGGLE_MENU] Adding toggle action for idx={self.idx}, is FlowTextBlkItem=True, _auto_font_adjust={self._auto_font_adjust}")
+        def on_toggle_clicked():
+            _debug(f"[TOGGLE_ACTION] Toggle clicked for idx={self.idx}")
+            # Try to get SceneTextManager and call toggle directly
+            scene = self.scene()
+            if scene and hasattr(scene, 'st_manager'):
+                _debug(f"[TOGGLE_ACTION] Calling toggle_block_flow_mode directly via st_manager")
+                scene.st_manager.toggle_block_flow_mode(self.idx)
+            else:
+                _debug(f"[TOGGLE_ACTION] Falling back to signal (scene={scene}, has st_manager={scene and hasattr(scene, 'st_manager')})")
+                self.toggle_flow_mode_requested.emit(self.idx)
+        toggle_flow.triggered.connect(on_toggle_clicked)
+        menu.setProperty('_bt_toggle_flow_action', toggle_flow)
 
         first_action = menu.actions()[0] if menu.actions() else None
 
@@ -923,6 +954,9 @@ class FlowTextBlkItem(TextBlkItem):
         else:
             menu.addAction(toggle_flow)
             sep = menu.addSeparator()
+
+        # Per-block font size lock (checkable), shared with plain blocks.
+        self.injectFontLockMenu(menu)
 
         if not self._left_points or not self._right_points:
             return
@@ -955,17 +989,17 @@ class FlowTextBlkItem(TextBlkItem):
         Builds the standard canvas menu, injects flow items, and shows it.
         """
         self.setSelected(True)
-        logger.debug("showFlowContextMenu called — scene_pos=(%.1f, %.1f)", scene_pos.x(), scene_pos.y())
+        _debug("showFlowContextMenu called — scene_pos=(%.1f, %.1f)", scene_pos.x(), scene_pos.y())
         scene = self.scene()
         if scene is not None and hasattr(scene, 'build_context_menu') and hasattr(scene, 'exec_context_menu'):
             std_menu, actions = scene.build_context_menu()
-            logger.debug("  std_menu built, actions=%d. Now injecting flow items.", len(actions) if actions else 0)
+            _debug("  std_menu built, actions=%d. Now injecting flow items.", len(actions) if actions else 0)
             self.injectFlowMenuItems(std_menu, scene_pos)
             screen_pt = screen_pos.toPoint() if hasattr(screen_pos, 'toPoint') else screen_pos
             scene.exec_context_menu(std_menu, actions, screen_pt)
-            logger.debug("  Context menu executed.")
+            _debug("  Context menu executed.")
         else:
-            logger.debug("  scene=%s, has build_context_menu=%s, has exec_context_menu=%s",
+            _debug("  scene=%s, has build_context_menu=%s, has exec_context_menu=%s",
                          scene,
                          hasattr(scene, 'build_context_menu') if scene else False,
                          hasattr(scene, 'exec_context_menu') if scene else False)

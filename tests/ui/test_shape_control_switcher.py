@@ -33,22 +33,7 @@ from ui.shape_control_switcher import ShapeControlSwitcher
 import ui.scenetext_manager as stm_mod
 
 
-@pytest.fixture(scope="session")
-def qapp():
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    yield app
-
-
-@pytest.fixture
-def scene(qapp):
-    s = QGraphicsScene()
-    view = QGraphicsView(s)
-    view.resize(2000, 2000)
-    yield s
-    s.clear()
-
+# (фикстуры qapp/scene — tests/ui/conftest.py)
 
 def _make_blk(xyxy=(0, 0, 400, 200), text="Hello world test text", font_size=24.0):
     x1, y1, x2, y2 = xyxy

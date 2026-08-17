@@ -336,7 +336,7 @@ class ImgtransThread(QThread):
             im_h, im_w = tgt_img.shape[:2]
             progress_prod = 100. / len(blk_list) if len(blk_list) > 0 else 0
             for ii, blk in enumerate(blk_list):
-                xyxy = enlarge_window(blk.xyxy, im_w, im_h)
+                xyxy = enlarge_window(blk.absBounding_rect(), im_w, im_h)
                 xyxy = np.array(xyxy)
                 x1, y1, x2, y2 = xyxy.astype(np.int64)
                 blk.region_inpaint_dict = None
