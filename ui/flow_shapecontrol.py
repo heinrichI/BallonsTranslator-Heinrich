@@ -22,7 +22,7 @@ from .cursor import rotateCursorList
 
 logger = logging.getLogger('BallonTranslator')
 
-QUIET_UI = True  # Set to False for verbose UI debug logging
+QUIET_UI = True  # Set to False for verbose UI debug logging  (DEBUG ON: flow-drag investigation)
 
 def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
@@ -30,6 +30,12 @@ def _debug(msg, *args, **kwargs):
 
 def _fmt_pts(pts):
     return '[' + ', '.join(f'({p.x():.1f},{p.y():.1f})' for p in pts) + ']'
+
+def _fmt_pt(p):
+    return f'({p.x():.1f},{p.y():.1f})'
+
+def _fmt_rect(r):
+    return f'[{r.x():.1f},{r.y():.1f} {r.width():.1f}x{r.height():.1f}]'
 
 HANDLE_RADIUS = 6       # px at scale=1
 RESIZE_HANDLE_SIZE = 8  # px at scale=1
@@ -68,7 +74,7 @@ class FlowControlHandle(QGraphicsEllipseItem):
             self._drag_start_pos = event.scenePos()
             blk_item = self.ctrl.blk_item
             if blk_item is not None:
-                blk_item.setSelected(True)
+                self.ctrl.select_block_for_interaction(blk_item, event)
                 blk_item.startReshape()
         event.accept()
 
@@ -167,7 +173,7 @@ class FlowHResizeHandle(QGraphicsItem):
             self._last_scene_x = event.scenePos().x()
             blk_item = self.ctrl.blk_item
             if blk_item is not None:
-                blk_item.setSelected(True)
+                self.ctrl.select_block_for_interaction(blk_item, event)
                 blk_item.startReshape()
         event.accept()
 
@@ -266,7 +272,7 @@ class FlowResizeHandle(QGraphicsItem):
             self._last_scene_y = event.scenePos().y()
             blk_item = self.ctrl.blk_item
             if blk_item is not None:
-                blk_item.setSelected(True)
+                self.ctrl.select_block_for_interaction(blk_item, event)
                 blk_item.startReshape()
         event.accept()
 
@@ -358,7 +364,7 @@ class FlowRotationHandle(QGraphicsEllipseItem):
             self._dragging = True
             blk_item = self.ctrl.blk_item
             if blk_item is not None:
-                blk_item.setSelected(True)
+                self.ctrl.select_block_for_interaction(blk_item, event)
                 center = blk_item.mapToScene(blk_item.boundingRect().center())
                 rotate_vec = event.scenePos() - center
                 rotation = np.rad2deg(math.atan2(rotate_vec.y(), rotate_vec.x()))
@@ -477,7 +483,19 @@ class FlowShapeControl(QGraphicsItem):
 
     def boundingRect(self) -> QRectF:
         if self.blk_item is not None:
-            return self.blk_item.boundingRect()
+            # Steady state: the body is mouse-transparent (like the legacy
+           # TextBlkShapeControl, which has no hit flags of its own). The
+            # control is pinned at the parent origin (updateHandlePositions
+            # resets pos to (0,0) so handles stay in parent coordinates), so
+            # returning the block's LOCAL rect here created a phantom hit
+            # zone at the page origin sized to the (possibly point-inflated)
+            # last-hovered block. Any body press inside that zone was stolen
+            # from the block under the cursor and dragged the wrong block.
+            # With an empty rect the press falls through to the block itself,
+            # which handles selection/move natively (ItemIsMovable|
+            # ItemIsSelectable + its own press/release handlers). Child
+            # handles are hit-tested independently and keep working.
+            return QRectF()
         if hasattr(self, '_drag_rect') and self._drag_rect is not None:
             return self._drag_rect
         return QRectF()
@@ -501,6 +519,12 @@ class FlowShapeControl(QGraphicsItem):
             # Ctrl is held for multi-select).
             blk_item = self.blk_item
             blk_item.oldPos = blk_item.pos()
+            blk_scene_rect = blk_item.sceneBoundingRect()
+            press_in_block = blk_scene_rect.contains(event.scenePos())
+            _debug("[FLOWDRAG] control-body press: scenePos=%s owner=idx%s blockSceneRect=%s press_in_block=%s%s",
+                   _fmt_pt(event.scenePos()), getattr(blk_item, 'idx', '?'),
+                   _fmt_rect(blk_scene_rect), press_in_block,
+                   '' if press_in_block else ' << PHANTOM-ZONE STEAL: press is OUTSIDE the owner block >>')
             if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier) and self.scene() is not None:
                 self.scene().clearSelection()
             blk_item.setSelected(True)
@@ -518,6 +542,16 @@ class FlowShapeControl(QGraphicsItem):
         event.accept()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        if self._dragging and self.blk_item is not None \
+                and self.blk_item.oldPos != self.blk_item.pos():
+            _debug("[FLOWDRAG] control-body release -> moved: idx=%s oldPos=%s newPos=%s",
+                   getattr(self.blk_item, 'idx', '?'),
+                   _fmt_pt(self.blk_item.oldPos), _fmt_pt(self.blk_item.pos()))
+            # Mirror TextBlkItem.mouseReleaseEvent: the control covers the
+            # block, so the item never sees the release itself. Without this
+            # emit a body drag produces no MoveBlkItemsCommand (via
+            # SceneTextManager.onTextBlkItemMoved) and Ctrl+Z cannot undo it.
+            self.blk_item.moved.emit()
         self._dragging = False
         event.accept()
 
@@ -539,6 +573,22 @@ class FlowShapeControl(QGraphicsItem):
         if getattr(self.blk_item, '_editing', False):
             return False
         return hasattr(self.blk_item, '_left_points') and bool(self.blk_item._left_points)
+
+    def select_block_for_interaction(self, blk_item, event: QGraphicsSceneMouseEvent):
+        """Select ``blk_item`` with standard Qt selection semantics (a mirror
+        of QGraphicsItem::mousePressEvent): a plain press on an unselected
+        block replaces the current selection; a Ctrl+press adds to it.
+
+        The previous bare ``blk_item.setSelected(True)`` in the handle press
+        handlers accumulated stale selections: shaping one block's handles
+        silently added it to whatever else was selected, and a later drag of
+        an already-selected block then moved ALL selected blocks at once
+        (the "dragged one block, several moved" bug)."""
+        scene = self.scene()
+        ctrl_held = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if not ctrl_held and not blk_item.isSelected() and scene is not None:
+            scene.clearSelection()
+        blk_item.setSelected(True)
 
     def setBlkItem(self, blk_item):
         _debug("=== setBlkItem called ===")
@@ -565,6 +615,7 @@ class FlowShapeControl(QGraphicsItem):
             if has_points:
                 self.updateHandlePositions()
             self.show()
+            self._log_hit_zone()
             return
         if self.blk_item is not None:
             _debug("  old blk_item=%s type=%s pos=%s",
@@ -867,6 +918,28 @@ class FlowShapeControl(QGraphicsItem):
         if has_points:
             self.updateHandlePositions()
         self.setZValue(1)
+        self._log_hit_zone()
+
+    def _log_hit_zone(self) -> None:
+        """[FLOWDRAG] Log the control's effective body-hit zone in scene
+        coordinates next to the owned block's actual scene rect. The two
+        must coincide; a disjoint zone means body presses land in a phantom
+        zone (control pinned at the parent origin) and drag the wrong block."""
+        blk_item = self.blk_item
+        if blk_item is None or self.scene() is None:
+            return
+        local_br = blk_item.boundingRect()
+        # The control's effective body-hit zone (empty in steady state after
+        # the phantom-zone fix; non-empty only in drag-create mode).
+        body_br = self.boundingRect()
+        zone = QRectF(self.scenePos(), body_br.size())
+        blk_rect = blk_item.sceneBoundingRect()
+        _debug("[FLOWDRAG] hit-zone: owner=idx%s ctrlScenePos=%s blkLocalBR=%s -> bodyHitZone=%s | blockSceneRect=%s | %s",
+               getattr(blk_item, 'idx', '?'), _fmt_pt(self.scenePos()), _fmt_rect(local_br),
+               _fmt_rect(zone), _fmt_rect(blk_rect),
+               'OK (body transparent, presses fall through to the block)' if body_br.isNull()
+               else ('OK (overlap)' if zone.intersects(blk_rect)
+                     else '<< DISJOINT — phantom zone, presses there drag this block from anywhere >>'))
 
     def hide(self):
         super().hide()

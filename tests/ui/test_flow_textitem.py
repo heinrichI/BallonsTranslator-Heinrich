@@ -367,6 +367,74 @@ class TestHyphenation:
         )
 
 
+class TestHyphenationIdempotence:
+    """_hyphenate_text must be idempotent.
+
+    Re-hyphenating text that already contains soft hyphens (e.g. a saved
+    rich_text re-loaded on startup) must not modify it: a previously split
+    word ("supercal\\u00adifragilistic...") is seen as separate fragments, and
+    re-splitting one of them ("ifragil", 7 >= 5 chars) would insert a second
+    soft hyphen elsewhere — shifting every document offset after it and
+    desynchronising TextBlock.outline_ranges from the visible text.
+    """
+
+    def test_plain_hyphenation_idempotent(self):
+        """Hyphenating an already-hyphenated plain word again changes nothing."""
+        from ui.flow_textitem import _hyphenate_text
+        out1: str = _hyphenate_text('supercalifragilisticexpialidocious')
+        assert '\u00ad' in out1, f"Expected soft hyphens in first pass, got {repr(out1)}"
+        out2: str = _hyphenate_text(out1)
+        assert out2 == out1, (
+            "Second hyphenation pass changed the text:\n"
+            f"first={repr(out1)}\nsecond={repr(out2)}"
+        )
+
+    def test_plain_russian_hyphenation_idempotent(self):
+        """Same idempotence guarantee for Cyrillic words."""
+        from ui.flow_textitem import _hyphenate_text
+        out1: str = _hyphenate_text('невероятный')
+        assert '\u00ad' in out1, f"Expected soft hyphens in first pass, got {repr(out1)}"
+        out2: str = _hyphenate_text(out1)
+        assert out2 == out1, (
+            f"Second pass changed the text: first={repr(out1)} second={repr(out2)}"
+        )
+
+    def test_html_hyphenation_idempotent(self):
+        """HTML with an italic span and a long word: double hyphenation is
+        stable and tag attributes stay intact."""
+        from ui.flow_textitem import _hyphenate_text
+        html = ('<body style=" font-family:Arial; font-size:36pt; '
+                'font-weight:400; font-style:normal;">'
+                '<span style=" font-style:italic; color:#000000;">'
+                'supercalifragilisticexpialidocious</span></body>')
+        out1: str = _hyphenate_text(html)
+        out2: str = _hyphenate_text(out1)
+        assert '\u00ad' in out1, f"Expected soft hyphens in first pass, got {repr(out1)}"
+        assert out2 == out1, (
+            "Second hyphenation pass changed the text:\n"
+            f"first={repr(out1)}\nsecond={repr(out2)}"
+        )
+        # tag attributes must not be corrupted by soft hyphens
+        assert 'font-style:italic' in out1
+        assert 'ital\u00adic' not in out1
+        assert 'font-fam\u00ad' not in out1
+        assert 'nor\u00admal' not in out1
+        # soft hyphens only inside the text content, tag structure intact
+        assert out1.count('<span') == 1
+        seg_start = out1.index('color:#000000;">') + len('color:#000000;">')
+        text_seg: str = out1[seg_start:out1.index('</span>')]
+        assert '\u00ad' in text_seg, f"Expected soft hyphens in text segment, got {repr(text_seg)}"
+
+    def test_plain_without_soft_hyphens_still_hyphenated(self):
+        """Regression: plain text WITHOUT existing \u00ad is still hyphenated
+        (idempotence guard must not suppress first-pass hyphenation)."""
+        from ui.flow_textitem import _hyphenate_text
+        out: str = _hyphenate_text('supercalifragilisticexpialidocious')
+        assert '\u00ad' in out, f"Expected soft hyphens, got {repr(out)}"
+        out_ru: str = _hyphenate_text('невероятный')
+        assert '\u00ad' in out_ru, f"Expected soft hyphens, got {repr(out_ru)}"
+
+
 # ── Regression tests for flow points persistence ──────────────
 
 class TestFlowPointsPersistence:
@@ -1677,6 +1745,78 @@ class TestOverlapResolution:
 
         new_right = [(p.x(), p.y()) for p in item2._right_points]
         assert new_right == orig_right, f"Points should not change: {new_right} != {orig_right}"
+    def _overlapping_pair(self, scene):
+        """Two overlapping flow blocks on rectangular control points."""
+        blk1 = _make_blk(xyxy=(1093, 891, 2107, 1017), text="Block big")
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+        item1._left_points = [QPointF(0, 0), QPointF(0, 42), QPointF(0, 84), QPointF(0, 126)]
+        item1._right_points = [QPointF(1014, 0), QPointF(1014, 42), QPointF(1014, 84), QPointF(1014, 126)]
+
+        blk2 = _make_blk(xyxy=(1752, 965, 2143, 1098), text="Block small")
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+        item2._left_points = [QPointF(0, 0), QPointF(0, 44.33), QPointF(0, 88.67), QPointF(0, 133)]
+        item2._right_points = [QPointF(391, 0), QPointF(391, 44.33), QPointF(391, 88.67), QPointF(391, 133)]
+        return item1, item2
+
+    def test_rect_points_not_shifted(self):
+        """Fresh rectangular control points are detected as NOT shifted."""
+        resolver = OverlapResolver()
+        blk = _make_blk(xyxy=(0, 0, 100, 100), text="Rect")
+        item = FlowTextBlkItem(blk, idx=0)
+        item._left_points = [QPointF(0, 0), QPointF(0, 50), QPointF(0, 100)]
+        item._right_points = [QPointF(100, 0), QPointF(100, 50), QPointF(100, 100)]
+        assert resolver._points_already_shifted(item) is False
+
+    def test_nonrect_points_detected_as_shifted(self):
+        """If any side has differing x coords, block counts as shifted."""
+        resolver = OverlapResolver()
+        blk = _make_blk(xyxy=(0, 0, 100, 100), text="Curved")
+        item = FlowTextBlkItem(blk, idx=0)
+        item._left_points = [QPointF(0, 0), QPointF(-5, 50), QPointF(0, 100)]
+        item._right_points = [QPointF(100, 0), QPointF(100, 50), QPointF(100, 100)]
+        assert resolver._points_already_shifted(item) is True
+
+    def test_resolve_is_idempotent_for_same_pair(self, scene):
+        """Second resolve call must not shift points again (guard works)."""
+        item1, item2 = self._overlapping_pair(scene)
+        resolver = OverlapResolver()
+
+        # First call: bigger block (item1) gets narrowed.
+        resolver.resolve_overlaps(item1, [item1, item2])
+        after_first = [(p.x(), p.y()) for p in item1._right_points]
+        assert any(x < 1014 for x, _ in after_first), "First resolve should narrow"
+
+        # Second call: guard must skip ? points unchanged.
+        resolver.resolve_overlaps(item1, [item1, item2])
+        after_second = [(p.x(), p.y()) for p in item1._right_points]
+        assert after_second == after_first, (
+            f"Second resolve must not shift points again: {after_second} != {after_first}"
+        )
+
+    def test_skipped_large_overlap_not_marked_shifted(self, scene):
+        """Pair skipped due to >=50% overlap keeps rect points (can be resolved later)."""
+        # Smaller block almost fully covers the bigger one -> overlap ratio >= 0.5.
+        blk1 = _make_blk(xyxy=(100, 100, 300, 250), text="Small")
+        item1 = FlowTextBlkItem(blk1, idx=0)
+        scene.addItem(item1)
+        item1._left_points = [QPointF(0, 0), QPointF(0, 75), QPointF(0, 150)]
+        item1._right_points = [QPointF(200, 0), QPointF(200, 75), QPointF(200, 150)]
+
+        blk2 = _make_blk(xyxy=(90, 95, 700, 255), text="Huge")
+        item2 = FlowTextBlkItem(blk2, idx=1)
+        scene.addItem(item2)
+        item2._left_points = [QPointF(0, 0), QPointF(0, 80), QPointF(0, 160)]
+        item2._right_points = [QPointF(610, 0), QPointF(610, 80), QPointF(610, 160)]
+
+        resolver = OverlapResolver()
+        resolver.resolve_overlaps(item1, [item1, item2])
+
+        assert resolver._points_already_shifted(item2) is False
+        left_x = {p.x() for p in item2._left_points}
+        right_x = {p.x() for p in item2._right_points}
+        assert len(left_x) == 1 and len(right_x) == 1, "Points must stay rectangular"
 
 
 class TestOverlapFromLog:
@@ -1718,6 +1858,10 @@ class TestOverlapFromLog:
         assert all(new_right[i] < orig_right[i] for i in range(len(orig_right))), (
             f"All right points should shift: orig={orig_right} new={new_right}"
         )
+        # fully_contained → all points get the FULL shift (no partial ramp)
+        assert len(set(new_right)) == 1, (
+            f"All right points should shift by the same full amount: {new_right}"
+        )
 
     def test_case2_smaller_partially_overlapping(self, scene):
         """Case 2: smaller block (4) partially overlaps bigger block (3).
@@ -1752,11 +1896,19 @@ class TestOverlapFromLog:
         new_right = [p.x() for p in item1._right_points]
         # Overlap zone: Block 4 starts at y=965, Block 3 starts at y=891
         # Overlap in Block 3 local: y=(965-891)..(1017-891) = 74..126
-        # Point 0 (y=0): NO, Point 1 (y=42): NO, Point 2 (y=84): YES, Point 3 (y=126): YES
-        assert new_right[0] == orig_right[0], f"Point 0 should not shift: {new_right[0]} != {orig_right[0]}"
-        assert new_right[1] == orig_right[1], f"Point 1 should not shift: {new_right[1]} != {orig_right[1]}"
-        assert new_right[2] < orig_right[2], f"Point 2 should shift: {new_right[2]} >= {orig_right[2]}"
-        assert new_right[3] < orig_right[3], f"Point 3 should shift: {new_right[3]} >= {orig_right[3]}"
+        # overlap_x = min(2107, 2143) - max(1093, 1752) = 355
+        # Point 0 (y=0):  not the nearest above the zone → unchanged
+        # Point 1 (y=42): nearest above the zone → half shift (355/2 = 177.5)
+        # Point 2 (y=84): in zone → full shift (355)
+        # Point 3 (y=126): in zone → full shift (355); no points below the zone
+        assert new_right[0] == pytest.approx(orig_right[0]), (
+            f"Point 0 (second above zone) should not shift: {new_right[0]} != {orig_right[0]}")
+        assert new_right[1] == pytest.approx(orig_right[1] - 355 / 2), (
+            f"Point 1 (nearest above zone) should shift by half overlap: {new_right[1]}")
+        assert new_right[2] == pytest.approx(orig_right[2] - 355), (
+            f"Point 2 (in zone) should shift fully: {new_right[2]}")
+        assert new_right[3] == pytest.approx(orig_right[3] - 355), (
+            f"Point 3 (in zone) should shift fully: {new_right[3]}")
 
     def test_skip_when_nearly_full_overlap(self, scene):
         """When overlap area >= 50% of bigger block, resolution should be skipped.
@@ -1792,6 +1944,90 @@ class TestOverlapFromLog:
         assert new_right == orig_right, (
             f"Points should NOT change when overlap >= 50%% of bigger: orig={orig_right} new={new_right}"
         )
+
+
+class TestOverlapRampShift:
+    """Nearest point above/below the overlap zone gets a partial (half) shift,
+    so the boundary forms a smooth diagonal instead of a vertical step.
+
+    Geometry note: the overlap zone is the intersection of the two blocks'
+    y-ranges. If the smaller block is NOT fully contained in the bigger one,
+    the zone always reaches at least one edge of the bigger block, so at most
+    ONE neighbor point (above or below) exists. If it IS fully contained, all
+    points shift fully (no ramp).
+    """
+
+    @staticmethod
+    def _resolve(new_item, items):
+        OverlapResolver().resolve_overlaps(new_item, items)
+
+    @staticmethod
+    def _make_item(scene, idx, xyxy, text, right_x, ys, left_x=0):
+        blk = _make_blk(xyxy=xyxy, text=text)
+        item = FlowTextBlkItem(blk, idx=idx)
+        scene.addItem(item)
+        item._left_points = [QPointF(left_x, y) for y in ys]
+        item._right_points = [QPointF(right_x, y) for y in ys]
+        return item
+
+    def test_nearest_above_gets_half_shift_when_smaller_extends_below(self, scene):
+        """Smaller block sticks out below → zone reaches bigger's bottom edge.
+        Nearest point above the zone gets half shift, points in zone — full.
+        No points below the zone exist."""
+        item1 = self._make_item(scene, 0, (0, 0, 300, 150), "Big block", 300, [0, 50, 100, 150])
+        # smaller: pos=(250,40), h=120 → bottom=160 > 150 (sticks out below)
+        item2 = self._make_item(scene, 1, (250, 40, 350, 160), "Small block", 100, [0, 40, 80, 120])
+
+        self._resolve(item1, [item1, item2])
+
+        # overlap_x = min(300,350) - max(0,250) = 50; zone local: 40..150
+        # y=0: nearest above → -25; y=50/100/150: in zone → -50
+        new_right = [p.x() for p in item1._right_points]
+        assert new_right == pytest.approx([275, 250, 250, 250]), f"got {new_right}"
+
+    def test_nearest_below_gets_half_shift_when_smaller_extends_above(self, scene):
+        """Smaller block sticks out above → zone reaches bigger's top edge.
+        Nearest point below the zone gets half shift, points in zone — full."""
+        item1 = self._make_item(scene, 0, (0, 0, 300, 150), "Big block", 300, [0, 50, 100, 150])
+        # smaller: pos=(250,-40), h=120 → top=-40 < 0 (sticks out above)
+        item2 = self._make_item(scene, 1, (250, -40, 350, 80), "Small block", 100, [0, 40, 80, 120])
+
+        self._resolve(item1, [item1, item2])
+
+        # overlap_x = 50; zone local: 0..80
+        # y=0/50: in zone → -50; y=100: nearest below → -25; y=150: untouched
+        new_right = [p.x() for p in item1._right_points]
+        assert new_right == pytest.approx([250, 250, 275, 300]), f"got {new_right}"
+
+    def test_far_points_untouched(self, scene):
+        """Only the NEAREST point above/below the zone shifts; the next one
+        further away stays untouched."""
+        # Bigger with 5 points
+        item1 = self._make_item(scene, 0, (0, 0, 300, 150), "Big block", 300,
+                                [0, 37.5, 75, 112.5, 150])
+        # smaller sticks out below: pos=(250,60), h=100 → bottom=160
+        item2 = self._make_item(scene, 1, (250, 60, 350, 160), "Small block", 100, [0, 33.3, 66.7, 100])
+
+        self._resolve(item1, [item1, item2])
+
+        # overlap_x = 50; zone local: 60..150
+        # y=0: second above zone → untouched; y=37.5: nearest above → -25;
+        # y=75/112.5/150: in zone → -50
+        new_right = [p.x() for p in item1._right_points]
+        assert new_right == pytest.approx([300, 275, 250, 250, 250]), f"got {new_right}"
+
+    def test_smaller_covers_full_y_range_shifts_all_points(self, scene):
+        """Smaller block covers the bigger block's y-range completely → zone
+        spans the whole side → every point is in the zone (full shift, no ramp)."""
+        item1 = self._make_item(scene, 0, (0, 0, 300, 150), "Big block", 300, [0, 50, 100, 150])
+        # smaller: pos=(250,-20), h=200 → -20..180 covers 0..150
+        item2 = self._make_item(scene, 1, (250, -20, 350, 180), "Small block", 100, [0, 66.7, 133.3, 200])
+
+        self._resolve(item1, [item1, item2])
+
+        # overlap_x = 50; all points in zone → full shift
+        new_right = [p.x() for p in item1._right_points]
+        assert new_right == pytest.approx([250, 250, 250, 250]), f"got {new_right}"
 
 
 class TestMoveAfterControlPointChange:
@@ -2600,3 +2836,350 @@ class TestToggleAutoAdjustSync:
         assert plain_item._auto_font_adjust is False, (
             "Manually-sized block must keep auto-adjust disabled after toggle"
         )
+
+
+# ── Per-range formatting persistence (task9 bug #4) ───────────
+
+class TestPerRangeFormatPersistence:
+    """Selected-word formatting (italic, font size) must survive save/reload
+    and flow auto font adjust (task9 bug #4)."""
+
+    def _frags(self, doc):
+        out = []
+        block = doc.firstBlock()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                f = it.fragment()
+                out.append((f.text(), f.charFormat().font().italic(),
+                            f.charFormat().font().pointSizeF()))
+                it += 1
+            block = block.next()
+        return out
+
+    def test_hyphenate_text_preserves_html_attributes(self):
+        """Soft hyphens must not be inserted inside HTML tag attributes —
+        that corrupts the CSS and drops per-range formatting on reload."""
+        from ui.flow_textitem import _hyphenate_text
+        html = ('<body style=" font-family:Arial; font-size:36pt; '
+                'font-weight:400; font-style:normal;">'
+                '<span style=" font-style:italic; color:#000000;">hello world</span>'
+                '<span style=" font-size:18pt;">d foo bar</span></body>')
+        out = _hyphenate_text(html)
+        assert 'ital\u00adic' not in out
+        assert 'font-fam\u00ad' not in out
+        assert 'nor\u00admal' not in out
+        assert 'col\u00ador' not in out
+        # Tag structure intact
+        assert out.count('<span') == 2
+        assert 'font-style:italic' in out
+        # Text content may still be hyphenated
+        assert 'hel\u00adlo' in out
+
+    def test_hyphenate_plain_text_still_works(self):
+        from ui.flow_textitem import _hyphenate_text
+        out = _hyphenate_text('hello')
+        assert '\u00ad' in out
+
+    def test_scale_font_sizes_proportional(self, scene):
+        item = _make_item(scene, text="hello world foo bar")
+        cur = item.textCursor()
+        cur.setPosition(0)
+        cur.setPosition(11, QTextCursor.MoveMode.KeepAnchor)
+        item.setTextCursor(cur)
+        item.setFontSize(36.0, set_selected=True, restore_cursor=True)
+        item.scaleFontSizes(1.5)
+        sizes = {round(sz, 2) for _, _, sz in self._frags(item.document())}
+        assert 54.0 in sizes  # 36 * 1.5
+        assert 27.0 in sizes  # 18 * 1.5 (base document size scaled)
+        assert len(sizes) == 2  # ranges preserved, not flattened
+
+    def test_per_range_format_survives_reload(self, scene):
+        blk = _make_blk(text="hello world foo bar")
+        item = FlowTextBlkItem(blk, idx=0, show_rect=False)
+        scene.addItem(item)
+        cur = item.textCursor()
+        cur.setPosition(0)
+        cur.setPosition(11, QTextCursor.MoveMode.KeepAnchor)
+        item.setTextCursor(cur)
+        item.setFontItalic(True, set_selected=True, restore_cursor=True)
+        item.setFontSize(36.0, set_selected=True, restore_cursor=True)
+        # Save as block_manager.update_textblk_list does
+        blk.rich_text = item.toHtml()
+        blk.translation = item.toPlainText()
+
+        blk2 = _make_blk(text=blk.translation)
+        blk2.rich_text = blk.rich_text
+        item2 = FlowTextBlkItem(blk2, idx=0, show_rect=False)
+        scene.addItem(item2)
+        frags = self._frags(item2.document())
+        assert len(frags) >= 2
+        assert frags[0][1] is True   # italic survived
+        assert abs(frags[0][2] - 36.0) < 0.01
+        assert frags[1][1] is False
+        assert abs(frags[1][2] - 18.0) < 0.01
+
+
+# ── Per-range outline (stroke) for selected text ──────────────
+
+class TestSelectionOutline:
+    """Bug #2: outline (обводка) must be applicable to the selection only."""
+
+    @staticmethod
+    def _select(item, s, e):
+        cur = item.textCursor()
+        cur.setPosition(s)
+        cur.setPosition(e, QTextCursor.MoveMode.KeepAnchor)
+        item.setTextCursor(cur)
+
+    def test_no_ranges_single_full_group(self, scene):
+        item = _make_item(scene, text="Hello world")
+        item.fontformat.stroke_width = 0.2
+        n = item.document().rootFrame().lastPosition()
+        groups = item._stroke_groups()
+        assert len(groups) == 1
+        assert list(groups.values())[0] == [(0, n)]
+
+    def test_range_plus_block_gives_two_groups(self, scene):
+        item = _make_item(scene, text="Hello world")
+        item.fontformat.stroke_width = 0.2
+        n = item.document().rootFrame().lastPosition()
+        item.blk.outline_ranges = [[0, 5, 0.5, [255, 0, 0]]]
+        groups = item._stroke_groups()
+        assert len(groups) == 2
+        all_spans = [sp for spans in groups.values() for sp in spans]
+        assert (0, 5) in all_spans
+        assert (5, n) in all_spans
+
+    def test_range_only_single_group(self, scene):
+        item = _make_item(scene, text="Hello world")
+        item.blk.outline_ranges = [[0, 5, 0.5, [255, 0, 0]]]
+        groups = item._stroke_groups()
+        assert len(groups) == 1
+        assert list(groups.values())[0] == [(0, 5)]
+
+    def test_stroke_width_on_selection(self, scene):
+        item = _make_item(scene, text="Hello world")
+        self._select(item, 6, 11)
+        item.setStrokeWidth(0.4, set_selected=True)
+        assert item.fontformat.stroke_width == 0  # block scalar untouched
+        assert item.blk.outline_ranges == [[6, 11, 0.4, [0, 0, 0]]]
+        assert item.get_selection_outline() == (0.4, [0, 0, 0])
+
+    def test_stroke_color_on_selection(self, scene):
+        item = _make_item(scene, text="Hello world")
+        self._select(item, 6, 11)
+        item.setStrokeWidth(0.4, set_selected=True)
+        item.setStrokeColor([1, 2, 3], set_selected=True)
+        assert item.blk.outline_ranges[0][3] == [1, 2, 3]
+        # block-level stroke color untouched
+        assert list(item.fontformat.srgb) == [0, 0, 0]
+
+    def test_selection_fallback_to_panel_editor(self, scene):
+        """Selection made in the paired TransTextEdit (panel) is honored."""
+        from qtpy.QtWidgets import QTextEdit
+        from ui import shared_widget as SW
+        item = _make_item(scene, text="Hello world")
+        edit = QTextEdit()
+        edit.setPlainText("Hello world")
+        c = edit.textCursor()
+        c.setPosition(0)
+        c.setPosition(5, QTextCursor.MoveMode.KeepAnchor)
+        edit.setTextCursor(c)
+
+        mgr = MagicMock()
+        pair = MagicMock()
+        pair.e_trans = edit
+        mgr.pairwidget_list = [pair]
+        old = SW.st_manager
+        SW.st_manager = mgr
+        try:
+            assert item._effective_selection() == (0, 6)  # 5 clean chars + soft hyphen
+            item.setStrokeWidth(0.3, set_selected=True)
+        finally:
+            SW.st_manager = old
+        # item doc may contain soft hyphens — "Hello" maps to a range
+        # covering 5 clean chars
+        assert len(item.blk.outline_ranges) == 1
+        s, e, w, c = item.blk.outline_ranges[0]
+        assert w == 0.3 and c == [0, 0, 0]
+        clean = item.document().toPlainText()[s:e].replace('\xad', '')
+        assert clean == "Hello"
+
+    def test_panel_position_mapping(self):
+        from ui.textitem import TextBlkItem
+        item_text = "Hel\xadlo world"
+        assert TextBlkItem._panel_pos_to_doc_start(item_text, 0) == 0
+        assert TextBlkItem._panel_pos_to_doc_start(item_text, 3) == 4  # second 'l'
+        assert TextBlkItem._panel_pos_to_doc_end(item_text, 5) == 6     # "Hello"
+        assert TextBlkItem._panel_pos_to_doc_end(item_text, 11) == len(item_text)
+
+    def test_endedit_keeps_last_selection(self, scene):
+        """error23: canvas selection must survive endEdit() so subsequent
+        panel format ops still target "that part", not the whole block."""
+        item = _make_item(scene, text="Hello world")
+        item.fontformat.stroke_width = 0.5
+        self._select(item, 0, 5)
+        item.endEdit()
+        # cursor selection cleared, but the effective selection persists
+        # (saved in document coordinates by endEdit)
+        assert not item.textCursor().hasSelection()
+        assert item._effective_selection() == (0, 5)
+        item.fontformat.stroke_width = 0.5
+        item.setStrokeWidth(0.0, set_selected=True)
+        assert item.fontformat.stroke_width == 0.5  # block scalar untouched
+        assert item.blk.outline_ranges == [[0, 5, 0.0, [0, 0, 0]]]
+
+    def test_last_selection_invalidated_on_text_change(self, scene):
+        item = _make_item(scene, text="Hello world")
+        self._select(item, 0, 5)
+        item.endEdit()
+        item.setPlainText("Completely different text")
+        assert item._effective_selection() is None
+
+    def test_last_selection_lower_priority_than_panel(self, scene):
+        """A live panel selection wins over a stale last canvas selection."""
+        from qtpy.QtWidgets import QTextEdit
+        from ui import shared_widget as SW
+        item = _make_item(scene, text="Hello world")
+        self._select(item, 6, 11)
+        item.endEdit()  # last_sel = "world"
+
+        edit = QTextEdit()
+        edit.setPlainText("Hello world")
+        c = edit.textCursor()
+        c.setPosition(0)
+        c.setPosition(3, QTextCursor.MoveMode.KeepAnchor)  # "Hel"
+        edit.setTextCursor(c)
+
+        mgr = MagicMock()
+        pair = MagicMock()
+        pair.e_trans = edit
+        mgr.pairwidget_list = [pair]
+        old = SW.st_manager
+        SW.st_manager = mgr
+        try:
+            assert item._effective_selection() == (0, 3)  # "Hel"
+        finally:
+            SW.st_manager = old
+
+    def test_last_selection_lower_priority_than_item(self, scene):
+        item = _make_item(scene, text="Hello world")
+        self._select(item, 0, 5)
+        item.endEdit()  # last_sel = "Hello"
+        self._select(item, 6, 11)  # live item selection = "world"
+        assert item._effective_selection() == (6, 11)
+
+    def test_endedit_without_selection_saves_nothing(self, scene):
+        item = _make_item(scene, text="Hello world")
+        item.endEdit()
+        assert item._last_selection is None
+        assert item._effective_selection() is None
+
+    def test_partial_overlap_splits_old_range(self, scene):
+        item = _make_item(scene, text="Hello world")
+        self._select(item, 0, 5)
+        item.set_selection_outline(width=0.3, srgb=[10, 20, 30])
+        self._select(item, 2, 5)
+        item.set_selection_outline(width=0.7)
+        assert item.blk.outline_ranges == [
+            [0, 2, 0.3, [10, 20, 30]],
+            [2, 5, 0.7, [0, 0, 0]],
+        ]
+
+    def test_set_range_keeps_non_overlapping_ranges(self, scene):
+        """Log _2026_08_18-14_36_41: setting outline for (6,21) must NOT wipe
+        the existing [0,5,0.0] range outside the selection; otherwise the
+        block-level outline comes back where 0 was set, and vice versa."""
+        item = _make_item(scene, text="Hello world foo")
+        item.fontformat.stroke_width = 0.1
+        # 1) first word: no outline
+        self._select(item, 0, 5)
+        item.setStrokeWidth(0.0, set_selected=True)
+        assert item.blk.outline_ranges == [[0, 5, 0.0, [0, 0, 0]]]
+        # 2) second part: outline 0.3 — the w=0 range must survive
+        self._select(item, 6, 15)
+        item.setStrokeWidth(0.3, set_selected=True)
+        assert item.blk.outline_ranges == [
+            [0, 5, 0.0, [0, 0, 0]],
+            [6, 15, 0.3, [0, 0, 0]],
+        ]
+        # 3) set 0 again on the first word — idempotent, second range survives,
+        # and the block scalar is NOT touched by the fall-through
+        self._select(item, 0, 5)
+        item.setStrokeWidth(0.0, set_selected=True)
+        assert item.fontformat.stroke_width == 0.1
+        assert item.blk.outline_ranges == [
+            [0, 5, 0.0, [0, 0, 0]],
+            [6, 15, 0.3, [0, 0, 0]],
+        ]
+        # rendering: (0,5) has no block outline, (6,15) thick, (5,6) block 0.1
+        groups = item._stroke_groups()
+        assert len(groups) == 2
+        thick_key = [k for k in groups if (6, 15) in groups[k]][0]
+        thin_key = [k for k in groups if (5, 6) in groups[k]][0]
+        assert thick_key != thin_key
+        all_spans = [sp for spans in groups.values() for sp in spans]
+        assert (0, 5) not in all_spans  # w=0 range: no block outline there
+
+    def test_zero_width_hides_range(self, scene):
+        item = _make_item(scene, text="Hello world")
+        item.blk.outline_ranges = [[0, 5, 0.5, [9, 9, 9]]]
+        self._select(item, 0, 5)
+        item.setStrokeWidth(0.0, set_selected=True)
+        assert item._stroke_groups() == {}
+        assert item.blk.outline_ranges[0][2] == 0.0
+
+    def test_repaint_gate_uses_outline_ranges(self, scene):
+        item = _make_item(scene, text="Hello world")
+        item.document().setPlainText("Hello world")
+        # No stroke, no ranges -> nothing to paint
+        item.repaint_background()
+        assert item.background_pixmap is None
+        # Per-range outline only -> background must be painted
+        item.blk.outline_ranges = [[0, 5, 0.8, [255, 0, 0]]]
+        item.repaint_background()
+        assert item.background_pixmap is not None
+        assert not item.background_pixmap.isNull()
+
+    def test_range_outside_doc_is_clamped(self, scene):
+        item = _make_item(scene, text="Hello world")
+        n = item.document().rootFrame().lastPosition()
+        item.blk.outline_ranges = [[0, 999, 0.5, [255, 0, 0]]]
+        groups = item._stroke_groups()
+        assert list(groups.values())[0] == [(0, n)]
+
+    def test_save_roundtrip_outline_ranges(self):
+        blk = _make_blk(text="Hello world")
+        blk.outline_ranges = [[0, 5, 0.5, [255, 0, 0]]]
+        d = blk.to_dict()
+        assert d["outline_ranges"] == [[0, 5, 0.5, [255, 0, 0]]]
+        blk2 = TextBlock(**{k: d[k] for k in d if k != "fontformat"})
+        assert blk2.outline_ranges == [[0, 5, 0.5, [255, 0, 0]]]
+        # Old files without the key get an empty list
+        blk3 = TextBlock()
+        assert blk3.outline_ranges == []
+
+    def test_srgb_as_numpy_array(self, scene):
+        """error22: srgb приходит np.array из OCR/детекта — _stroke_groups и
+        repaint_background не должны падать на bool(ndarray)."""
+        import numpy as np
+        blk = _make_blk(text="Hello world")
+        item = FlowTextBlkItem(blk, idx=0, show_rect=False)
+        scene.addItem(item)
+        item.fontformat.srgb = np.array([10, 20, 30])
+        item.blk.fontformat.srgb = np.array([10, 20, 30])
+        item.fontformat.stroke_width = 0.5
+        item.blk.fontformat.stroke_width = 0.5
+
+        groups = item._stroke_groups()
+        assert all(c == (10, 20, 30) for (_, c) in groups)
+        item.repaint_background()  # полный путь из трейсбека
+
+    def test_srgb_tuple_edges(self):
+        from ui.textitem import TextBlkItem
+        assert TextBlkItem._srgb_tuple(None) == (0, 0, 0)
+        assert TextBlkItem._srgb_tuple([]) == (0, 0, 0)
+        assert TextBlkItem._srgb_tuple([1]) == (0, 0, 0)
+        assert TextBlkItem._srgb_tuple([1, 2, 3, 4]) == (1, 2, 3)
+        assert TextBlkItem._srgb_tuple((7, 8, 9)) == (7, 8, 9)

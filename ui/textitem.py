@@ -2,7 +2,7 @@ import math, re
 import inspect
 import logging
 import numpy as np
-from typing import List, Union, Tuple
+from typing import List, Optional, Union, Tuple
 
 from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent, QMenu, QAction
 from qtpy.QtCore import Qt, QRect, QRectF, QPointF, Signal, QSizeF
@@ -23,6 +23,12 @@ from .font_auto_adjuster import FontAutoAdjuster
 from utils.config import pcfg
 
 LOGGER = logging.getLogger('BallonTranslator')
+
+QUIET_UI = True  # Set to False for verbose UI debug logging  (DEBUG ON: flow-drag investigation)
+
+def _debug(msg, *args, **kwargs):
+    if not QUIET_UI:
+        LOGGER.debug(msg, *args, **kwargs)
 
 DEBUG_FONTSIZE = False  # Set to True for font size debug logging
 
@@ -75,6 +81,18 @@ class TextBlkItem(QGraphicsTextItem):
         self.draw_rect = show_rect
         self._display_rect: QRectF = QRectF(0, 0, 1, 1)
         self.old_ffmt_values = None
+        self._last_selection = None  # (clean_text, start, end) — canvas selection that survives endEdit
+        # (clean_text, start, end) — canvas cursor position at endEdit time
+        # (start == end for a bare cursor). Display-only: the panel font-size
+        # box follows the last canvas cursor after editing ends. Must NOT be
+        # used by per-selection format ops (use _last_selection there).
+        self._last_cursor_state: Optional[Tuple[str, int, int]] = None
+        # Clean-text snapshot that blk.outline_ranges was last set against
+        # (written by set_selection_outline). None means "no snapshot": the
+        # initial load in __init__ and any project reload accept the
+        # persisted ranges — safe, because hyphenation is deterministic for
+        # unchanged text.
+        self._outline_clean_text: Optional[str] = None
 
         self.idx = idx
         
@@ -169,19 +187,12 @@ class TextBlkItem(QGraphicsTextItem):
                     self.repaint_background()
             self.update()
 
-    def paint_stroke(self, painter: QPainter):
-        # Render document to image, then apply stroke using QPainterPathStroker
-        from qtpy.QtGui import QImage, QPainterPath, QPainterPathStroker
-        from .misc import pixmap2ndarray
-        import cv2
-        import numpy as np
-        
-        # Render text without stroke to image
+    def _make_stroke_doc(self, html: str):
         doc = QTextDocument()
         doc.setUndoRedoEnabled(False)
         doc.setDocumentMargin(self.document().documentMargin())
         doc.setDefaultFont(self.document().defaultFont())
-        doc.setHtml(self.document().toHtml())
+        doc.setHtml(html)
         doc.setDefaultTextOption(self.document().defaultTextOption())
 
         layout = VerticalTextDocumentLayout(doc, self.fontformat) if self.fontformat.vertical \
@@ -200,49 +211,188 @@ class TextBlkItem(QGraphicsTextItem):
         layout.setMaxSize(self.layout.max_width, self.layout.max_height, False)
         doc.setDocumentLayout(layout)
         layout.relayout_on_changed = False
-        
-        # Render to image
+        return doc, layout
+
+    @staticmethod
+    def _srgb_tuple(srgb) -> tuple:
+        """Безопасный перевод srgb (list/tuple/np.array/None) в (r, g, b)."""
+        if srgb is None:
+            return (0, 0, 0)
+        try:
+            t = tuple(int(x) for x in srgb)
+        except (TypeError, ValueError):
+            return (0, 0, 0)
+        return t[:3] if len(t) >= 3 else (0, 0, 0)
+
+    def _stroke_groups(self):
+        """Stroke groups: { (width_px, (r, g, b)): [(start, end), ...] }.
+
+        Per-range outlines (blk.outline_ranges, set on selections) take
+        priority; characters outside those ranges use the block-level
+        stroke (fontformat.stroke_width)."""
+        import numpy as np
+
+        groups = {}
+        n = self.document().rootFrame().lastPosition()
+        if n <= 0:
+            return groups
+        base = pt2px(self.fontformat.font_size)
+        ranges = []          # (s, e, w>0, c) — groups to dilate
+        covered_spans = []   # every valid span, incl. w==0 (explicit "no outline")
+        # Read-time validation: if the document text changed after the
+        # ranges were set (snapshot mismatch), treat blk.outline_ranges as
+        # EMPTY — fall back to the block-level stroke. The snapshot lives in
+        # memory only, so after a project reload it is None and the
+        # persisted ranges are accepted — safe, because hyphenation is
+        # deterministic for unchanged text.
+        if self.blk is not None and not self._outline_text_stale():
+            for r in (getattr(self.blk, 'outline_ranges', None) or []):
+                try:
+                    s, e = int(r[0]), int(r[1])
+                    w = float(r[2])
+                    c = tuple(int(x) for x in r[3]) if len(r) > 3 and r[3] is not None \
+                        else self._srgb_tuple(self.fontformat.srgb)
+                except Exception:
+                    continue
+                if e <= s:
+                    continue
+                s = max(0, min(s, n))
+                e = max(s, min(e, n))
+                if e <= s:
+                    continue
+                covered_spans.append((s, e))
+                if w > 0:
+                    ranges.append((s, e, w, c))
+        for (s, e, w, c) in ranges:
+            # Scale the per-range stroke width against the actual font size
+            # of the outlined characters (per-range font sizes are
+            # supported), falling back to the block base font.
+            range_base = self._range_font_size_px(s, e, base)
+            groups.setdefault((max(1, int(round(range_base * w))), c), []).append((s, e))
+        if self.fontformat.stroke_width > 0:
+            block_c = self._srgb_tuple(self.fontformat.srgb)
+            w_px = max(1, int(round(base * self.fontformat.stroke_width)))
+            covered = np.zeros(n, dtype=bool)
+            for (s, e) in covered_spans:
+                covered[s:e] = True
+            i = 0
+            while i < n:
+                if not covered[i]:
+                    j = i
+                    while j + 1 < n and not covered[j + 1]:
+                        j += 1
+                    groups.setdefault((w_px, block_c), []).append((i, j + 1))
+                    i = j + 1
+                else:
+                    i += 1
+        _debug("[stroke] idx=%s _stroke_groups: block_stroke=%s ranges=%s -> %s",
+                     self.idx, self.fontformat.stroke_width,
+                     getattr(self.blk, 'outline_ranges', None), groups)
+        return groups
+
+    def _range_font_size_px(self, s: int, e: int, fallback_px: float) -> float:
+        """Max explicit per-character font size (px) within the document
+        span [s, e).
+
+        Per-range stroke widths are scaled against the actual size of the
+        outlined characters (per-range font sizes are supported), with
+        *fallback_px* (the block base font) when no fragment in the span
+        carries an explicit size (pointSizeF() <= 0)."""
+        doc = self.document()
+        max_pt = 0.0
+        block = doc.firstBlock()
+        while block.isValid():
+            if block.position() >= e:
+                break
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                fstart = frag.position()
+                if fstart >= e:
+                    break
+                if fstart + frag.length() > s:
+                    pt = frag.charFormat().font().pointSizeF()
+                    if pt > max_pt:
+                        max_pt = pt
+                it += 1
+            block = block.next()
+        return pt2px(max_pt) if max_pt > 0 else fallback_px
+
+    def paint_stroke(self, painter: QPainter):
+        # Render the document to an image (preserving per-range formatting),
+        # dilate alpha per stroke group (per-range outlines + block-level),
+        # composite the stroke under the original text.
+        from qtpy.QtGui import QImage
+        from .misc import pixmap2ndarray
+        import cv2
+        import numpy as np
+
+        html = self.document().toHtml()
+        doc, layout = self._make_stroke_doc(html)
+
         size = self.layout.documentSize().toSize()
         text_img = QImage(size, QImage.Format.Format_ARGB32)
         text_img.fill(Qt.GlobalColor.transparent)
         text_painter = QPainter(text_img)
         doc.drawContents(text_painter)
         text_painter.end()
-        
-        # Apply stroke using morphological dilation
+
         try:
-            text_array = pixmap2ndarray(text_img, keep_alpha=True)
-            if text_array is not None and text_array.size > 0:
-                alpha = text_array[..., -1]
-                stroke_width = int(pt2px(self.fontformat.font_size) * self.fontformat.stroke_width)
-                if stroke_width > 0:
-                    # Create stroke by dilating the alpha channel
-                    kernel_size = max(3, int(stroke_width * 0.3) * 2 + 1)
+            groups = self._stroke_groups()
+            if groups:
+                for (w_px, srgb), spans in groups.items():
+                    if w_px <= 0:
+                        continue
+                    # Render a copy of the document with only the group's
+                    # characters opaque — everything else transparent.
+                    gdoc, _ = self._make_stroke_doc(html)
+                    cur = QTextCursor(gdoc)
+                    cur.select(QTextCursor.SelectionType.Document)
+                    trans = QTextCharFormat()
+                    trans.setForeground(QColor(0, 0, 0, 0))
+                    cur.mergeCharFormat(trans)
+                    for (s, e) in spans:
+                        cur.setPosition(s)
+                        cur.setPosition(e, QTextCursor.MoveMode.KeepAnchor)
+                        opaque = QTextCharFormat()
+                        opaque.setForeground(QColor(0, 0, 0, 255))
+                        cur.mergeCharFormat(opaque)
+                    gimg = QImage(size, QImage.Format.Format_ARGB32)
+                    gimg.fill(Qt.GlobalColor.transparent)
+                    gp = QPainter(gimg)
+                    gdoc.drawContents(gp)
+                    gp.end()
+                    garray = pixmap2ndarray(gimg, keep_alpha=True)
+                    if garray is None or garray.size == 0:
+                        continue
+                    galpha = garray[..., -1]
+                    kernel_size = max(3, int(w_px * 0.3) * 2 + 1)
                     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-                    stroke_alpha = cv2.dilate(alpha, kernel, iterations=1)
-                    
-                    # Create stroke image with stroke color
-                    stroke_array = text_array.copy()
+                    stroke_alpha = cv2.dilate(galpha, kernel, iterations=1)
+
+                    # Create stroke image with the group's stroke color
+                    stroke_array = garray.copy()
                     stroke_array[..., -1] = stroke_alpha
                     # Set RGB only where alpha > 0
                     mask = stroke_alpha > 0
-                    stroke_array[..., 0] = np.where(mask, self.stroke_qcolor.red(), stroke_array[..., 0])
-                    stroke_array[..., 1] = np.where(mask, self.stroke_qcolor.green(), stroke_array[..., 1])
-                    stroke_array[..., 2] = np.where(mask, self.stroke_qcolor.blue(), stroke_array[..., 2])
-                    
-                    # Convert back to QImage and draw stroke first
+                    stroke_array[..., 0] = np.where(mask, srgb[0], stroke_array[..., 0])
+                    stroke_array[..., 1] = np.where(mask, srgb[1], stroke_array[..., 1])
+                    stroke_array[..., 2] = np.where(mask, srgb[2], stroke_array[..., 2])
+
                     # stroke_array is RGBA byte order (from pixmap2ndarray) —
                     # declaring it as ARGB32 would swap R and B channels.
                     stroke_img = QImage(stroke_array.data, stroke_array.shape[1], stroke_array.shape[0], QImage.Format.Format_RGBA8888)
                     painter.drawImage(0, 0, stroke_img)
-                    
-                    # Draw original text on top
-                    painter.drawImage(0, 0, text_img)
+
+                # Draw original text on top
+                painter.drawImage(0, 0, text_img)
+            else:
+                doc.drawContents(painter)
         except Exception as e:
-            # Fallback to original method if post-processing fails
+            # Fallback to direct drawing if post-processing fails
             LOGGER.error(f"Stroke post-processing failed: {e}")
             doc.drawContents(painter)
-        
+
         layout._is_painting_stroke = False
 
     def repaint_background(self):
@@ -250,7 +400,7 @@ class TextBlkItem(QGraphicsTextItem):
         if self.repainting:
             return
 
-        paint_stroke = self.fontformat.stroke_width > 0
+        paint_stroke = self.fontformat.stroke_width > 0 or self._has_outline_ranges()
         paint_shadow = self.fontformat.shadow_radius > 0 and self.fontformat.shadow_strength > 0
         if not paint_shadow and not paint_stroke or empty:
             self.background_pixmap = None
@@ -288,6 +438,11 @@ class TextBlkItem(QGraphicsTextItem):
 
     def initTextBlock(self, blk: TextBlock = None, set_format=True):
         self.blk = blk
+        # (Re)binding a block: the in-memory outline snapshot belongs to the
+        # previous block's text. Reset it so the NEW block's persisted
+        # ranges are accepted during init (see
+        # _maybe_invalidate_outline_ranges).
+        self._outline_clean_text = None
         self.fontformat = blk.fontformat.deepcopy() if blk and blk.fontformat else blk.fontformat
         # Initialize TextFormatManager and FontSizeManager
         self.format_manager = TextFormatManager(self)
@@ -817,6 +972,32 @@ class TextBlkItem(QGraphicsTextItem):
     def endEdit(self, keep_focus=True) -> None:
         self.end_edit.emit(self.idx)
         cursor = self.textCursor()
+        clean_text = self.document().toPlainText().replace('\xad', '')
+        if cursor.hasSelection():
+            # Keep the selection for subsequent panel format operations:
+            # clearing the cursor selection below would otherwise make the
+            # user's "format that part" intent unreachable (the panel
+            # fallback only sees panel-side selections). Validated by the
+            # clean-text snapshot in _effective_selection().
+            self._last_selection = (
+                clean_text,
+                cursor.selectionStart(),
+                cursor.selectionEnd(),
+            )
+            self._last_cursor_state = (
+                clean_text,
+                cursor.selectionStart(),
+                cursor.selectionEnd(),
+            )
+            _debug("[stroke] idx=%d endEdit: saved _last_selection=(%d, %d) text=%r",
+                        self.idx, cursor.selectionStart(), cursor.selectionEnd(),
+                        clean_text)
+        else:
+            self._last_cursor_state = (
+                clean_text,
+                cursor.position(),
+                cursor.position(),
+            )
         cursor.clearSelection()
         self.setTextCursor(cursor)
         self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
@@ -871,6 +1052,121 @@ class TextBlkItem(QGraphicsTextItem):
         if to_px:
             min_font_size = pt2px(min_font_size)
         return min_font_size
+
+    def get_cursor_font_range(self) -> Optional[Tuple[int, int]]:
+        """(start, end) in item-document coordinates for the *live* cursor
+        position, or None.
+
+        Used by the panel font-size display only. Unlike _effective_selection():
+        bare-cursor positions are reported too (size "under the cursor"),
+        and the last-resort fallback is _last_cursor_state (the canvas cursor
+        at endEdit time), not _last_selection — a bare cursor moved to another
+        word must not keep displaying the old selection's size."""
+        try:
+            from . import shared_widget as SW
+            cursor = self.textCursor()
+            item_sel = None
+            if cursor.hasSelection():
+                item_sel = (cursor.selectionStart(), cursor.selectionEnd())
+            item_pos = cursor.position()
+            editing = self.isEditing()
+
+            e_sel = None
+            e_pos = None
+            e_focused = False
+            st = SW.st_manager
+            if st is not None and getattr(st, 'pairwidget_list', None) \
+                    and 0 <= self.idx < len(st.pairwidget_list):
+                e_trans = st.pairwidget_list[self.idx].e_trans
+                if e_trans is not None:
+                    item_text = self.document().toPlainText()
+                    if item_text.replace('\xad', '') == e_trans.toPlainText():
+                        c2 = e_trans.textCursor()
+                        if c2.hasSelection():
+                            ps, pe = c2.selectionStart(), c2.selectionEnd()
+                            e_sel = (self._panel_pos_to_doc_start(item_text, ps),
+                                     self._panel_pos_to_doc_end(item_text, pe))
+                        else:
+                            e_pos = self._panel_pos_to_doc_start(item_text,
+                                                                 c2.position())
+                        e_focused = bool(e_trans.hasFocus())
+
+            # Priority = most recent interaction first: an editing canvas
+            # cursor, then the focused paired editor (the editor the user
+            # is looking at), then a canvas selection, then a stale editor
+            # selection, then the last endEdit cursor state.
+            if editing:
+                if item_sel is not None:
+                    return item_sel
+                return (item_pos, item_pos + 1)
+            if e_focused:
+                if e_sel is not None:
+                    return e_sel
+                if e_pos is not None:
+                    return (e_pos, e_pos + 1)
+            if item_sel is not None:
+                return item_sel
+            if e_sel is not None:
+                return e_sel
+            state = getattr(self, '_last_cursor_state', None)
+            if state is not None:
+                text, s, e = state
+                if text == self.document().toPlainText().replace('\xad', ''):
+                    return (s, max(s + 1, e))
+        except Exception:
+            pass
+        _debug("[FONTSIZE] idx=%s get_cursor_font_range -> None",
+                    getattr(self, 'idx', None))
+        return None
+
+    def get_cursor_font_size(self) -> Optional[Tuple[float, bool]]:
+        """(size_pt, mixed) of the live cursor position for the panel font-size
+        display, or None (the panel keeps the block-scalar display).
+
+        Per-range sizes live in the block document's char formats
+        (setFontSize -> set_cursor_cfmt); characters never individually sized
+        (pointSize <= 0) fall back to the block scalar. mixed=True when the
+        range spans several sizes (the panel shows "size+")."""
+        rng = self.get_cursor_font_range()
+        if rng is None:
+            return None
+        s, e = rng
+        doc = self.document()
+        if doc.isEmpty():
+            return None
+        lastpos = doc.rootFrame().lastPosition()
+        s = max(0, min(int(s), lastpos))
+        e = max(s, min(int(e), lastpos))
+        if e <= s:
+            e = min(s + 1, lastpos)
+        if lastpos <= 0 or e <= s:
+            return None
+        fallback_pt = self.fontformat.size_pt if self.fontformat is not None else 0.0
+        first_size: Optional[float] = None
+        mixed = False
+        block = doc.findBlock(s)
+        while block.isValid() and block.position() < e:
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                fstart = frag.position()
+                fend = fstart + frag.length()
+                if fstart >= e:
+                    break
+                if fend > s:
+                    pt = frag.charFormat().fontPointSize()
+                    if pt <= 0:
+                        pt = fallback_pt
+                    pt = round(pt, 2)
+                    if first_size is None:
+                        first_size = pt
+                    elif pt != first_size:
+                        mixed = True
+                it += 1
+            block = block.next()
+        if first_size is None:
+            return None
+        return first_size, mixed
 
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if not self.isEditing():
@@ -964,6 +1260,11 @@ class TextBlkItem(QGraphicsTextItem):
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.oldPos = self.pos()
+            sel = None
+            if self.scene() is not None:
+                sel = [i.idx for i in self.scene().selectedItems() if hasattr(i, 'idx')]
+            _debug("[FLOWDRAG] native press (block handles it itself): idx=%s scenePos=(%.1f,%.1f) selected=%s",
+                   self.idx, event.scenePos().x(), event.scenePos().y(), sel)
             self.leftbutton_pressed.emit(self.idx)
         return super().mousePressEvent(event)
 
@@ -1125,7 +1426,12 @@ class TextBlkItem(QGraphicsTextItem):
             if self.blk is not None and self.blk.fontformat is not None:
                 self.blk.fontformat.font_size = self.fontformat.font_size
         old_blk_size = self.blk.fontformat.font_size
+        old_blk_stroke = self.blk.fontformat.stroke_width
         self.blk.fontformat.merge(fmt)
+        if self.blk.fontformat.stroke_width != old_blk_stroke:
+            _debug("[stroke] idx=%d updateBlkFormat: blk stroke CHANGED %s -> %s (item stroke=%s)",
+                           self.idx, old_blk_stroke, self.blk.fontformat.stroke_width,
+                           self.fontformat.stroke_width)
         # DEBUG: verify object identity
         _is_same = self.fontformat is self.blk.fontformat
         if _is_same:
@@ -1355,19 +1661,310 @@ class TextBlkItem(QGraphicsTextItem):
         self.set_cursor_cfmt(cursor, cfmt, True)
         self._after_set_ffmt(cursor, repaint_background=repaint_background, restore_cursor=restore_cursor, **after_kwargs)
 
-    def setStrokeColor(self, scolor, **kwargs):
-        if isinstance(scolor, QColor):
-            self.stroke_qcolor = scolor
-        else:
-            # Coerce components to int — undo values may be floats (e.g. [0.0, 0.0, 0.0])
-            # and QColor requires ints.
-            self.stroke_qcolor = QColor(*[int(c) for c in scolor])
-        self.fontformat.srgb = [self.stroke_qcolor.red(), self.stroke_qcolor.green(), self.stroke_qcolor.blue()]
+    def _has_outline_ranges(self) -> bool:
+        return bool(self.blk is not None and getattr(self.blk, 'outline_ranges', None))
+
+    def _outline_text_stale(self) -> bool:
+        """True when blk.outline_ranges is stale: the clean document text no
+        longer matches the snapshot captured in set_selection_outline().
+
+        The snapshot lives in memory only — after a project reload it is
+        None and the persisted ranges are accepted again: safe, because
+        hyphenation is deterministic for unchanged text."""
+        snapshot = getattr(self, '_outline_clean_text', None)
+        if snapshot is None:
+            return False
+        return self.document().toPlainText().replace('\u00ad', '') != snapshot
+
+    def _save_outline_snapshot(self) -> None:
+        """Record the clean document text that blk.outline_ranges is valid
+        against (called after every successful outline_ranges mutation)."""
+        self._outline_clean_text = self.document().toPlainText().replace('\u00ad', '')
+
+    def _maybe_invalidate_outline_ranges(self) -> None:
+        """Clear stale per-range outlines after the block text was replaced
+        (setPlainText/setHtml hook).
+
+        Does nothing during the initial load in __init__: the snapshot is
+        None at that moment, so persisted ranges are accepted."""
+        snapshot = getattr(self, '_outline_clean_text', None)
+        if snapshot is None:
+            return
+        if self.document().toPlainText().replace('\u00ad', '') == snapshot:
+            return
+        if self.blk is not None and getattr(self.blk, 'outline_ranges', None):
+            _debug("[stroke] idx=%s text changed: clearing stale outline_ranges %s",
+                       self.idx, self.blk.outline_ranges)
+            self.blk.outline_ranges = []
+            self.repaint_background()
+            self.update()
+        self._outline_clean_text = None
+
+    def setPlainText(self, text: str = '') -> None:
+        """QGraphicsTextItem.setPlainText + outline invalidation hook.
+
+        FlowTextBlkItem overrides this and calls super(), so the flow path
+        (hyphenated document text) is covered by the same hook."""
+        super().setPlainText(text)
+        self._maybe_invalidate_outline_ranges()
+
+    def setHtml(self, html: str = '') -> None:
+        """QGraphicsTextItem.setHtml + outline invalidation hook
+        (rich-text path)."""
+        super().setHtml(html)
+        self._maybe_invalidate_outline_ranges()
+
+    def _effective_selection(self):
+        """Selection as (start, end) in item-document coordinates, or None.
+
+        Uses the item's own cursor if it has a selection, otherwise falls
+        back to the paired panel editor (text selected in the translation
+        panel rather than on the canvas), then to the last canvas selection
+        saved in endEdit() (selections are cleared on focus loss, but the
+        user's intent to format "that part" should survive). The item
+        document may contain soft hyphens (flow blocks), so panel offsets
+        are mapped through the soft-hyphen positions."""
+        try:
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                sel = (cursor.selectionStart(), cursor.selectionEnd())
+                _debug("[stroke] idx=%d _effective_selection -> item cursor %s",
+                             self.idx, sel)
+                return sel
+            from . import shared_widget as SW
+            st = SW.st_manager
+            if st is not None and getattr(st, 'pairwidget_list', None) \
+                    and self.idx < len(st.pairwidget_list):
+                e_trans = st.pairwidget_list[self.idx].e_trans
+                if e_trans is not None:
+                    c2 = e_trans.textCursor()
+                    if c2.hasSelection():
+                        item_text = self.document().toPlainText()
+                        if item_text.replace('\xad', '') != e_trans.toPlainText():
+                            _debug("[stroke] idx=%d panel selection REJECTED (text mismatch): item=%r panel=%r",
+                                        self.idx, item_text.replace('\xad', ''),
+                                        e_trans.toPlainText())
+                            return None
+                        ps, pe = c2.selectionStart(), c2.selectionEnd()
+                        sel = (self._panel_pos_to_doc_start(item_text, ps),
+                               self._panel_pos_to_doc_end(item_text, pe))
+                        _debug("[stroke] idx=%d _effective_selection -> panel %s (panel sel (%d, %d))",
+                                     self.idx, sel, ps, pe)
+                        return sel
+            last = getattr(self, '_last_selection', None)
+            if last is not None:
+                text, s, e = last
+                if text == self.document().toPlainText().replace('\xad', ''):
+                    _debug("[stroke] idx=%d _effective_selection -> last_selection (%d, %d)",
+                                 self.idx, s, e)
+                    return s, e
+                _debug("[stroke] idx=%d last_selection stale (text changed)", self.idx)
+        except Exception:
+            pass
+        _debug("[stroke] idx=%d _effective_selection -> None (item_sel=%s, last_sel=%s)",
+                     self.idx, self.textCursor().hasSelection(),
+                     getattr(self, '_last_selection', None) is not None)
+        return None
+
+    @staticmethod
+    def _panel_pos_to_doc_start(item_text: str, pos: int) -> int:
+        """Item-document offset of the *pos*-th non-soft-hyphen char."""
+        clean, i, n = 0, 0, len(item_text)
+        while i < n and clean < pos:
+            if item_text[i] != '\xad':
+                clean += 1
+            i += 1
+        while i < n and item_text[i] == '\xad':
+            i += 1
+        return i
+
+    @staticmethod
+    def _panel_pos_to_doc_end(item_text: str, pos: int) -> int:
+        """Exclusive item-document offset covering *pos* non-soft-hyphen
+        chars (for selection end mapping)."""
+        clean, i, n = 0, 0, len(item_text)
+        while i < n and clean < pos:
+            if item_text[i] != '\xad':
+                clean += 1
+            i += 1
+        return i
+
+    def _has_effective_selection(self) -> bool:
+        return self._effective_selection() is not None
+
+    def get_selection_outline(self):
+        """(width, [r, g, b]) of the outline range covering the effective
+        selection, or None if no range covers it."""
+        sel = self._effective_selection()
+        if sel is None or not self._has_outline_ranges():
+            return None
+        # Stale ranges (text changed after they were set) are treated as
+        # empty — see _outline_text_stale().
+        if self._outline_text_stale():
+            return None
+        s, e = sel
+        for r in self.blk.outline_ranges:
+            try:
+                w = float(r[2])
+                if int(r[0]) <= s and int(r[1]) >= e and 0 <= w:
+                    color = [int(x) for x in r[3]] if len(r) > 3 and r[3] is not None \
+                        else list(self._srgb_tuple(self.fontformat.srgb))
+                    return w, color
+            except Exception:
+                continue
+        return None
+
+    def set_selection_outline(self, width=None, srgb=None) -> bool:
+        """Apply/replace a per-range outline for the effective selection.
+
+        width=None with srgb set: update only the color of existing ranges
+        overlapping the selection. Returns True if a selection was found and
+        something was changed.
+        """
+        sel = self._effective_selection()
+        if sel is None or self.blk is None:
+            _debug("[stroke] idx=%d set_selection_outline NO-OP: sel=%s width=%s srgb=%s",
+                        self.idx, sel, width, srgb)
+            return False
+        s, e = sel
+        s = max(0, int(s))
+        e = max(s, int(e))
+        if e <= s:
+            _debug("[stroke] idx=%d set_selection_outline NO-OP: empty sel (%d, %d)", self.idx, s, e)
+            return False
+        ranges = self.blk.outline_ranges if isinstance(getattr(self.blk, 'outline_ranges', None), list) else []
+        if width is not None and width < 0:
+            # Sentinel: remove ranges overlapping the selection, so the span
+            # falls back to the block-level outline (undo of "no outline").
+            if not ranges:
+                return False
+            keep = []
+            changed = False
+            for r in ranges:
+                try:
+                    rs, re_ = int(r[0]), int(r[1])
+                except Exception:
+                    keep.append(r)
+                    continue
+                if not (rs < e and re_ > s):
+                    keep.append(r)
+                    continue
+                changed = True
+                if rs < s:
+                    keep.append([rs, s, r[2], r[3]])
+                if re_ > e:
+                    keep.append([e, re_, r[2], r[3]])
+            if changed:
+                keep.sort(key=lambda r: (int(r[0]), int(r[1])))
+                self.blk.outline_ranges = keep
+                self._save_outline_snapshot()
+                _debug("[stroke] idx=%d set_selection_outline REMOVE (width<0) sel=(%d, %d): %s -> %s",
+                            self.idx, s, e, ranges, keep)
+            return changed
+        if width is None:
+            if srgb is None:
+                return False
+            changed = False
+            for r in ranges:
+                try:
+                    if int(r[0]) < e and int(r[1]) > s:
+                        r[3] = [int(x) for x in srgb]
+                        changed = True
+                except Exception:
+                    continue
+            if changed:
+                self._save_outline_snapshot()
+                _debug("[stroke] idx=%d set_selection_outline COLOR sel=(%d, %d) srgb=%s: -> %s",
+                            self.idx, s, e, srgb, self.blk.outline_ranges)
+            return changed
+        color = [int(x) for x in srgb] if srgb is not None \
+            else list(self._srgb_tuple(self.fontformat.srgb))
+        # Keep old ranges that do NOT overlap the selection untouched; for
+        # overlapping ones keep only the non-overlapping sub-ranges; then
+        # append the new range. (A whole-block replace would wipe out
+        # previously set ranges outside the selection.)
+        keep = []
+        for r in ranges:
+            try:
+                rs, re_ = int(r[0]), int(r[1])
+            except Exception:
+                keep.append(r)
+                continue
+            if re_ <= s or rs >= e:
+                keep.append(r)
+                continue
+            if rs < s:
+                keep.append([rs, s, r[2], r[3]])
+            if re_ > e:
+                keep.append([e, re_, r[2], r[3]])
+        keep.append([s, e, float(width), color])
+        keep.sort(key=lambda r: (int(r[0]), int(r[1])))
+        self.blk.outline_ranges = keep
+        self._save_outline_snapshot()
+        _debug("[stroke] idx=%d set_selection_outline SET sel=(%d, %d) width=%s color=%s: %s -> %s",
+                    self.idx, s, e, width, color, ranges, keep)
+        return True
+
+    def setStrokeColor(self, scolor: Union[QColor, Tuple[int, int, int]],
+                       set_selected: bool = False, restore_cursor: bool = False, **kwargs) -> None:
+        color = scolor if isinstance(scolor, QColor) else QColor(*[int(c) for c in scolor])
+        if set_selected:
+            if not self.set_selection_outline(
+                    srgb=[color.red(), color.green(), color.blue()]):
+                # No effective selection (or no overlapping range) — no-op
+                # for ANY value. Never fall back to the block-level scalar:
+                # the value was meant for the selection only (undo/redo
+                # included).
+                _debug("[stroke] idx=%d setStrokeColor -> selection no-op (no effective selection)",
+                            self.idx)
+                return
+            _debug("[stroke] idx=%d setStrokeColor -> SELECTION path; block srgb stays %s",
+                        self.idx, list(self.fontformat.srgb))
+            self.repaint_background()
+            self.update()
+            return
+        _debug("[stroke] idx=%d setStrokeColor -> WHOLE-BLOCK path (set_selected=%s): srgb %s -> %s",
+                       self.idx, set_selected, list(self.fontformat.srgb),
+                       [color.red(), color.green(), color.blue()])
+        self.stroke_qcolor = color
+        self.fontformat.srgb = [color.red(), color.green(), color.blue()]
         self.repaint_background()
         self.update()
 
-    def setStrokeWidth(self, stroke_width: float, padding=True, repaint_background=True, restore_cursor=False, **kwargs):
-        
+    def setStrokeWidth(self, stroke_width: float, padding: bool = True, repaint_background: bool = True,
+                       restore_cursor: bool = False, set_selected: bool = False, **kwargs) -> None:
+        if set_selected:
+            if not self.set_selection_outline(width=stroke_width):
+                # No effective selection (or nothing to change/remove) —
+                # no-op for ANY value, including the remove-sentinel. Never
+                # fall back to the block-level scalar: the value was meant
+                # for the selection only (undo/redo included).
+                _debug("[stroke] idx=%d setStrokeWidth(%s) -> selection no-op (no effective selection)",
+                            self.idx, stroke_width)
+                return
+            # Per-range outline for the selection — the block scalar is
+            # intentionally left untouched.
+            _debug("[stroke] idx=%d setStrokeWidth(%s) -> SELECTION path; block scalar stays %s",
+                        self.idx, stroke_width, self.fontformat.stroke_width)
+            if padding:
+                w = max(float(stroke_width), self.fontformat.stroke_width)
+                if w > 0:
+                    p = self.layout.max_font_size(to_px=True) * (w + 0.05) / 2
+                    self.setPadding(p)
+            if repaint_background:
+                self.repaint_background()
+            self.update()
+            return
+        if stroke_width < 0:
+            # Negative width is not a valid whole-block stroke width (it is
+            # only the remove-sentinel of the selection path).
+            _debug("[stroke] idx=%d setStrokeWidth(%s) -> WHOLE-BLOCK no-op (negative width)",
+                        self.idx, stroke_width)
+            return
+
+        _debug("[stroke] idx=%d setStrokeWidth(%s) -> WHOLE-BLOCK path (set_selected=%s): block stroke %s -> %s",
+                       self.idx, stroke_width, set_selected,
+                       self.fontformat.stroke_width, stroke_width)
         cursor, after_kwargs = self._before_set_ffmt(set_selected=False, restore_cursor=restore_cursor)
 
         self.fontformat.stroke_width = stroke_width
@@ -1385,7 +1982,50 @@ class TextBlkItem(QGraphicsTextItem):
             current = self.document().defaultFont().pointSizeF()
         new_size = round(current * value, 2)
         self.setFontSize(new_size, repaint_background, set_selected, restore_cursor, clip_size, **kwargs)
-        
+
+    def scaleFontSizes(self, factor: float, repaint_background: bool = False):
+        """Scale the font size of every character range by *factor*, preserving
+        the relative differences between per-selection ranges (so auto font
+        adjust does not flatten user-chosen sizes)."""
+        if factor <= 0:
+            return
+        doc = self.document()
+        base_pt = self.layout.max_font_size() if self.layout is not None else 0
+        if base_pt <= 0:
+            base_pt = doc.defaultFont().pointSizeF()
+        if base_pt <= 0:
+            return
+        cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        cursor.movePosition(QTextCursor.MoveOperation.Start, QTextCursor.MoveMode.MoveAnchor)
+        block = doc.firstBlock()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.text():
+                    sz = frag.charFormat().font().pointSizeF()
+                    if sz <= 0:
+                        sz = base_pt
+                    new_sz = max(4.0, sz * factor)
+                    if abs(new_sz - sz) > 1e-6:
+                        fmt = QTextCharFormat()
+                        fmt.setFontPointSize(new_sz)
+                        cursor.setPosition(frag.position())
+                        cursor.setPosition(frag.position() + frag.length(), QTextCursor.MoveMode.KeepAnchor)
+                        cursor.mergeCharFormat(fmt)
+                it += 1
+            block = block.next()
+        df = doc.defaultFont()
+        if df.pointSizeF() > 0:
+            df.setPointSizeF(df.pointSizeF() * factor)
+        doc.setDefaultFont(df)
+        cursor.endEditBlock()
+        self.layout.reLayoutEverything()
+        if repaint_background:
+            self.repaint_background()
+            self.update()
+
 
     def setFontSize(self, value: float, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, clip_size: bool = False, _is_auto_layout: bool = False, **kwargs):
         '''

@@ -2,6 +2,7 @@ import re
 import time
 import json
 import math
+import difflib
 import traceback
 from typing import List, Dict, Optional, Type, Tuple, Generator
 
@@ -27,7 +28,9 @@ OUTPUT_PER_ELEMENT = 15        # tokens for the {"id":N,"translation":"..."} wra
 OUTPUT_GROWTH_FACTOR = 1.3     # translation length growth factor
 MIN_BUDGET = 256               # lower bound for the token budget
 HIGH_RATIO_THRESHOLD = 2.0     # translation/source length ratio considered suspicious
-MIN_ABS_LEN_FOR_HIGH_RATIO = 20  # absolute floor so short sources are still protected
+MIN_ABS_LEN_FOR_HIGH_RATIO = 20  # absolute floor on translation length (secondary condition; ratio checks only run for sources > 25 chars)
+ECHO_SIMILARITY = 0.90         # normalized similarity treated as an echo (source copied as translation)
+ECHO_MIN_LEN = 16              # minimum normalized length before the similarity comparison applies
 
 class InvalidNumTranslations(Exception):
     """Exception raised when the number of translations does not match the number of sources."""
@@ -110,6 +113,31 @@ def _extract_json_object(raw: str) -> Optional[str]:
 
 # Inline JSON schema for llama-server (no $ref/$defs): llama.cpp's json_schema
 # converter cannot resolve pydantic's "#/$defs/..." references.
+#
+# КОРЕНЬ ПРОБЛЕМЫ (найден live-экспериментом против llama-server, см.
+# scripts/test_llama_json_variants.py):
+#
+#   llama.cpp ждёт схему как ПРЯМОЕ значение топ-уровневого параметра тела
+#   запроса "json_schema". Раньше схема передавалась завёрнутой:
+#
+#       {"json_schema": {"schema": _LLAMA_JSON_SCHEMA}}   # НЕПРАВИЛЬНО
+#
+#   Сервер при такой форме МОЛЧА ИГНОРИРУЕТ грамматику: никакой ошибки не
+#   возвращается, но модель декодирует свободно. Симптомы были такие:
+#     * обрезанный не-JSON в ответе, например:  "translations: [ { "
+#     * sentinel-число от llama.cpp:  -1000000000000000.0
+#     * парсинг падал -> батч бинарил на одиночные фразы -> fallback на исходник
+#
+#   Правильная форма (используется сейчас):
+#
+#       {"json_schema": _LLAMA_JSON_SCHEMA}               # ПРАВИЛЬНО
+#
+#   При ней сервер жёстко ограничивает вывод грамматикой и всегда возвращает
+#   валидный {"translations":[{"id":N,"translation":"..."}]}.
+#
+# Отдельные запросы одной фразы (structured_output=False) вообще не используют
+# json_schema — модель TransGemma надёжнее отвечает обычным текстом; принуждение
+# к JSON-грамматике на коротком промпте давало тот же sentinel -1e15.
 _LLAMA_JSON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -158,8 +186,8 @@ class TransGemmaTranslator(BaseTranslator):
             "description": "Maximum tokens for the response.",
         },
         "temperature": {
-            "value": 0.3,
-            "description": "Sampling temperature. Lower values are recommended for structured output.",
+            "value": 0.0,
+            "description": "Sampling temperature. Google recommends greedy decoding (0.0) for TranslateGemma.",
         },
         "top p": {
             "value": 1.0,
@@ -218,6 +246,13 @@ class TransGemmaTranslator(BaseTranslator):
         self.client = None
         self.n_ctx = None
         self.connection_error_count = 0
+        # Tail of previously translated lines shown to the next batch as context.
+        # Deliberately NOT reset between pages: it persists across _translate()
+        # calls so a sentence spanning a page break stays continuous.
+        self.rolling_context = ""
+        # Source-language counterpart: last source lines of the previous
+        # batch/page, used together with rolling_context for continuation.
+        self.rolling_source_tail = ""
 
     def _initialize_client(self, api_key_to_use: str) -> bool:
         endpoint = self.endpoint
@@ -340,13 +375,39 @@ class TransGemmaTranslator(BaseTranslator):
         d = {item.id: item.translation for item in parsed.translations}
         return [d.get(i, "") for i in range(1, num_src + 1)]
 
+    def _normalize_for_echo(self, s: str) -> str:
+        """Normalize text for echo comparison: drop soft hyphens, collapse
+        whitespace, lowercase. Returns the normalized string."""
+        s = s.replace('\u00AD', '')
+        s = ' '.join(s.split())
+        return s.lower()
+
+    def _is_echo(self, src: str, tr: str) -> bool:
+        """Detect the model echoing the source as the 'translation'.
+
+        An exact normalized match is always an echo. A near match (difflib
+        ratio >= ECHO_SIMILARITY) also counts, but only for strings of at
+        least ECHO_MIN_LEN normalized characters, to avoid false positives
+        on short, legitimately identical words (brand names, credits, ...).
+        """
+        n_src = self._normalize_for_echo(src)
+        n_tr = self._normalize_for_echo(tr)
+        if not n_src or not n_tr:
+            return False
+        if n_src == n_tr:
+            return True
+        if min(len(n_src), len(n_tr)) >= ECHO_MIN_LEN:
+            return difflib.SequenceMatcher(None, n_src, n_tr).ratio() >= ECHO_SIMILARITY
+        return False
+
     def _find_problems(self, srcs: List[str], result: List[str]) -> List[int]:
         """Return indices of phrases whose translation is suspicious.
 
-        A problem is: empty translation for a non-empty source, an id leak
-        (non-llama-server only), an echoed id=N: prefix (all providers), or a
-        compression ratio outside [0.40, 2.0] for sources longer than 25 chars
-        (short phrases skip the ratio check).
+        A problem is: empty translation for a non-empty source, an echoed
+        source (translation identical or nearly identical to the source вЂ”
+        the model copied it instead of translating), or a compression ratio
+        outside [0.40, 2.0] for sources longer than 25 chars (short phrases
+        skip the ratio check).
         """
         problems = []
         for i, (src, tr) in enumerate(zip(srcs, result)):
@@ -362,6 +423,11 @@ class TransGemmaTranslator(BaseTranslator):
                 continue
             if self.provider != "llama-server" and self._has_id_leak(tr):
                 self.logger.debug(f"find_problems: idx={i} flagged (id-leak): {tr!r}")
+            if self._is_echo(src, tr):
+                # Model returned the source text as the translation (ratio ~= 1.0
+                # passes the ratio checks) вЂ” flag it so the batch binary-splits
+                # down to a per-phrase re-request.
+                self.logger.debug(f"find_problems: idx={i} flagged (echo/identity): {tr!r}")
                 problems.append(i)
                 continue
             if len(src) > 25:
@@ -370,9 +436,16 @@ class TransGemmaTranslator(BaseTranslator):
                     self.logger.debug(f"find_problems: idx={i} flagged (low-ratio {ratio:.2f}): {tr!r}")
                     problems.append(i)
                     continue
-            if self._is_high_ratio_problem(src, tr):
-                self.logger.debug(f"find_problems: idx={i} flagged (high-ratio): {tr!r}")
-                problems.append(i)
+                # High-ratio check shares the SAME len(src) > 25 guard as the
+                # low-ratio branch above (and mirrors _translate_single).
+                # Short sources are never ratio-flagged here: a legitimately
+                # wordy translation of e.g. "So,\nanyway..." ("В общем, как бы
+                # то ни было...", ratio 2.23) previously triggered this branch
+                # via the absolute-length floor in _is_high_ratio_problem,
+                # causing pointless binary splits down to per-phrase retries.
+                if self._is_high_ratio_problem(src, tr):
+                    self.logger.debug(f"find_problems: idx={i} flagged (high-ratio): {tr!r}")
+                    problems.append(i)
         return problems
 
     # --- Property getters ---
@@ -450,37 +523,102 @@ class TransGemmaTranslator(BaseTranslator):
 
         yield from _flush()
 
-    def _build_llama_prompt(self, text: str, from_lang: str, to_lang: str) -> str:
-        """Build the raw prompt for /v1/completions (Gemma3 turn markup, no chat template)."""
+    def _build_llama_prompt(self, text: str, from_lang: str, to_lang: str, structured_output: bool = True) -> str:
+        """Build the raw prompt for /v1/completions (Gemma3 turn markup, no chat template).
+
+        When `structured_output` is True (batches), ask for the
+        {"translations":[{id, translation}]} JSON object the caller validates.
+        When False (single phrase), ask for plain text — so a lone phrase is not
+        stuffed through the JSON grammar.
+        """
         from_name = _LANG_NAMES.get(from_lang.split('_')[0].split('-')[0], from_lang)
         to_name = _LANG_NAMES.get(to_lang.split('_')[0].split('-')[0], to_lang)
         context = self.context.strip()
         context_line = f"Context: {context}.\n" if context else ""
-        return (
+        # Cross-page / cross-batch continuity: the tail of the previously
+        # translated document (its source lines plus their translation) is
+        # passed to the prompt so a sentence split across a page boundary is
+        # rendered as one seamless continuation instead of two standalone
+        # fragments (e.g. "...on one of the" / "beds." -> "...на одну из
+        # кроватей", not "...на одну из них." + "Кровати.").
+        prev_src = getattr(self, "rolling_source_tail", "").strip()
+        prev_tr = getattr(self, "rolling_context", "").strip()
+        prev_parts = []
+        if prev_src:
+            prev_parts.append(
+                f"End of the previously translated document (last {from_name} lines):\n{prev_src}\n"
+            )
+        if prev_tr:
+            prev_parts.append(f"Their existing {to_name} translation:\n{prev_tr}\n")
+        if prev_parts:
+            prev_parts.append(
+                "The current document continues immediately after it. Use the above "
+                "ONLY as reference for style and terminology consistency - do NOT "
+                "re-translate it. The current document may begin mid-sentence, and "
+                "the previous translation may ALREADY cover its first word(s). "
+                "Compare the beginning of the current document with the previous "
+                "translation: if the leading words are already expressed there, "
+                "SKIP them and translate only the new content; otherwise start "
+                "with their translation to complete the interrupted sentence. "
+                "The previous translation and your output, read one after "
+                "another, must form one continuous text without repeated words "
+                "or duplicated fragments. Keep gender, number and case consistent."
+            )
+            prev_line = "\n".join(prev_parts) + "\n"
+        else:
+            prev_line = ""
+        num_lines = len([ln for ln in text.split("\n") if ln.strip()])
+        if structured_output:
+            output_instruction = (
+                f"The document has {num_lines} lines; each line (starting with its id prefix, e.g. 'id=1: ') is a separate phrase. "
+                "Output ONLY a JSON object with a single key \"translations\": an array of "
+                f"exactly {num_lines} objects, each with \"id\" (the line's number/its id=N prefix) "
+                f"and \"translation\" (the {to_name} translation of that line). "
+                "Do not merge, split, renumber, or add any lines. Keep each translation as one "
+                "string in its own \"translation\" field, even if the phrase is long. "
+                "Do not add explanations or alternatives.\n"
+            )
+        else:
+            output_instruction = (
+                f"The document has {num_lines} lines. Translate the whole document into {to_name}. "
+                "Output ONLY the translation as plain text, exactly one line per source phrase, "
+                "in the same order, without any numbering, explanations or alternatives.\n"
+            )
+        prompt = (
             "<start_of_turn>user\n"
-            f"You are a professional {from_name} ({from_lang}) to {to_name} ({to_lang}) translator. "
-            f"Your goal is to accurately convey the meaning and nuances of the original {from_name} "
-            f"text while adhering to {to_name} grammar, vocabulary, and cultural sensitivities.\n"
-            f"Produce only the {to_name} translation, without any additional explanations or commentary. "
-            "Provide exactly one translation variant per segment; do not give alternatives and do not use '/' or '|'.\n"
+            f"source_lang_code: {from_lang}\n"
+            f"target_lang_code: {to_lang}\n"
+            f"You are a professional {from_name} to {to_name} translator. "
+            f"Translate the following {from_name} document into {to_name}, "
+            f"accurately conveying meaning and nuance while adhering to {to_name} grammar, vocabulary, and cultural sensitivities.\n"
+            f"{output_instruction}"
             f"{context_line}"
-            'The output must be a valid JSON object: {"translations":[{"id":1,"translation":"<translated text>"},{"id":2,"translation":"..."}, ...]}.\n'
-            f"Please translate the following {from_name} text into {to_name}:\n\n\n"
-            f"{text}\n"
+            f"{prev_line}"
+            f"Document:\n{text}"
             "<end_of_turn>\n"
             "<start_of_turn>model"
         )
+        return prompt
 
-    def _request_translation(self, text: str, show_dialog: bool = True, srcs: Optional[List[str]] = None) -> Optional[TranslationResponse]:
+    def _request_translation(self, text: str, show_dialog: bool = True, srcs: Optional[List[str]] = None, preserve_newlines: bool = False, structured_output: bool = True) -> Optional[TranslationResponse]:
+        """Send one request and return the validated TranslationResponse.
+
+        `preserve_newlines=True` for batch bodies (newlines separate elements).
+        `structured_output` only affects llama-server: False (single phrase)
+        sends plain text with no json_object grammar; True (batches) pins the
+        {"translations":[...]} schema.
+        """
         current_api_key = "lm-studio"
-        text = text.replace("\n", " ")
+        # Only flatten newlines for single-phrase requests. Batch bodies built by
+        # _batch_text() rely on newlines to separate lines.
+        if not preserve_newlines:
+            text = text.replace("\n", " ")
 
-        # Map element id -> source text so _single_alternative can tell apart
+        # Positional source list so _single_alternative can tell apart
         # model-provided alternatives ("A / B") from a faithful slash-separated
         # list in the source (e.g. credits "F. Doyle / D. DeCarlo / ...").
-        src_by_id = {i + 1: s for i, s in enumerate(srcs or [])}
         if not srcs:
-            src_by_id[1] = text
+            srcs = [text]
 
         if not self._initialize_client(current_api_key):
             client_error = ConnectionError("Failed to initialize API client.")
@@ -496,6 +634,7 @@ class TransGemmaTranslator(BaseTranslator):
 
         provider = self.provider
         raw_content = None
+        completion = None
         if provider == "LM Studio":
             # LM Studio uses <|source_lang|> delimiter format with custom Jinja template
             prompt = (
@@ -534,22 +673,29 @@ class TransGemmaTranslator(BaseTranslator):
                 raw_content = completion.choices[0].message.content
         else:
             # llama-server: raw /v1/completions with a self-built prompt (no chat template).
-            # Top-level json_schema is the native llama.cpp structured-output parameter
-            # (response_format is ignored on /v1/completions in current builds).
-            prompt = self._build_llama_prompt(text, from_lang, to_lang)
+            # For batches (structured_output=True) the top-level json_schema pins the
+            # {"translations":[...]} grammar. For a single phrase (False) no json_object
+            # is requested — the bare text is enough and far more reliable with this model.
+            prompt = self._build_llama_prompt(text, from_lang, to_lang, structured_output=structured_output)
             api_args = {
                 "model": model_name,
                 "prompt": prompt,
                 "temperature": self.temperature,
                 "top_p": self.top_p,
                 "max_tokens": self.max_tokens,
-                "extra_body": {
-                    "json_schema": {
-                        "schema": _LLAMA_JSON_SCHEMA
-                    },
-                },
             }
-            self.logger.debug("Using raw '/v1/completions' with top-level json_schema for llama-server.")
+            if structured_output:
+                # llama.cpp expects the schema DIRECTLY as the value of the
+                # top-level "json_schema" body parameter. Wrapping it as
+                # {"schema": ...} makes the server silently IGNORE the grammar
+                # (verified live: output degenerates to garbage / sentinel
+                # -1000000000000000.0), while the unwrapped form enforces it.
+                api_args["extra_body"] = {
+                    "json_schema": _LLAMA_JSON_SCHEMA,
+                }
+                self.logger.debug("Using raw '/v1/completions' with top-level json_schema for llama-server.")
+            else:
+                self.logger.debug("Using raw '/v1/completions' in plain-text mode for llama-server.")
             try:
                 completion = self.client.completions.create(**api_args)
             except Exception as e:
@@ -568,56 +714,93 @@ class TransGemmaTranslator(BaseTranslator):
             self.logger.warning("No valid message content in API response.")
             return None
 
-        try:
-            # The model may wrap the object in a JSON string (escaped braces, no
-            # literal '{'), so try parsing the raw content directly first.
-            data_to_validate = json.loads(raw_content)
-            if isinstance(data_to_validate, str):
-                data_to_validate = json.loads(data_to_validate)
-        except (json.JSONDecodeError, ValueError):
-            # Fall back to extracting a balanced {...} object from surrounding text.
-            json_to_parse = _extract_json_object(raw_content)
-            if json_to_parse is None:
-                self.logger.error(f"No JSON object found in API response: {raw_content[:200]!r}")
-                if show_dialog:
-                    create_error_dialog(ValueError("No JSON object found in API response."), 'Translation failed.')
-                raise ValueError("No JSON object found in API response.")
-            data_to_validate = json.loads(json_to_parse)
+        if not structured_output:
+            # Plain-text single phrase: the model returns the translation as bare
+            # text (possibly wrapped/echoed with 'id=1:' or extra whitespace). Wrap
+            # it in a one-element response for the existing downstream handling.
+            validated_response = TranslationResponse(
+                translations=[
+                    TranslationElement(id=1, translation=raw_content.strip())
+                ]
+            )
+        else:
+            try:
+                # The model may wrap the object in a JSON string (escaped braces, no
+                # literal '{'), so try parsing the raw content directly first.
+                data_to_validate = json.loads(raw_content)
+                if isinstance(data_to_validate, str):
+                    data_to_validate = json.loads(data_to_validate)
+            except (json.JSONDecodeError, ValueError):
+                # Fall back to extracting a balanced {...} object from surrounding text.
+                json_to_parse = _extract_json_object(raw_content)
+                if json_to_parse is None:
+                    self.logger.error(f"No JSON object found in API response: {raw_content[:200]!r}")
+                    if show_dialog:
+                        create_error_dialog(ValueError("No JSON object found in API response."), 'Translation failed.')
+                    raise ValueError("No JSON object found in API response.")
+                data_to_validate = json.loads(json_to_parse)
 
-        try:
-            if not isinstance(data_to_validate, dict):
-                raise ValueError(f"Expected a JSON object, got {type(data_to_validate).__name__}: {data_to_validate!r}")
-            data_to_validate = _normalize_translation_payload(data_to_validate)
-            validated_response = TranslationResponse.model_validate(data_to_validate)
-            for item in validated_response.translations:
-                item.translation = self._single_alternative(item.translation, src_by_id.get(item.id, ""))
-        except (ValidationError, json.JSONDecodeError, ValueError) as e:
-            self.logger.error(f"Pydantic validation or JSON parsing failed: {e}")
-            self.logger.debug(f"Raw JSON content from API: {raw_content}")
-            if show_dialog:
-                create_error_dialog(e, 'Translation failed.')
-            raise
+            try:
+                if not isinstance(data_to_validate, dict):
+                    raise ValueError(f"Expected a JSON object, got {type(data_to_validate).__name__}: {data_to_validate!r}")
+                data_to_validate = _normalize_translation_payload(data_to_validate)
+                validated_response = TranslationResponse.model_validate(data_to_validate)
+            except (ValidationError, json.JSONDecodeError, ValueError) as e:
+                self.logger.error(f"Pydantic validation or JSON parsing failed: {e}")
+                self.logger.debug(f"Raw JSON content from API: {raw_content}")
+                if show_dialog:
+                    create_error_dialog(e, 'Translation failed.')
+                raise
+
+        # Map batch ids (1..len(srcs)) to their source strings so _single_alternative
+        # can tell real "A / B" credits from model-provided alternative variants.
+        src_by_id = {i + 1: s for i, s in enumerate(srcs)}
+        for item in validated_response.translations:
+            item.translation = self._single_alternative(item.translation, src_by_id.get(item.id, ""))
 
         if hasattr(completion, 'usage') and completion.usage:
             self.token_count += completion.usage.total_tokens
             self.token_count_last = completion.usage.total_tokens
         else:
             self.token_count_last = 0
-            
+
         return validated_response
+
+    def _request_single(self, src: str, show_dialog: bool = True):
+        """Translate a single phrase (leaf of the binary split).
+
+        For llama-server the phrase is sent as plain text via raw /v1/completions
+        with NO json_object grammar — the JSON wrapper is only pinned for batches,
+        and a lone phrase is far more reliable without it. For LM Studio the chat
+        completions path with its JSON schema is used, as that provider needs it.
+        Returns a TranslationResponse in both cases.
+        """
+        if self.provider == "llama-server":
+            return self._request_translation(
+                src,
+                show_dialog=show_dialog,
+                srcs=[src],
+                structured_output=False,
+            )
+        return self._request_translation(
+            self._batch_text([src]),
+            show_dialog=show_dialog,
+            srcs=[src],
+            preserve_newlines=True,
+        )
 
     def _translate_single(self, src: str, idx: int, translations: List[str]) -> None:
         """Leaf of the recursive binary split: translate one phrase with dialogs."""
         # show_dialog=False so the graceful retry/fallback below stays silent;
         # a dialog is only shown for genuine, unrecoverable errors.
         try:
-            parsed = self._request_translation(src, show_dialog=False)
+            parsed = self._request_single(src, show_dialog=False)
         except TranslationAbortedError:
             raise
         except Exception as e:
             self.logger.warning(f"ID {idx}: request failed ({e}). Retrying once...")
             try:
-                parsed = self._request_translation(src, show_dialog=False)
+                parsed = self._request_single(src, show_dialog=False)
             except TranslationAbortedError:
                 raise
             except Exception as e2:
@@ -630,10 +813,26 @@ class TransGemmaTranslator(BaseTranslator):
             return
         tr: str = parsed.translations[0].translation
 
+        # Echo: the model copied the source instead of translating. An echo
+        # passes the empty and ratio checks silently (ratio ~= 1.0).
+        # Retry once; if the model still echoes (legitimate for untranslatable
+        # SFX / names like "THE", "FF!"), keep it as a graceful fallback.
+        if self._is_echo(src, tr):
+            self.logger.warning(f"ID {idx}: model echoed source '{src[:40]}'. Retrying individually...")
+            echo_retry = self._request_single(src, show_dialog=False)
+            if echo_retry and echo_retry.translations:
+                retried_tr: str = echo_retry.translations[0].translation
+                if retried_tr and not self._is_echo(src, retried_tr):
+                    tr = retried_tr
+                else:
+                    self.logger.warning(
+                        f"ID {idx}: source still echoed after retry, keeping it as fallback: '{tr[:40]}'"
+                    )
+
         # Empty translation for a non-empty source
         if not tr.strip() and src.strip():
             self.logger.warning(f"Empty translation for source: '{src[:20]}...'")
-            empty_response = self._request_translation(src, show_dialog=True)
+            empty_response = self._request_single(src, show_dialog=True)
             tr = empty_response.translations[0].translation
             if not tr:
                 create_error_dialog(f"ID {idx}: Empty translation for source '{src[:20]}...'")
@@ -642,47 +841,62 @@ class TransGemmaTranslator(BaseTranslator):
         # ID leak: echoed id=N: prefix (all providers) or full leak (non-llama-server)
         if self._has_id_prefix_leak(tr) or (self.provider != "llama-server" and self._has_id_leak(tr)):
             self.logger.warning(f"ID leak detected in translation #{idx+1}: '{tr[:100]}'. Retrying individually...")
-            id_leak_response = self._request_translation(src, show_dialog=False)
+            id_leak_response = self._request_single(src, show_dialog=False)
             tr = id_leak_response.translations[0].translation
             if not tr or self._has_id_prefix_leak(tr) or (self.provider != "llama-server" and self._has_id_leak(tr)):
                 create_error_dialog(f"ID {idx}: ID leak detected in translation '{tr[:20]}...'", 'Translation failed.')
                 raise TranslationIntegrityError(f"ID {idx}: ID leak detected in translation '{tr[:20]}...'")
 
-        # Compression ratio heuristic
-        LOW_RATIO_THRESHOLD = 0.40
-        HIGH_RATIO_THRESHOLD = 2.0
-        current_ratio = len(tr) / len(src)
-        if current_ratio < LOW_RATIO_THRESHOLD:
-            self.logger.warning(f"ID {idx}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
-            ratio_response = self._request_translation(src, show_dialog=True)
-            tr = ratio_response.translations[0].translation
+        # Compression ratio heuristic.
+        # Only run for sufficiently long sources — short phrases ("So, anyway...")
+        # legitimately yield wordy translations (e.g. a 13-char source -> a 24-char
+        # Russian sentence), so a ratio outside [0.40, 2.0] is expected and NOT a
+        # problem. This mirrors the len(src) > 25 guard used by _find_problems.
+        if len(src) > 25:
+            LOW_RATIO_THRESHOLD = 0.40
+            HIGH_RATIO_THRESHOLD = 2.0
             current_ratio = len(tr) / len(src)
-            if current_ratio < LOW_RATIO_THRESHOLD and (len(src) > 25):
-                if create_yes_no_dialog(f"ID {idx}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}).\nSrc={src}\nTrans={tr}\n\nStop translation?"):
-                    raise TranslationIntegrityError(f"ID {idx}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
-                else:
-                    self.logger.warning(f"Low compression ignored by user, continuing with: {tr}.")
-        elif current_ratio > HIGH_RATIO_THRESHOLD:
-            self.logger.warning(f"ID {idx}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
-            ratio_response = self._request_translation(src, show_dialog=True)
-            tr = ratio_response.translations[0].translation
-            current_ratio = len(tr) / len(src)
-            if self._is_high_ratio_problem(src, tr):
-                if create_yes_no_dialog(f"ID {idx}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}).\nSrc={src}\nTrans={tr}\n\nStop translation?"):
-                    raise TranslationIntegrityError(f"ID {idx}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
-                else:
-                    self.logger.warning(f"High compression ignored by user, continuing with: {tr}.")
+            if current_ratio < LOW_RATIO_THRESHOLD:
+                self.logger.warning(f"ID {idx}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
+                ratio_response = self._request_single(src, show_dialog=True)
+                tr = ratio_response.translations[0].translation
+                current_ratio = len(tr) / len(src)
+                if current_ratio < LOW_RATIO_THRESHOLD:
+                    if create_yes_no_dialog(f"ID {idx}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}).\nSrc={src}\nTrans={tr}\n\nStop translation?"):
+                        raise TranslationIntegrityError(f"ID {idx}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
+                    else:
+                        self.logger.warning(f"Low compression ignored by user, continuing with: {tr}.")
+            elif current_ratio > HIGH_RATIO_THRESHOLD:
+                self.logger.warning(f"ID {idx}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
+                ratio_response = self._request_single(src, show_dialog=True)
+                tr = ratio_response.translations[0].translation
+                current_ratio = len(tr) / len(src)
+                if self._is_high_ratio_problem(src, tr):
+                    if create_yes_no_dialog(f"ID {idx}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}).\nSrc={src}\nTrans={tr}\n\nStop translation?"):
+                        raise TranslationIntegrityError(f"ID {idx}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
+                    else:
+                        self.logger.warning(f"High compression ignored by user, continuing with: {tr}.")
 
         if not src.endswith("{}") and tr.endswith("{}"):
-            self.logger.warning("Удален суффикс {}.")
+            self.logger.warning("Удалён суффикс {}.")
             tr = tr.removesuffix("{}")
 
         translations[idx] = tr
 
     def _translate_batch(self, srcs: List[str], orig_indices: List[int], translations: List[str]) -> None:
         """Recursively translate a batch: whole-first, then binary split on any problem."""
+        # import debugpy
+        # debugpy.debug_this_thread()
+        # debugpy.breakpoint()
+        # A single element must NOT go through the id=N:/json_schema batch path:
+        # llama.cpp's grammar dead-ends on 1-element batches and returns the
+        # sentinel -1000000000000000.0. Route it to the plain-text single path.
+        if len(srcs) == 1:
+            self._translate_single(srcs[0], orig_indices[0], translations)
+            return
+
         try:
-            parsed = self._request_translation(self._batch_text(srcs), show_dialog=False, srcs=srcs)
+            parsed = self._request_translation(self._batch_text(srcs), show_dialog=False, srcs=srcs, preserve_newlines=True)
             result = self._ordered_translations(parsed, len(srcs))
             problems = self._find_problems(srcs, result)
         except TranslationAbortedError:
@@ -707,9 +921,141 @@ class TransGemmaTranslator(BaseTranslator):
             translations[orig_indices[j]] = tr
         self.logger.info(f"Successfully translated batch len={len(srcs)}. Tokens used: {self.token_count_last}")
 
+    # --- Cross-page deduplication (deterministic, instruction-independent) ---
+    # TranslateGemma often re-renders a leading word that the previous page's
+    # translation already covered ("...на одну из кроватей." + "Кровати.
+    # Входит..."). Long English skip-instructions are outside its training
+    # distribution and are unreliable, so the duplicate is stripped in code.
+
+    _DEDUP_MAX_WORDS = 3            # cap on how many leading words may be stripped
+    _DEDUP_RATIO_THRESHOLD = 0.80   # difflib similarity treated as a duplicate
+    _DEDUP_MIN_PREFIX = 5           # min common prefix length (inflectional stem)
+
+    @staticmethod
+    def _dedup_norm_word(word: str) -> str:
+        """Lowercase and drop everything non-alphanumeric for comparison."""
+        return "".join(ch for ch in word.lower() if ch.isalnum())
+
+    @classmethod
+    def _is_duplicate_word(cls, prev_word: str, first_word: str) -> Tuple[bool, float]:
+        """Fuzzy word comparison tolerant to inflection ('кровати' vs 'кроватей').
+
+        Matches on: exact equality, difflib ratio >= _DEDUP_RATIO_THRESHOLD,
+        or a common prefix of >= _DEDUP_MIN_PREFIX chars that covers at least
+        one of the words completely (same stem, different ending).
+        Returns (match, ratio); empty normalized words never match.
+        """
+        pw = cls._dedup_norm_word(prev_word)
+        fw = cls._dedup_norm_word(first_word)
+        if not pw or not fw:
+            return False, 0.0
+        if pw == fw:
+            return True, 1.0
+        ratio = difflib.SequenceMatcher(None, pw, fw).ratio()
+        if ratio >= cls._DEDUP_RATIO_THRESHOLD:
+            return True, ratio
+        common = 0
+        for a, b in zip(pw, fw):
+            if a != b:
+                break
+            common += 1
+        if common >= cls._DEDUP_MIN_PREFIX and (common >= len(pw) or common >= len(fw)):
+            return True, ratio
+        return False, ratio
+
+    @staticmethod
+    def _ends_mid_sentence(text: str) -> bool:
+        """True when the text does not finish a sentence (no .!?… terminal
+        punctuation, ignoring trailing closing quotes/brackets)."""
+        t = text.strip().rstrip("'\u2019\u201d\u00bb\")]").rstrip()
+        if not t:
+            return False
+        return t[-1] not in ".!?\u2026"
+
+    def _maybe_strip_leading_duplication(
+        self,
+        batch_src: List[str],
+        batch_orig: List[int],
+        translations: List[str],
+        prev_src_tail: str,
+        prev_tr_tail: str,
+    ) -> None:
+        """Strip a leading fragment of this batch's first translation when it
+        duplicates the tail of the previous batch/page translation.
+
+        Guards: requires non-empty previous context AND a previous source tail
+        that ends mid-sentence (otherwise the new text legitimately starts its
+        own sentence and is never touched).
+        """
+        if not prev_src_tail or not prev_tr_tail:
+            self.logger.debug("dedup-check: skipped (no previous context)")
+            return
+        if not self._ends_mid_sentence(prev_src_tail):
+            self.logger.debug(
+                "dedup-check: skipped (previous source ends with sentence-final punctuation)"
+            )
+            return
+        # Locate the first translated line of this batch (page continuation).
+        first_pos = None
+        first_orig = None
+        for pos, orig in enumerate(batch_orig):
+            if translations[orig].strip():
+                first_pos = pos
+                first_orig = orig
+                break
+        if first_orig is None:
+            self.logger.debug("dedup-check: skipped (batch has no non-empty translations)")
+            return
+        self.logger.debug(
+            f"dedup-check: prev_src_tail={prev_src_tail!r} | prev_tr_tail={prev_tr_tail!r} "
+            f"| first_src={batch_src[first_pos] if first_pos < len(batch_src) else ''!r}"
+        )
+
+        prev_words = prev_tr_tail.split()
+        if not prev_words:
+            return
+        prev_idx = len(prev_words) - 1
+        body = translations[first_orig]
+        stripped_total = []
+        first_match_ratio = None
+        for _ in range(self._DEDUP_MAX_WORDS):
+            body_l = body.lstrip()
+            if not body_l:
+                break
+            first_token = body_l.split(None, 1)[0]
+            match, ratio = self._is_duplicate_word(prev_words[prev_idx], first_token)
+            if not match:
+                if ratio >= 0.5:
+                    self.logger.debug(
+                        f"dedup-check: near-match but below threshold: {first_token!r} vs "
+                        f"{prev_words[prev_idx]!r} (ratio={ratio:.2f}) - kept"
+                    )
+                break
+            rest = body_l[len(first_token):]
+            rest = rest.lstrip(".,!?…\u2026«»\"'\u201c\u201d()\u2014- ").lstrip()
+            if not rest.strip():
+                self.logger.debug("dedup-check: stripping would empty the line - kept")
+                break
+            stripped_total.append(first_token)
+            if first_match_ratio is None:
+                first_match_ratio = ratio
+            body = rest[0].upper() + rest[1:]
+            if prev_idx == 0:
+                break  # cannot walk further back into the previous translation
+            prev_idx -= 1
+        if stripped_total:
+            before = translations[first_orig]
+            translations[first_orig] = body
+            self.logger.warning(
+                f"Deduplication: stripped leading fragment {' '.join(stripped_total)!r} from "
+                f"page-continuation line (fuzzy-matched last word of previous translation: "
+                f"{prev_words[-1]!r}, ratio={first_match_ratio:.2f})\n"
+                f"before: {before!r}\nafter: {body!r}"
+            )
+
     def _translate(self, src_list: List[str]) -> List[str]:
         if not src_list: return []
-        # Filter out empty or trivially short texts — don't send them to the translator
+        # Filter out empty or trivially short texts вЂ” don't send them to the translator
         # Strip soft hyphens (\u00AD) and check if meaningful text remains
         def _is_meaningful(s: str) -> bool:
             clean = s.replace('\u00AD', '').strip()
@@ -732,7 +1078,21 @@ class TransGemmaTranslator(BaseTranslator):
         for text, num_src, batch_orig_idx in self._pack_batches(filtered_src):
             batch_src = [filtered_src[k] for k in batch_orig_idx]
             batch_orig = [non_empty_indices[k] for k in batch_orig_idx]
+            # Snapshot the tails BEFORE translating this batch: they still hold
+            # the end of the previous batch/page and drive both the prompt
+            # context and the deterministic leading-fragment deduplication.
+            prev_src_tail = self.rolling_source_tail
+            prev_tr_tail = self.rolling_context
             self._translate_batch(batch_src, batch_orig, translations)
+            self._maybe_strip_leading_duplication(
+                batch_src, batch_orig, translations, prev_src_tail, prev_tr_tail
+            )
+            # Rolling tails are deliberately NOT reset between _translate()
+            # calls (i.e. between pages): they persist so a sentence split
+            # across a page boundary translates as one seamless continuation.
+            translated_tail = [t for t in translations if t.strip()][-3:]
+            self.rolling_context = "\n".join(translated_tail)
+            self.rolling_source_tail = "\n".join(batch_src[-2:])
 
         # Fall back to original text when translation is empty
         for i in range(len(translations)):
@@ -790,9 +1150,12 @@ class TransGemmaTranslator(BaseTranslator):
     def _is_high_ratio_problem(src: str, tr: str) -> bool:
         """True when the translation is implausibly longer than the source.
 
-        Uses an absolute-length floor so short sources (e.g. "THE") are still
-        protected from hallucinated long titles, while legitimate short
-        translations like "OK" -> "Хорошо" are not flagged.
+        Both call sites (_find_problems and _translate_single) only invoke
+        this for sources longer than 25 chars, so short sources never reach
+        the ratio check at all. The absolute-length floor is kept as a second
+        condition: a long source (> 25 chars) with a suspicious >2x ratio
+        still only counts as a problem when the translation itself exceeds
+        MIN_ABS_LEN_FOR_HIGH_RATIO characters.
         """
         if len(tr) <= len(src) * HIGH_RATIO_THRESHOLD:
             return False

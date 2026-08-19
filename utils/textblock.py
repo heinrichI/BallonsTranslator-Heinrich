@@ -36,6 +36,8 @@ class TextBlock:
     text: List = field(default_factory = lambda : [])
     translation: str = ""
     rich_text: str = ""
+    # Per-range stroke (outline) for selected text: [[start, end, width, [r,g,b]], ...]
+    outline_ranges: List = field(default_factory=lambda: [])
     _bounding_rect: List = None
     src_is_vertical: bool = None
     _detected_font_size: float = -1

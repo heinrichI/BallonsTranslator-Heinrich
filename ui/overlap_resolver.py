@@ -16,6 +16,13 @@ from utils.logger import logger as LOGGER
 
 QUIET_UI = True
 
+# Доля сдвига для ближайших точек выше/ниже зоны пересечения.
+# Полный сдвиг получают только точки в зоне; соседи сдвигаются
+# частично — чтобы граница шла косой (плавный изгиб, а не вертикальная
+# ступенька), т.к. текст рендерится лучше на плавных кривых.
+NEIGHBOR_SHIFT_FACTOR = 0.5
+
+
 def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
         LOGGER.debug(msg, *args, **kwargs)
@@ -28,10 +35,33 @@ class OverlapResolver:
     Алгоритм:
     1. Определяет перекрытие между new_item и каждым existing item
     2. Находит больший блок по площади
-    3. Сужает сторону большего блока, ближайшую к меньшему
+    3. Сужает сторону большего блока, ближайшую к меньшему:
+       - точки с y в зоне пересечения сдвигаются на полный overlap_x;
+       - ближайшие точки строго выше/ниже зоны — на overlap_x * NEIGHBOR_SHIFT_FACTOR
+         (плавный косой переход вместо резкого излома);
+       - остальные точки не трогаются.
     4. Обновляет layout большего блока
+
+    Защита от повторных сдвигов: если control points блока уже не лежат
+    на прямоугольнике (x-координаты точек одной стороны не равны между
+    собой), значит блок уже сужался ранее — повторный сдвиг для него
+    не применяется (_points_already_shifted).
     """
-    
+
+    # Точность сравнения x-координат контрольных точек (защита от float-шума).
+    _X_EPS = 3  # знаков после запятой при округлении
+
+    def _points_already_shifted(self, item) -> bool:
+        """True, если control points блока уже сдвигались (не прямоугольник).
+
+        У свежесозданного блока все левые точки имеют одинаковый x и все
+        правые — одинаковый x. Если x внутри стороны различаются, блок
+        уже был сужен (overlap-сдвигом или вручную) — повторно сужать нельзя.
+        """
+        left_xs = {round(p.x(), self._X_EPS) for p in item._left_points}
+        right_xs = {round(p.x(), self._X_EPS) for p in item._right_points}
+        return len(left_xs) > 1 or len(right_xs) > 1
+
     def resolve_overlaps(self, new_item, existing_items: List) -> None:
         """
         Разрешает перекрытия new_item с existing_items.
@@ -68,6 +98,14 @@ class OverlapResolver:
             overlap_x = max(0, min(new_right, ex_right) - max(new_left, ex_left))
             overlap_y = max(0, min(new_bottom, ex_bottom) - max(new_top, ex_top))
             if overlap_x <= 0 or overlap_y <= 0:
+                continue
+
+            # Guard: если control points любого из блоков уже не на прямоугольнике,
+            # значит overlap-сдвиг для него уже применялся ранее — повторно
+            # сужать нельзя (иначе точки будут сдвигаться кумулятивно).
+            if self._points_already_shifted(new_item) or self._points_already_shifted(existing):
+                LOGGER.debug("[OVERLAP] Skipping already-shifted block pair ('%s', '%s')",
+                            new_text, existing.toPlainText()[:30])
                 continue
 
             new_area = (new_right - new_left) * (new_bottom - new_top)
@@ -120,14 +158,41 @@ class OverlapResolver:
             smaller_bottom_local = smaller_bottom - bigger_pos.y()
             fully_contained = smaller_top_local >= bigger_top_local and smaller_bottom_local <= bigger_bottom_local
             
+            # Ближайшие точки строго вне зоны (по y, а не по индексу —
+            # пользователь может двигать/добавлять хендлы, порядок списка не
+            # гарантирован). Они получают частичный сдвиг — косой переход.
+            neighbor_above_idx = None
+            neighbor_below_idx = None
+            if not fully_contained:
+                above = [i for i, pt in enumerate(points) if pt.y() < overlap_top_local]
+                below = [i for i, pt in enumerate(points) if pt.y() > overlap_bottom_local]
+                if above:
+                    neighbor_above_idx = max(above, key=lambda i: points[i].y())
+                if below:
+                    neighbor_below_idx = min(below, key=lambda i: points[i].y())
+
+            zone_idx = 'all' if fully_contained else [
+                i for i, pt in enumerate(points)
+                if overlap_top_local <= pt.y() <= overlap_bottom_local
+            ]
+            LOGGER.debug("[OVERLAP] Side=%s shift plan: zone pts=%s (full %.1f), neighbor above pt=%s / below pt=%s (%.1f)",
+                        side, zone_idx, overlap_x,
+                        neighbor_above_idx, neighbor_below_idx,
+                        overlap_x * NEIGHBOR_SHIFT_FACTOR)
+
             for i, pt in enumerate(points):
                 if fully_contained or (overlap_top_local <= pt.y() <= overlap_bottom_local):
-                    if side == 'right':
-                        new_pt_x = max(pt.x() - overlap_x, 10)
-                    else:
-                        new_pt_x = min(pt.x() + overlap_x, bigger._right_points[i].x() - 10)
-                    points[i] = QPointF(new_pt_x, pt.y())
-            
+                    shift = overlap_x
+                elif i == neighbor_above_idx or i == neighbor_below_idx:
+                    shift = overlap_x * NEIGHBOR_SHIFT_FACTOR
+                else:
+                    continue
+                if side == 'right':
+                    new_pt_x = max(pt.x() - shift, 10)
+                else:
+                    new_pt_x = min(pt.x() + shift, bigger._right_points[i].x() - 10)
+                points[i] = QPointF(new_pt_x, pt.y())
+
             # Update layout of the bigger block
             bigger._update_flow_layout()
 

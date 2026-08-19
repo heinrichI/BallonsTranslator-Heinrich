@@ -27,7 +27,7 @@ from utils.text_layout import layout_text
 
 from utils.logger import logger as LOGGER
 
-QUIET_UI = True  # Set to False for verbose UI debug logging
+QUIET_UI = True  # Set to False for verbose UI debug logging  (DEBUG ON: flow-drag investigation)
 
 def _debug(msg, *args, **kwargs):
     if not QUIET_UI:
@@ -51,6 +51,23 @@ LAYOUT_FIT_FILL_W_RATIO = 1
 LAYOUT_FIT_FILL_H_RATIO = 0.9
 LAYOUT_BLOCK_SHRINK_W = 1.0 
 
+def apply_stroke_rect_override(blk_list):
+    """Force rectangular view for bordered blocks during auto placement.
+
+    In Flow view the border (stroke) renders poorly, so when automatic block
+    placement stamps a border onto a block it is switched to the plain
+    rectangular TextBlkItem. The mark is made on the model exactly like the
+    manual "Toggle Flow Mode" action (is_flow_mode=False) and is persisted
+    with the project. Saved flow control points are left on the model and
+    simply ignored by TextBlkItem, so toggling back to flow later restores
+    them. Vertical blocks are converted as well (they are not auto-sized,
+    but the border renders poorly in flow view for them too).
+    """
+    for blk in blk_list:
+        if (blk.stroke_width or 0) > 0:
+            blk.is_flow_mode = False
+
+
 class CreateItemCommand(QUndoCommand):
     def __init__(self, blk_item: TextBlkItem, ctrl, parent=None):
         super().__init__(parent)
@@ -64,7 +81,7 @@ class CreateItemCommand(QUndoCommand):
     def redo(self):
         if self.op_count < 0:
             self.op_count += 1
-            self.blk_item.setSelected(True)
+            self.ctrl.select_single(self.blk_item)
             return
         self.ctrl.recoverTextblkItemList([self.blk_item], [self.pairw])
 
@@ -236,6 +253,9 @@ class PasteBlkItemsCommand(QUndoCommand):
         blk_list.sort(key=lambda blk: blk.idx)
 
         self.ctrl.canvas.block_selection_signal = True
+        # Replace, don't extend: a pre-existing selection must not survive
+        # a paste (stale multi-selection later made drags move many blocks).
+        self.ctrl.canvas.clearSelection()
         for blkitem in blk_list:
             blkitem.setSelected(True)
         self.ctrl.on_incanvas_selection_changed()
@@ -427,10 +447,17 @@ class SceneTextManager(QObject):
         self._auto_textlayout_flag = value
         self.layout_manager.auto_textlayout_flag = value
 
-    def push_undo_command(self, command, update_pushed_step=True):
-        """Proxy: добавляет команду в стек undo через DI UndoManager."""
+    def push_undo_command(self, command, update_pushed_step=True, is_text=False):
+        """Proxy: добавляет команду в стек undo через DI UndoManager.
+
+        Args:
+            command: QUndoCommand
+            update_pushed_step: обновить счётчики canvas (fallback-путь)
+            is_text: True — текстовая команда (стек текста, отменяется
+                Ctrl+Z внутри редактора); False — стек рисования/сцены
+        """
         if self._undo_mgr:
-            self._undo_mgr.push_command(command, update_step=True)
+            self._undo_mgr.push_command(command, update_step=True, is_text=is_text)
             self.canvas.setProjSaveState(True)
         else:
             self.canvas.push_undo_command(command, update_pushed_step)
@@ -508,11 +535,15 @@ class SceneTextManager(QObject):
                 self.textEditList.set_selected_list([blk.idx])
             else:
                 editing_blk.endEdit()
-                editing_blk.setSelected(False)
+                # Select only the navigation target: a stale multi-selection
+                # must not survive a switch (it later made drags move several
+                # blocks at once). Also sync the list panel, which the sibling
+                # branch above already does.
+                self.select_single(blk)
                 self.txtblkShapeControl.setBlkItem(blk)
-                blk.setSelected(True)
                 blk.startEdit()
                 self.canvas.ensure_visible(blk)
+                self.textEditList.set_selected_list([blk.idx])
         else:
             self.textblk_item_list[current_editing_widget.idx].setSelected(False)
             current_pw = self.pairwidget_list[tgt_idx]
@@ -647,7 +678,14 @@ class SceneTextManager(QObject):
         return blk_item
 
     def _resolve_overlaps(self, new_item):
-        """Resolve overlaps between new_item and existing blocks."""
+        """Resolve overlaps between new_item and existing blocks.
+
+        Bordered (stroke) blocks are auto-placed as plain rectangles and are
+        skipped entirely: neither the block itself nor its neighbours are
+        shrunk to make room for it.
+        """
+        if (new_item.blk.stroke_width or 0) > 0:
+            return
         self.overlap_resolver.resolve_overlaps(new_item, self.textblk_item_list)
 
     def toggle_block_flow_mode(self, blk_idx: int):
@@ -743,7 +781,7 @@ class SceneTextManager(QObject):
         # Update shape control
         self.txtblkShapeControl.setBlkItem(new_blk_item)
         # Ensure the block is selected so handles are visible
-        new_blk_item.setSelected(True)
+        self.select_single(new_blk_item)
 
     def _reconnect_block_signals(self, blk_item: TextBlkItem):
         """Reconnect all signals for a block item."""
@@ -922,6 +960,19 @@ class SceneTextManager(QObject):
         self.textblk_item_list[blk_id].setSelected(True)
         self.txtblkShapeControl.endEditing()
 
+    def select_single(self, blk_item: TextBlkItem):
+        """Programmatic selection: clear the scene and select only this block.
+
+        Used by commands and keyboard navigation so programmatic actions
+        REPLACE the current selection instead of adding to it — a stale
+        multi-selection otherwise survives into the next drag and makes
+        several blocks move at once (MoveBlkItemsCommand is built from all
+        selected items)."""
+        self.canvas.block_selection_signal = True
+        self.canvas.clearSelection()
+        blk_item.setSelected(True)
+        self.canvas.block_selection_signal = False
+
     def editingTextItem(self) -> TextBlkItem:
         if self.txtblkShapeControl.isVisible() and self.canvas.editing_textblkitem is not None:
             return self.canvas.editing_textblkitem
@@ -940,6 +991,9 @@ class SceneTextManager(QObject):
             return
         blk_item = self.textblk_item_list[blk_id]
         if not blk_item.hasFocus():
+            cur = self.txtblkShapeControl.blk_item
+            _debug("[FLOWDRAG] hover-enter idx=%s: control ownership %s -> %s",
+                   blk_id, getattr(cur, 'idx', None), blk_id)
             self.txtblkShapeControl.setBlkItem(blk_item)
 
     def onTextBlkItemMoving(self, item: TextBlkItem):
@@ -948,6 +1002,18 @@ class SceneTextManager(QObject):
     def onTextBlkItemMoved(self):
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) > 0:
+            # Log BEFORE MoveBlkItemsCommand (it resets oldPos to the new pos):
+            # an oldPos of (0,0) on a block that was never individually pressed
+            # means undo would teleport it to the image origin.
+            blk_desc = ', '.join(f'{b.idx}@({b.oldPos.x():.1f},{b.oldPos.y():.1f})' for b in selected_blks)
+            if len(selected_blks) > 1:
+                # Visible without DEBUG logging: a multi-move is the signature
+                # of a stale multi-selection, so it must be noticed in the log.
+                LOGGER.warning("[FLOWDRAG] moved -> MoveBlkItemsCommand: n=%d blocks=[%s] (multi-move!)",
+                               len(selected_blks), blk_desc)
+            else:
+                _debug("[FLOWDRAG] moved -> MoveBlkItemsCommand: n=%d blocks=[%s]",
+                       len(selected_blks), blk_desc)
             self.push_undo_command(MoveBlkItemsCommand(selected_blks, self.txtblkShapeControl))
         
     def onTextBlkItemReshaped(self, item: TextBlkItem):
@@ -1185,13 +1251,13 @@ class SceneTextManager(QObject):
     def on_push_textitem_undostack(self, num_steps: int, is_formatting: bool):
         blkitem: TextBlkItem = self.sender()
         e_trans = self.pairwidget_list[blkitem.idx].e_trans if not is_formatting else None
-        self.push_undo_command(TextItemEditCommand(blkitem, e_trans, num_steps, self.textpanel.formatpanel), update_pushed_step=is_formatting)
+        self.push_undo_command(TextItemEditCommand(blkitem, e_trans, num_steps, self.textpanel.formatpanel), update_pushed_step=is_formatting, is_text=True)
 
     def on_push_edit_stack(self, num_steps: int):
         edit: Union[TransTextEdit, SourceTextEdit] = self.sender()
         is_trans = type(edit) == TransTextEdit
         blkitem = self.textblk_item_list[edit.idx] if is_trans else None
-        self.push_undo_command(TextEditCommand(edit, num_steps, blkitem), update_pushed_step=not is_trans)
+        self.push_undo_command(TextEditCommand(edit, num_steps, blkitem), update_pushed_step=not is_trans, is_text=True)
 
     def on_propagate_textitem_edit(self, pos: int, added_text: str, joint_previous: bool):
         blk_item: TextBlkItem = self.sender()
@@ -1213,7 +1279,7 @@ class SceneTextManager(QObject):
         for blk in selected_blks:
             trans_widget_list.append(self.pairwidget_list[blk.idx].e_trans)
         if len(selected_blks) > 0:
-            self.push_undo_command(ApplyFontformatCommand(selected_blks, trans_widget_list, fontformat))
+            self.push_undo_command(ApplyFontformatCommand(selected_blks, trans_widget_list, fontformat), is_text=True)
             if self.formatpanel.global_mode():
                 if id(self.formatpanel.active_text_style_format()) != id(fontformat):
                     self.formatpanel.deactivate_style_label()
@@ -1266,10 +1332,10 @@ class SceneTextManager(QObject):
         self.txtblkShapeControl.setBlkItem(self.textblk_item_list[edit.idx])
 
     def on_page_replace_one(self):
-        self.push_undo_command(PageReplaceOneCommand(self.canvas.search_widget))
+        self.push_undo_command(PageReplaceOneCommand(self.canvas.search_widget), is_text=True)
 
     def on_page_replace_all(self):
-        self.push_undo_command(PageReplaceAllCommand(self.canvas.search_widget))
+        self.push_undo_command(PageReplaceAllCommand(self.canvas.search_widget), is_text=True)
 
     def on_spell_word_clicked(self, word: str, idx: object):
         if idx < len(self.textblk_item_list):

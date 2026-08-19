@@ -27,7 +27,7 @@ from .configpanel import ConfigPanel
 from .module_manager import ModuleManager
 from .textedit_area import SourceTextEdit, SelectTextMiniMenu, TransTextEdit
 from .drawingpanel import DrawingPanel
-from .scenetext_manager import SceneTextManager, TextPanel, PasteSrcItemsCommand
+from .scenetext_manager import SceneTextManager, TextPanel, PasteSrcItemsCommand, apply_stroke_rect_override
 from .mainwindowbars import TitleBar, LeftBar, BottomBar
 from .io_thread import ImgSaveThread, ImportDocThread, ExportDocThread
 from .custom_widget import Widget, ViewWidget
@@ -1061,6 +1061,9 @@ class MainWindow(mainwindow_cls):
                 self.canvas.setFocus()
             if n_sel_textitems > 0:
                 self.canvas.block_selection_signal = True
+                # Restore the saved state exactly: clear first, otherwise a
+                # selection that grew while the state was saved would leak in.
+                self.canvas.clearSelection()
                 for blk in sel_textitem:
                     blk.setSelected(True)
                 self.st_manager.on_incanvas_selection_changed()
@@ -1293,6 +1296,10 @@ class MainWindow(mainwindow_cls):
 
             self.st_manager.auto_textlayout_flag = pcfg.let_autolayout_flag and \
                 (pcfg.module.enable_detect or pcfg.module.enable_translate)
+            if self.st_manager.auto_textlayout_flag:
+                # Flow view renders the border poorly: switch bordered blocks
+                # to the rectangular view (their overlap checks are skipped).
+                apply_stroke_rect_override(blk_list)
         
         if page_index != self.pageList.currentIndex().row():
             self.pageList.setCurrentRow(page_index)

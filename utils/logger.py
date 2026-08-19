@@ -67,6 +67,21 @@ class ColoredLogger(logging.Logger):
         self.addHandler(console)
         return
 
+    def handle(self, record):
+        # A malformed %-format in a log call (e.g. mismatched specs/args)
+        # must never propagate into app code or surface as an exception in
+        # the debugger: sanitize the record once, for all handlers.
+        if record.args is not None:
+            try:
+                record.getMessage()
+            except Exception as e:
+                record.msg = (
+                    f"<unformattable log message: {record.msg!r} "
+                    f"args={record.args!r} ({type(e).__name__}: {e})>"
+                )
+                record.args = None
+        return super().handle(record)
+
 
 def setup_logging(logfile_dir: str, max_num_logs=14):
 

@@ -20,7 +20,7 @@ from typing import List, Union, Tuple
 logger = logging.getLogger('BallonTranslator')
 LOGGER = logger  # alias used in _auto_shrink_font, _auto_grow_font
 
-QUIET_UI = False  # Set to False for verbose UI debug logging
+QUIET_UI = True  # Set to False for verbose UI debug logging
 DEBUG_FONTSIZE = False  # Set to True for font size debug logging
 
 _LOG_TARGET = "BUT OF COURSE!"
@@ -42,7 +42,7 @@ def _debug(msg, *args, **kwargs):
 
 from utils.shared import LOG_PREFIXES as _LOG_PREFIXES
 
-from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent, QMenu, QAction
+from qtpy.QtWidgets import QApplication, QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent, QMenu, QAction
 from qtpy.QtCore import Qt, QRectF, QPointF, Signal
 from qtpy.QtGui import (QPainter, QPen, QColor, QPainterPath, QTextCursor)
 
@@ -106,15 +106,41 @@ def _hyphenate_text(text: str, min_word_len: int = 5) -> str:
             return word
         return hyphenator.inserted(word, hyphen='\u00AD')
 
-    # Hyphenate Cyrillic words with ru_RU
-    ru_hyphenator = _get_pyphen('ru_RU')
-    text = _CYRILLIC_RE.sub(lambda m: _hyphenate_word(m, ru_hyphenator), text)
+    def _hyphenate_plain(s: str) -> str:
+        # Idempotence guard: if the text already contains soft hyphens (e.g. a
+        # previously saved rich_text re-loaded on startup), return it unchanged.
+        # Re-hyphenating a word that was already split ("supercal\xADifragil"
+        # → two words "supercal" + "ifragil") would insert a *second* soft
+        # hyphen in a different place, shifting every document offset after it
+        # and desynchronising TextBlock.outline_ranges from the visible text.
+        #
+        # Tradeoff: a long word typed *after* loading into a segment that
+        # already contains \u00ad is left unhyphenated for this load; it will
+        # be hyphenated on the next full text edit (setPlainText/setHtml with
+        # text containing no soft hyphens yet).
+        if '\u00ad' in s:
+            _debug("_hyphenate_plain: text already contains soft hyphens, skipping re-hyphenation")
+            return s
+        # Hyphenate Cyrillic words with ru_RU
+        ru_hyphenator = _get_pyphen('ru_RU')
+        s = _CYRILLIC_RE.sub(lambda m: _hyphenate_word(m, ru_hyphenator), s)
+        # Hyphenate Latin words with en_US
+        en_hyphenator = _get_pyphen('en_US')
+        s = _LATIN_RE.sub(lambda m: _hyphenate_word(m, en_hyphenator), s)
+        return s
 
-    # Hyphenate Latin words with en_US
-    en_hyphenator = _get_pyphen('en_US')
-    text = _LATIN_RE.sub(lambda m: _hyphenate_word(m, en_hyphenator), text)
+    # When given HTML, hyphenate only the text between tags.  Inserting soft
+    # hyphens inside tag attributes (e.g. font-style:italic → ital\xADic)
+    # corrupts the CSS and silently drops per-range formatting on reload.
+    if '<' in text and re.search(r'<[a-zA-Z/!][^>]*>', text):
+        parts = re.split(r'(<[^>]*>)', text)
+        for i in range(len(parts)):
+            part = parts[i]
+            if part and not part.startswith('<'):
+                parts[i] = _hyphenate_plain(part)
+        return ''.join(parts)
 
-    return text
+    return _hyphenate_plain(text)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -442,10 +468,14 @@ class FlowTextBlkItem(TextBlkItem):
         LOGGER.log(level, "[%s] %s", self._block_text()[:20], msg)
 
     def _font_adjuster_change_size(self, factor: float):
-        """Called by FontAutoAdjuster to apply a relative font size change."""
+        """Called by FontAutoAdjuster to apply a relative font size change.
+
+        Uses scaleFontSizes (proportional per-range scaling) instead of
+        setRelFontSize (single absolute size) so user-chosen per-selection
+        font sizes are preserved on shrink/grow."""
         self.font_adjuster._internal_font_change = True
         try:
-            self.setRelFontSize(factor)
+            self.scaleFontSizes(factor)
         finally:
             self.font_adjuster._internal_font_change = False
 
@@ -988,6 +1018,15 @@ class FlowTextBlkItem(TextBlkItem):
         Legacy entry point for the combined context menu.
         Builds the standard canvas menu, injects flow items, and shows it.
         """
+        # Standard Qt selection semantics (mirror of QGraphicsItem::mousePressEvent):
+        # right-clicking an unselected block selects only it; Ctrl adds to the
+        # current selection. A bare setSelected(True) here accumulated stale
+        # selections that later made block drags move several blocks at once.
+        ctrl_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+        if not ctrl_held and not self.isSelected():
+            scene = self.scene()
+            if scene is not None:
+                scene.clearSelection()
         self.setSelected(True)
         _debug("showFlowContextMenu called — scene_pos=(%.1f, %.1f)", scene_pos.x(), scene_pos.y())
         scene = self.scene()

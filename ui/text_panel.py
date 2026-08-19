@@ -2,9 +2,15 @@ import copy
 import inspect
 import logging
 import sys
-from typing import List
+from typing import List, Optional
 
 LOGGER = logging.getLogger('BallonTranslator')
+
+QUIET_UI = True  # Set to False for verbose UI debug logging
+
+def _debug(msg, *args, **kwargs):
+    if not QUIET_UI:
+        LOGGER.debug(msg, *args, **kwargs)
 
 DEBUG_FONTSIZE = False  # Set to True for font size debug logging
 
@@ -21,9 +27,10 @@ def _is_log_target(blk):
     except Exception:
         return False
 
-from qtpy.QtWidgets import QLineEdit, QSizePolicy, QHBoxLayout, QVBoxLayout, QFrame, QFontComboBox, QApplication, QPushButton, QLabel, QGroupBox, QCheckBox, QSlider, QListWidget
+from qtpy.QtWidgets import QLineEdit, QSizePolicy, QHBoxLayout, QVBoxLayout, QFrame, QFontComboBox, QApplication, QPushButton, QLabel, QGroupBox, QCheckBox, QSlider, QListWidget, QWidget
 from qtpy.QtCore import Signal, Qt
-from qtpy.QtGui import QFocusEvent, QMouseEvent, QTextCursor, QKeyEvent
+from qtpy.QtGui import QFocusEvent, QMouseEvent, QTextCursor, QKeyEvent, QColor
+from qtpy import sip
 
 from utils import shared
 from utils import config as C
@@ -287,6 +294,7 @@ class FontFormatPanel(Widget):
         self.fontsizebox.setObjectName("FontSizeBox")
         self.fontsizebox.fcombobox.setToolTip(self.tr("Change font size"))
         self.fontsizebox.param_changed.connect(self.on_param_changed)
+        self.fontsizebox.fcombobox.installEventFilter(self)
         
         self.lineSpacingLabel = SizeControlLabel(self, direction=1, transparent_bg=False)
         self.lineSpacingLabel.setObjectName("lineSpacingLabel")
@@ -457,6 +465,16 @@ class FontFormatPanel(Widget):
 
         self.focusOnColorDialog = False
         C.active_format = self.global_format
+        # Feedback-loop guard: while the stroke display is refreshed
+        # programmatically (strokeWidthBox.setValue re-triggers
+        # SizeComboBox.on_text_changed -> param_changed -> on_param_changed
+        # when the box happens to have focus), on_param_changed must not
+        # apply the displayed value to the format.
+        self._updating_stroke_display = False
+        # e_trans editor of the current block whose selectionChanged drives
+        # the stroke display refresh; kept so the connection is dropped on
+        # block switch instead of accumulating.
+        self._stroke_sel_edit: Optional[QWidget] = None
 
     def global_mode(self):
         return id(C.active_format) == id(self.global_format)
@@ -472,10 +490,19 @@ class FontFormatPanel(Widget):
             return None
 
     def on_param_changed(self, param_name: str, value):
+        if self._updating_stroke_display:
+            _debug("[stroke] panel on_param_changed SUPPRESSED (stroke display refresh in progress): param=%s value=%s",
+                        param_name, value)
+            return
         if param_name == 'font_size':
             if _is_log_target(getattr(self, 'textblk_item', None)):
                 LOGGER.debug("[FONTSIZE] PANEL on_param_changed: param=%s value=%.1fpt",
                     param_name, value)
+        if param_name in ('stroke_width', 'srgb'):
+            _debug("[stroke] panel on_param_changed: param=%s value=%s global=%s item_idx=%s active_stroke=%s",
+                        param_name, value, self.global_mode(),
+                        getattr(self.textblk_item, 'idx', None),
+                        getattr(C.active_format, 'stroke_width', None))
         func = FM.handle_ffmt_change.get(param_name)
         func_kwargs = {}
         if param_name in {'font_size', 'rel_font_size'}:
@@ -485,6 +512,11 @@ class FontFormatPanel(Widget):
             self.update_text_style_label()
         else:
             func(param_name, value, C.active_format, is_global=False, blkitems=self.textblk_item, set_focus=True, **func_kwargs)
+            if param_name in ('font_size', 'rel_font_size'):
+                # The op re-sized the selection: re-read the live cursor
+                # position so the box shows the (new) size there, and
+                # follows the cursor to other words afterwards.
+                self._refresh_font_size_display()
 
     def update_text_style_label(self):
         if self.global_mode():
@@ -576,6 +608,193 @@ class FontFormatPanel(Widget):
         if self.global_mode():
             self.set_globalfmt_title()
 
+    def _get_stroke_selection_editor(self) -> Optional[QWidget]:
+        """Paired panel editor (e_trans) of the current block, or None when
+        there is no scene text manager / no pair widget for the block / the
+        editor's C++ object was already destroyed (a page switch can delete
+        the pair widgets while the panel still holds a Python reference)."""
+        item = self.textblk_item
+        if item is None:
+            return None
+        from . import shared_widget as SW
+        st = SW.st_manager
+        if st is not None and getattr(st, 'pairwidget_list', None) \
+                and 0 <= item.idx < len(st.pairwidget_list):
+            try:
+                edit = st.pairwidget_list[item.idx].e_trans
+                # A page switch can delete the pair widgets' C++ objects
+                # while the panel keeps the Python wrapper: check
+                # sip.isdeleted up front so we never raise RuntimeError
+                # by touching a dead wrapper (the except below is a
+                # backstop for non-sip wrappers / unexpected attrs).
+                if sip.isdeleted(edit):
+                    _debug("[stroke] panel: e_trans of idx=%s already destroyed, skipping connect",
+                           item.idx)
+                    return None
+                return edit
+            except (RuntimeError, AttributeError, TypeError) as exc:
+                LOGGER.debug("[stroke] panel: e_trans lookup failed for idx=%s: %r", item.idx, exc)
+                return None
+        return None
+
+    def _on_stroke_editor_destroyed(self, obj: Optional[object] = None) -> None:
+        """Slot for the tracked editor's QObject.destroyed signal. Qt emits
+        it when the editor's C++ object dies (a page switch deletes the pair
+        widgets) and auto-severs all of that object's signal connections in
+        the same moment, so the panel only needs to drop the dangling
+        Python reference.
+
+        The ``obj`` argument is intentionally unused: PyQt hands the slot a
+        fresh detached wrapper (not ``is``-identical to the one we stored)
+        and sip.isdeleted() is not yet set while the slot runs, so
+        identifying the dying object is impossible. Clearing unconditionally
+        is safe because _connect_stroke_selection_editor /
+        _disconnect_stroke_selection_editor keep this subscription in sync
+        with _stroke_sel_edit: at any moment only the currently tracked
+        editor has this connection (or a dead one whose signal already
+        fired)."""
+        _debug("[stroke] panel: e_trans destroyed, reference cleared")
+        self._stroke_sel_edit = None
+
+    def _disconnect_stroke_selection_editor(self) -> None:
+        prev = self._stroke_sel_edit
+        self._stroke_sel_edit = None
+        if prev is None:
+            return
+        if sip.isdeleted(prev):
+            # A dead editor can only be here if its destroyed signal did
+            # not reach us; Qt already auto-severed its connections,
+            # so there is nothing to disconnect.
+            _debug("[stroke] panel: previous e_trans already deleted, nothing to disconnect")
+            return
+        for signal, slot in ((prev.selectionChanged, self._refresh_stroke_display),
+                             (prev.selectionChanged, self._refresh_font_size_display),
+                             (prev.destroyed, self._on_stroke_editor_destroyed)):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                # Backstop: a slot may legitimately be absent (e.g. the
+                # reference predates the destroyed subscription).
+                pass
+
+    def _connect_stroke_selection_editor(self) -> None:
+        """Connect the current block's e_trans selectionChanged to the
+        stroke and font-size display refreshes. The previously connected
+        editor is disconnected first, so switching blocks does not
+        accumulate connections. The editor's QObject.destroyed signal is
+        also subscribed so the panel proactively clears its reference when
+        the editor's C++ object dies (page switch) — no code path ever
+        touches a dead wrapper, which is what used to raise RuntimeError
+        'wrapped C/C++ object ... has been deleted'."""
+        self._disconnect_stroke_selection_editor()
+        e_trans = self._get_stroke_selection_editor()
+        if e_trans is None:
+            return
+        e_trans.selectionChanged.connect(self._refresh_stroke_display)
+        e_trans.selectionChanged.connect(self._refresh_font_size_display)
+        e_trans.destroyed.connect(self._on_stroke_editor_destroyed)
+        self._stroke_sel_edit = e_trans
+        _debug("[stroke] panel selectionChanged connected: idx=%s",
+                    self.textblk_item.idx)
+
+    def _refresh_stroke_display(self) -> None:
+        """Re-sync the stroke width box / color picker with the outline of
+        the current block's effective selection.
+
+        Called from set_textblk_item (initial display) and from the paired
+        e_trans editor's selectionChanged signal (the user changed the
+        selection without switching blocks). When the effective selection
+        has its own outline the panel shows it; otherwise the display falls
+        back to the block-level scalars — the same base values
+        set_active_format(blk_fmt) puts into the box/picker. C.active_format
+        keeps the block scalars in either case (focus-out copy-back).
+
+        The programmatic writes run under _updating_stroke_display so a
+        re-triggered editTextChanged on the (possibly focused) stroke box
+        cannot feed back into on_param_changed and change the format."""
+        item = self.textblk_item
+        if item is None:
+            return
+        sel_outline = item.get_selection_outline()
+        self._updating_stroke_display = True
+        try:
+            if sel_outline is not None:
+                self.strokeWidthBox.setValue(sel_outline[0])
+                r, g, b = [int(x) for x in sel_outline[1]]
+                self.strokeColorPicker.setPickerColor(QColor(r, g, b))
+                _debug("[stroke] panel display override: idx=%s box=%s (block scalar stays %s)",
+                            item.idx, sel_outline[0],
+                            item.get_fontformat().stroke_width)
+            else:
+                blk_fmt = item.get_fontformat()
+                self.strokeWidthBox.setValue(blk_fmt.stroke_width)
+                self.strokeColorPicker.setPickerColor(blk_fmt.stroke_color())
+                _debug("[stroke] panel display fallback to block scalar: idx=%s box=%s",
+                            item.idx, blk_fmt.stroke_width)
+        finally:
+            self._updating_stroke_display = False
+
+    def eventFilter(self, obj, event) -> bool:
+        # Refresh the font-size display when the user focuses the size box:
+        # canvas-editor cursor moves emit no signal, so without this the box
+        # would keep showing the size left by the last size op until the
+        # user interacts with it.
+        if obj is self.fontsizebox.fcombobox and \
+                isinstance(event, QFocusEvent) and event.type() == QFocusEvent.Type.FocusIn:
+            self._refresh_font_size_display()
+        return super().eventFilter(obj, event)
+
+    @staticmethod
+    def _format_size_text(pt: float, multi: bool = False) -> str:
+        """Font-size display text: one decimal at most, '+' suffix when the
+        range spans several sizes (the up/down buttons then use
+        rel_font_size scaling)."""
+        size = round(float(pt), 1)
+        if int(size) == size:
+            text = str(int(size))
+        else:
+            text = f'{size:.1f}'
+        if multi:
+            text += '+'
+        return text
+
+    def _refresh_font_size_display(self) -> None:
+        """Re-sync the font-size box with the size at the LIVE cursor
+        position.
+
+        Per-range sizes (setFontSize on a selection) live in the block
+        document's char formats, while the block scalar (and the box left by
+        the last size op) only track the latest change — without this refresh
+        the box keeps showing the changed word's size after the cursor moves
+        to an unchanged word. Display-only: C.active_format keeps the block
+        scalar, so the focus-out copy-back is unaffected. The programmatic
+        write runs under _updating_stroke_display so a re-triggered
+        editTextChanged on the (possibly focused) box cannot feed back into
+        on_param_changed.
+
+        Called from set_textblk_item (initial display), the paired e_trans
+        selectionChanged signal, the size box focusIn (eventFilter) and
+        after font-size ops (on_param_changed)."""
+        item = self.textblk_item
+        if item is None:
+            return
+        result = item.get_cursor_font_size()
+        if result is None:
+            pt, multi = item.get_fontformat().size_pt, False
+        else:
+            pt, multi = result
+        text = self._format_size_text(pt, multi)
+        box = self.fontsizebox.fcombobox
+        if text == box.currentText():
+            return
+        self._updating_stroke_display = True
+        try:
+            box.setCurrentText(text)
+            _debug("[FONTSIZE] panel display refresh: idx=%s text=%r (block scalar %.1fpt)",
+                        item.idx, text, item.get_fontformat().size_pt)
+        finally:
+            self._updating_stroke_display = False
+
     def set_textblk_item(self, textblk_item: TextBlkItem = None, multi_select:bool=False):
         if textblk_item is None:
             focus_w = self.app.focusWidget()
@@ -589,9 +808,18 @@ class FontFormatPanel(Widget):
             if not focus_on_fmtoptions:
                 # Store the current text block's format before switching to global
                 if self.textblk_item is not None:
+                    _debug("[stroke] panel focus-out COPY-BACK: idx=%s active_stroke=%s item_stroke=%s -> %s blk_stroke=%s ranges=%s",
+                                self.textblk_item.idx,
+                                getattr(C.active_format, 'stroke_width', None),
+                                self.textblk_item.fontformat.stroke_width,
+                                C.active_format.stroke_width,
+                                (self.textblk_item.blk.fontformat.stroke_width
+                                 if self.textblk_item.blk is not None else None),
+                                getattr(self.textblk_item.blk, 'outline_ranges', None))
                     # Save all format properties including gradient state
                     self.textblk_item.fontformat = copy.deepcopy(C.active_format)
                 self.textblk_item = None
+                self._disconnect_stroke_selection_editor()
                 self.set_active_format(self.global_format, multi_select)
                 self.set_globalfmt_title()
             
@@ -601,6 +829,13 @@ class FontFormatPanel(Widget):
                 if _is_log_target(textblk_item.blk if hasattr(textblk_item, 'blk') else None):
                     LOGGER.debug("[FONTSIZE] PANEL set_textblk_item: idx=%d fontformat.font_size=%.1fpx size_pt=%.1fpt",
                         textblk_item.idx, textblk_item.fontformat.font_size, textblk_item.fontformat.size_pt)
+                _debug("[stroke] panel set_textblk_item: idx=%s display_stroke=%s selection_outline=%s item_stroke=%s blk_stroke=%s ranges=%s",
+                            textblk_item.idx, blk_fmt.stroke_width,
+                            textblk_item.get_selection_outline(),
+                            textblk_item.fontformat.stroke_width,
+                            (textblk_item.blk.fontformat.stroke_width
+                             if textblk_item.blk is not None else None),
+                            getattr(textblk_item.blk, 'outline_ranges', None))
                 # Preserve gradient properties from the text block's format
                 if hasattr(textblk_item.fontformat, 'gradient_enabled'):
                     blk_fmt.gradient_enabled = textblk_item.fontformat.gradient_enabled
@@ -611,6 +846,20 @@ class FontFormatPanel(Widget):
                 self.textblk_item = textblk_item
                 multi_size = not textblk_item.isEditing() and textblk_item.isMultiFontSize()
                 self.set_active_format(blk_fmt, multi_size)
+                # Follow selection changes made in the paired editor
+                # (e_trans) without a block switch: the stroke display must
+                # reflect the (new) selection's outline, not the values the
+                # previous selection left in the box/picker.
+                self._connect_stroke_selection_editor()
+                # If the effective selection has its own outline, the panel
+                # must show THAT part's outline, not the block-level scalar.
+                # C.active_format deliberately keeps the block scalar so the
+                # focus-out copy-back does not clobber it.
+                self._refresh_stroke_display()
+                # Same for the font size: per-range sizes (per-word
+                # setFontSize) live in the document's char formats, not in
+                # the block scalar the box was just filled with.
+                self._refresh_font_size_display()
                 self.textstyle_panel.setTitle(f'TextBlock #{textblk_item.idx}')
 
     def handle_word_selected(word: str):

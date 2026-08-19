@@ -120,6 +120,13 @@ class SizeComboBox(QComboBox):
         txt = self.currentText().strip()
         if not txt:
             return self._value
+        # Tolerate a trailing decimal separator while typing ("24.", "24,")
+        # and a comma as the decimal separator ("24,5" — RU locale input);
+        # without this the typed value is silently dropped (float() fails)
+        # and the widget keeps emitting the previous value.
+        txt = txt.rstrip('.,')
+        if ',' in txt:
+            txt = txt.replace(',', '.')
         try:
             val = float(txt)
             self._value = val

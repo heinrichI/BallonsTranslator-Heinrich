@@ -193,7 +193,7 @@ class TextFormatManager:
             self._text_item.repaint_background()
     
     def set_stroke_width(self, stroke_width: float, padding=True, 
-                        repaint_background=True, restore_cursor=False):
+                        repaint_background=True, restore_cursor=False, set_selected=False):
         """
         Устанавливает ширину обводки текста.
         
@@ -202,7 +202,15 @@ class TextFormatManager:
             padding: Добавить padding для обводки
             repaint_background: Перерисовать фон
             restore_cursor: Восстановить позицию курсора
+            set_selected: Применить только к выделенному тексту
         """
+        if set_selected:
+            self._text_item.setStrokeWidth(
+                stroke_width, padding=padding, repaint_background=repaint_background,
+                restore_cursor=restore_cursor, set_selected=True
+            )
+            return
+        
         cursor, after_kwargs = self._text_item._before_set_ffmt(
             set_selected=False, restore_cursor=restore_cursor
         )

@@ -217,6 +217,8 @@ def _fake_manager_with_item(scene, item=None):
             remove_item=lambda item: None,
             add_item_to_text_layer=lambda item: None,
             editing_textblkitem=None,
+            block_selection_signal=False,
+            clearSelection=lambda: None,
         ),
         txtblkShapeControl=MagicMock(),
     )
@@ -231,6 +233,9 @@ def _fake_manager_with_item(scene, item=None):
     # Bind the real reconnect method so toggle wiring is exercised end-to-end.
     fake_self._reconnect_block_signals = MethodType(
         stm_mod.SceneTextManager._reconnect_block_signals, fake_self)
+    # Bind the real select_single (toggle now uses it to select the new item).
+    fake_self.select_single = MethodType(
+        stm_mod.SceneTextManager.select_single, fake_self)
     return fake_self
 
 
@@ -347,10 +352,22 @@ class TestClickSelection:
         assert canvas_like.item_b.isSelected() is True
         assert canvas_like.item_a.isSelected() is False
 
-    def test_ctrl_click_keeps_multi_selection(self, canvas_like):
+    def test_ctrl_click_toggles_already_selected(self, canvas_like):
+        # The flow control body is mouse-transparent (phantom-zone fix), so
+        # the press reaches the block itself and native Qt selection applies:
+        # Ctrl+click TOGGLES the clicked item (same as legacy blocks, whose
+        # TextBlkShapeControl body is equally transparent).
         canvas_like.sw.setBlkItem(canvas_like.item_a)
         canvas_like.item_a.setSelected(True)
         canvas_like.item_b.setSelected(True)
         canvas_like.click(100, 50, Qt.KeyboardModifier.ControlModifier)
+        assert canvas_like.item_a.isSelected() is False  # toggled off
+        assert canvas_like.item_b.isSelected() is True
+
+    def test_ctrl_click_adds_to_selection(self, canvas_like):
+        # Ctrl+click on an unselected item adds it to the current selection.
+        canvas_like.sw.setBlkItem(canvas_like.item_a)
+        canvas_like.item_a.setSelected(True)
+        canvas_like.click(400, 50, Qt.KeyboardModifier.ControlModifier)
         assert canvas_like.item_a.isSelected() is True
         assert canvas_like.item_b.isSelected() is True

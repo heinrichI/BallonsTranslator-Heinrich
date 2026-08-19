@@ -3,7 +3,9 @@ import numpy as np
 from typing import List, Union
 import os
 
-logger = logging.getLogger(__name__)
+# Use the shared app logger: module loggers ("ui.*") have no file handler,
+# so their DEBUG records are lost (this bit us while tracing selection leaks).
+logger = logging.getLogger('BallonTranslator')
 
 from qtpy.QtWidgets import QApplication, QSlider, QMenu, QGraphicsScene, QGraphicsSceneDragDropEvent , QGraphicsView, QGraphicsSceneDragDropEvent, QGraphicsRectItem, QGraphicsItem, QScrollBar, QGraphicsPixmapItem, QGraphicsSceneMouseEvent, QGraphicsSceneContextMenuEvent, QRubberBand
 from qtpy.QtCore import Qt, QDateTime, QRectF, QPointF, QPoint, Signal, QSizeF, QEvent
@@ -503,6 +505,11 @@ class Canvas(QGraphicsScene):
             blk_item = self.txtblkShapeControl.blk_item
             if blk_item is not None and blk_item.isEditing():
                 blk_item.endEdit()
+        # Diagnostics: trace who changes the selection (stale multi-selection
+        # investigation). rubber_band=True marks marquee (right-drag) changes.
+        logger.debug("[SEL] selection -> %s (rubber_band=%s, canvas_focus=%s, guarded=%s)",
+                     [i.idx for i in self.selected_text_items()],
+                     self.rubber_band.isVisible(), self.hasFocus(), self.block_selection_signal)
         if self.hasFocus() and not self.block_selection_signal:
             self.incanvas_selection_changed.emit()
             EventBus.get_instance().publish(Events.SELECTION_CHANGED, self.selected_text_items())
@@ -709,7 +716,11 @@ class Canvas(QGraphicsScene):
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         btn = event.button()
 
+        marquee_ended = btn == Qt.MouseButton.RightButton and self.rubber_band.isVisible()
         self.hide_rubber_band()
+        if marquee_ended:
+            sel = self.selected_text_items()
+            logger.debug("[SEL] marquee released: n=%d %s", len(sel), [i.idx for i in sel])
 
         Qt.MouseButton.LeftButton
         if btn == Qt.MouseButton.MiddleButton:
@@ -1015,10 +1026,16 @@ class Canvas(QGraphicsScene):
         self.textstack_changed.emit()
 
     def redo_textedit(self):
+        if self._undo_mgr:
+            self._undo_mgr.redo_text()
+            return
         self.num_pushed_textstep += 1
         self.text_undo_stack.redo()
 
     def undo_textedit(self):
+        if self._undo_mgr:
+            self._undo_mgr.undo_text()
+            return
         if self.num_pushed_textstep > 0:
             self.num_pushed_textstep -= 1
         self.text_undo_stack.undo()
@@ -1026,6 +1043,8 @@ class Canvas(QGraphicsScene):
     def clear_text_stack(self):
         self.num_pushed_textstep = 0
         self.text_undo_stack.clear()
+        if self._undo_mgr:
+            self._undo_mgr.clear_text_stack()
 
     def clear_draw_stack(self):
         self.num_pushed_drawstep = 0

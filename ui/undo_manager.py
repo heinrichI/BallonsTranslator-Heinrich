@@ -32,7 +32,6 @@ class UndoManager(QObject):
 
         # Счётчики шагов
         self._num_pushed_textstep = 0
-        self._num_pushed_drawstep = 0
 
         # Сохранённые позиции
         self._saved_text_step = 0
@@ -40,6 +39,9 @@ class UndoManager(QObject):
 
         # Режим: 'draw' или 'text'
         self._mode = 'draw'
+
+        # Последний стек, куда была добавлена команда (для smart-выбора стека)
+        self._last_pushed = None
 
         # Подключение сигналов
         self._text_undo_stack.indexChanged.connect(self._on_state_changed)
@@ -60,28 +62,51 @@ class UndoManager(QObject):
         """Возвращает текущий режим."""
         return self._mode
 
+    def _select_stack(self, can_check: str = 'canUndo') -> QUndoStack:
+        """Выбирает стек для undo/redo: приоритет у стека, куда была
+        добавлена последняя команда; если он пуст — второй стек."""
+        if self._last_pushed == 'text':
+            order = (self._text_undo_stack, self._draw_undo_stack)
+        else:
+            order = (self._draw_undo_stack, self._text_undo_stack)
+        for stack in order:
+            if getattr(stack, can_check)():
+                return stack
+        return order[0]
+
     def undo(self):
-        """Отменяет последнюю команду."""
-        self.active_stack.undo()
+        """Отменяет последнюю команду (smart-выбор стека: текст/рисование)."""
+        self._select_stack('canUndo').undo()
         self.undoPerformed.emit()
 
     def redo(self):
-        """Повторяет последнюю отменённую команду."""
-        self.active_stack.redo()
+        """Повторяет последнюю отменённую команду (smart-выбор стека)."""
+        self._select_stack('canRedo').redo()
         self.redoPerformed.emit()
 
-    def push_command(self, command: QUndoCommand, update_step: bool = False):
+    def undo_text(self):
+        """Отменяет последнюю текстовую команду (Ctrl+Z внутри редактора)."""
+        self._text_undo_stack.undo()
+        self.undoPerformed.emit()
+
+    def redo_text(self):
+        """Повторяет последнюю текстовую команду."""
+        self._text_undo_stack.redo()
+        self.redoPerformed.emit()
+
+    def push_command(self, command: QUndoCommand, update_step: bool = False, is_text: bool = False):
         """
         Добавляет команду в стек undo.
 
         Args:
             command: Команда для добавления
             update_step: Обновить счётчик шагов
+            is_text: True — текстовая команда (стек текста), False — рисование
         """
-        self.active_stack.push(command)
-        if update_step:
-            self._num_pushed_textstep += 1
-        self.stateChanged.emit()
+        if is_text:
+            self.push_text_command(command, update_step=update_step)
+        else:
+            self.push_draw_command(command)
 
     def push_text_command(self, command: Optional[QUndoCommand] = None, update_step: bool = False):
         """
@@ -93,6 +118,7 @@ class UndoManager(QObject):
         """
         if command is not None:
             self._text_undo_stack.push(command)
+            self._last_pushed = 'text'
         if update_step:
             self._num_pushed_textstep += 1
         self.stateChanged.emit()
@@ -105,6 +131,7 @@ class UndoManager(QObject):
             command: Команда для добавления
         """
         self._draw_undo_stack.push(command)
+        self._last_pushed = 'draw'
         self.stateChanged.emit()
 
     def clear(self):
@@ -112,7 +139,7 @@ class UndoManager(QObject):
         self._text_undo_stack.clear()
         self._draw_undo_stack.clear()
         self._num_pushed_textstep = 0
-        self._num_pushed_drawstep = 0
+        self._last_pushed = None
         self.stateChanged.emit()
 
     def clear_text_stack(self):
@@ -124,7 +151,6 @@ class UndoManager(QObject):
     def clear_draw_stack(self):
         """Очищает стек команд рисования."""
         self._draw_undo_stack.clear()
-        self._num_pushed_drawstep = 0
         self.stateChanged.emit()
 
     def is_dirty(self) -> bool:
@@ -139,12 +165,12 @@ class UndoManager(QObject):
         self.stateChanged.emit()
 
     def can_undo(self) -> bool:
-        """Проверяет, можно ли выполнить undo."""
-        return self.active_stack.canUndo()
+        """Проверяет, можно ли выполнить undo (в любом стеке)."""
+        return self._text_undo_stack.canUndo() or self._draw_undo_stack.canUndo()
 
     def can_redo(self) -> bool:
-        """Проверяет, можно ли выполнить redo."""
-        return self.active_stack.canRedo()
+        """Проверяет, можно ли выполнить redo (в любом стеке)."""
+        return self._text_undo_stack.canRedo() or self._draw_undo_stack.canRedo()
 
     def get_text_stack(self) -> QUndoStack:
         """Возвращает стек текстовых команд."""
