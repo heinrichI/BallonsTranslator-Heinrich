@@ -4,9 +4,39 @@ UndoManager — менеджер undo/redo.
 Выделен из Canvas для слабой связанности.
 """
 
-from typing import Optional
+from typing import Callable, Optional
 from qtpy.QtCore import QObject, Signal
 from qtpy.QtGui import QUndoStack, QUndoCommand
+
+
+class TextUndoCommand(QUndoCommand):
+    """Команда текстового стека: отменяется Ctrl+Z внутри редактора перевода.
+
+    Маркировка обязательна для команд, push которых может произойти вне
+    текстового режима (асинхронные финиши: перевод, глобальная замена).
+    Синхронные команды текстового режима могут полагаться на mode-fallback
+    (``canvas.textEditMode()``) без маркера.
+    """
+
+
+def resolve_is_text(command: Optional[QUndoCommand], is_text: Optional[bool],
+                    mode_is_text: Callable[[], bool]) -> bool:
+    """Единая точка разрешения маршрутизации undo-команды в стеки.
+
+    Приоритет: явный аргумент > маркер ``TextUndoCommand`` > текущий режим.
+
+    Args:
+        command: Команда для push (``None`` — только счётчики).
+        is_text: ``True/False`` — принудительный выбор стека (маркер
+            игнорируется); ``None`` — авто (маркер, затем режим).
+        mode_is_text: callable, возвращающий текущий текстовый режим
+            (инжектируется, чтобы функция оставалась чистой и тестируемой).
+    """
+    if is_text is not None:
+        return is_text
+    if command is not None and isinstance(command, TextUndoCommand):
+        return True
+    return mode_is_text()
 
 
 class UndoManager(QObject):
@@ -37,30 +67,12 @@ class UndoManager(QObject):
         self._saved_text_step = 0
         self._saved_draw_step = 0
 
-        # Режим: 'draw' или 'text'
-        self._mode = 'draw'
-
         # Последний стек, куда была добавлена команда (для smart-выбора стека)
         self._last_pushed = None
 
         # Подключение сигналов
         self._text_undo_stack.indexChanged.connect(self._on_state_changed)
         self._draw_undo_stack.indexChanged.connect(self._on_state_changed)
-
-    @property
-    def active_stack(self) -> QUndoStack:
-        """Возвращает активный стек undo в зависимости от режима."""
-        if self._mode == 'text':
-            return self._text_undo_stack
-        return self._draw_undo_stack
-
-    def set_mode(self, mode: str):
-        """Устанавливает режим: 'text' или 'draw'."""
-        self._mode = mode
-
-    def get_mode(self) -> str:
-        """Возвращает текущий режим."""
-        return self._mode
 
     def _select_stack(self, can_check: str = 'canUndo') -> QUndoStack:
         """Выбирает стек для undo/redo: приоритет у стека, куда была
@@ -94,23 +106,12 @@ class UndoManager(QObject):
         self._text_undo_stack.redo()
         self.redoPerformed.emit()
 
-    def push_command(self, command: QUndoCommand, update_step: bool = False, is_text: bool = False):
-        """
-        Добавляет команду в стек undo.
-
-        Args:
-            command: Команда для добавления
-            update_step: Обновить счётчик шагов
-            is_text: True — текстовая команда (стек текста), False — рисование
-        """
-        if is_text:
-            self.push_text_command(command, update_step=update_step)
-        else:
-            self.push_draw_command(command)
-
     def push_text_command(self, command: Optional[QUndoCommand] = None, update_step: bool = False):
         """
-        Добавляет текстовую команду в стек undo.
+        Добавляет текстовую команду в текстовый стек undo.
+
+        Маршрутизацию (text/draw) разрешает вызывающий код через
+        ``resolve_is_text`` — публичного метода с флагом is_text нет.
 
         Args:
             command: Команда для добавления (None для пустой команды)

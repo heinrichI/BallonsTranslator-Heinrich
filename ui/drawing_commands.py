@@ -12,6 +12,7 @@ from utils.logger import logger
 from .image_edit import ImageEditMode, PixmapItem, DrawingLayer, StrokeImgItem
 from .canvas import Canvas, TextBlkItem
 from .textedit_area import TransPairWidget
+from .undo_manager import TextUndoCommand
 from utils.config import pcfg
 
 class StrokeItemUndoCommand(QUndoCommand):
@@ -81,14 +82,17 @@ class EmptyCommand(QUndoCommand):
         super().__init__(parent=parent)
     
 
-class RunBlkTransCommand(QUndoCommand):
+class RunBlkTransCommand(TextUndoCommand):
+
     def __init__(self, canvas: Canvas, blkitems: List[TextBlkItem], transpairw_list: List[TransPairWidget], mode: int, st_manager=None):
         super().__init__()
 
         self.empty_command = None
         if mode > 1:
             self.empty_command = EmptyCommand()
-            canvas.push_undo_command(self.empty_command)
+            # Асинхронный контекст (on_blktrans_finished): mode-fallback может
+            # уже не отражать режим — явный текстовый стек.
+            canvas.push_undo_command(self.empty_command, is_text=True)
 
         self.op_counter = -1
         self.blkitems = blkitems

@@ -15,6 +15,7 @@ except:
 from .textitem import TextBlkItem, TextBlock
 from .flow_textitem import FlowTextBlkItem
 from .canvas import Canvas
+from .undo_manager import TextUndoCommand, resolve_is_text
 from .textedit_area import TransTextEdit, SourceTextEdit, TransPairWidget, SelectTextMiniMenu, TextEditListScrollArea, QVBoxLayout, Widget
 from utils.fontformat import FontFormat
 from .textedit_commands import propagate_user_edit, TextEditCommand, ReshapeItemCommand, MoveBlkItemsCommand, AutoLayoutCommand, ApplyFontformatCommand, RotateItemCommand, TextItemEditCommand, TextEditCommand, PageReplaceOneCommand, PageReplaceAllCommand, MultiPasteCommand, ResetAngleCommand, SqueezeCommand
@@ -273,7 +274,8 @@ class PasteBlkItemsCommand(QUndoCommand):
         self.ctrl.deleteTextblkItemList(self.blk_list, self.pwidget_list)
 
 
-class PasteSrcItemsCommand(QUndoCommand):
+class PasteSrcItemsCommand(TextUndoCommand):
+
     def __init__(self, src_list: List[SourceTextEdit], paste_list: List[str]):
         super().__init__()
         self.src_list = src_list
@@ -447,17 +449,23 @@ class SceneTextManager(QObject):
         self._auto_textlayout_flag = value
         self.layout_manager.auto_textlayout_flag = value
 
-    def push_undo_command(self, command, update_pushed_step=True, is_text=False):
+    def push_undo_command(self, command, update_pushed_step=True, is_text=None):
         """Proxy: добавляет команду в стек undo через DI UndoManager.
 
         Args:
             command: QUndoCommand
-            update_pushed_step: обновить счётчики canvas (fallback-путь)
-            is_text: True — текстовая команда (стек текста, отменяется
-                Ctrl+Z внутри редактора); False — стек рисования/сцены
+            update_pushed_step: обновить счётчик шагов (DI) / счётчики canvas (fallback)
+            is_text: None — авто (маркер ``TextUndoCommand`` команды, при его
+                отсутствии — ``canvas.textEditMode()``); True — текстовый стек
+                (отменяется Ctrl+Z внутри редактора); False — draw-стек
         """
         if self._undo_mgr:
-            self._undo_mgr.push_command(command, update_step=True, is_text=is_text)
+            if is_text is None:
+                is_text = resolve_is_text(command, None, self.canvas.textEditMode)
+            if is_text:
+                self._undo_mgr.push_text_command(command, update_step=update_pushed_step)
+            else:
+                self._undo_mgr.push_draw_command(command)
             self.canvas.setProjSaveState(True)
         else:
             self.canvas.push_undo_command(command, update_pushed_step)

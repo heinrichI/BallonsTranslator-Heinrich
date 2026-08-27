@@ -120,9 +120,9 @@ class TestFlowBlockMoveUndo:
         mgr = UndoManager()
 
         # Wire exactly like SceneTextManager: moved -> MoveBlkItemsCommand
-        # pushed via push_command(is_text=False) -> draw stack.
+        # pushed via push_draw_command() -> draw stack.
         def on_moved() -> None:
-            mgr.push_command(MoveBlkItemsCommand([item], ctrl))
+            mgr.push_draw_command(MoveBlkItemsCommand([item], ctrl))
 
         item.moved.connect(on_moved)
 

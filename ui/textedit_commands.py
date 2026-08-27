@@ -17,6 +17,7 @@ from .texteditshapecontrol import TextBlkShapeControl
 from .page_search_widget import PageSearchWidget, Matched
 from utils.proj_imgtrans import ProjImgTrans
 from .scene_textlayout import PUNSET_HALF
+from .undo_manager import TextUndoCommand
 
 LOGGER = logging.getLogger('BallonTranslator')
 
@@ -465,7 +466,8 @@ class PageReplaceAllCommand(QUndoCommand):
             blkitem.undo()
 
 
-class GlobalRepalceAllCommand(QUndoCommand):
+class GlobalRepalceAllCommand(TextUndoCommand):
+
     def __init__(self, sceneitem_list: dict, background_list: dict, target_text: str, proj: ProjImgTrans) -> None:
         super().__init__()
         self.op_counter = -1

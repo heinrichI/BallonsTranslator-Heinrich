@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from qtpy.QtGui import QUndoCommand
-from ui.undo_manager import UndoManager
+from ui.undo_manager import TextUndoCommand, UndoManager, resolve_is_text
 
 
 class TestUndoManager:
@@ -62,13 +62,13 @@ class TestStackRouting:
 
     def test_text_command_goes_to_text_stack(self):
         cmd = QUndoCommand()
-        self.undo_mgr.push_command(cmd, is_text=True)
+        self.undo_mgr.push_text_command(cmd)
         assert self.undo_mgr.get_text_stack().index() == 1
         assert self.undo_mgr.get_draw_stack().index() == 0
 
     def test_draw_command_goes_to_draw_stack(self):
         cmd = QUndoCommand()
-        self.undo_mgr.push_command(cmd)
+        self.undo_mgr.push_draw_command(cmd)
         assert self.undo_mgr.get_draw_stack().index() == 1
         assert self.undo_mgr.get_text_stack().index() == 0
 
@@ -83,8 +83,8 @@ class TestStackRouting:
     def test_undo_picks_last_pushed_stack_first(self):
         text_cmd = QUndoCommand()
         draw_cmd = QUndoCommand()
-        self.undo_mgr.push_command(text_cmd, is_text=True)
-        self.undo_mgr.push_command(draw_cmd)
+        self.undo_mgr.push_text_command(text_cmd)
+        self.undo_mgr.push_draw_command(draw_cmd)
         # Последний push — draw → его undo'им первым
         self.undo_mgr.undo()
         assert self.undo_mgr.get_draw_stack().index() == 0
@@ -97,8 +97,8 @@ class TestStackRouting:
         """Ctrl+Z в редакторе отменяет только текстовые команды."""
         text_cmd = QUndoCommand()
         draw_cmd = QUndoCommand()
-        self.undo_mgr.push_command(text_cmd, is_text=True)
-        self.undo_mgr.push_command(draw_cmd)
+        self.undo_mgr.push_text_command(text_cmd)
+        self.undo_mgr.push_draw_command(draw_cmd)
         self.undo_mgr.undo_text()
         assert self.undo_mgr.get_text_stack().index() == 0
         assert self.undo_mgr.get_draw_stack().index() == 1  # draw не тронут
@@ -106,8 +106,8 @@ class TestStackRouting:
     def test_redo_text_only_touches_text_stack(self):
         text_cmd = QUndoCommand()
         draw_cmd = QUndoCommand()
-        self.undo_mgr.push_command(text_cmd, is_text=True)
-        self.undo_mgr.push_command(draw_cmd)
+        self.undo_mgr.push_text_command(text_cmd)
+        self.undo_mgr.push_draw_command(draw_cmd)
         self.undo_mgr.undo_text()
         self.undo_mgr.redo_text()
         assert self.undo_mgr.get_text_stack().index() == 1
@@ -120,7 +120,7 @@ class TestStackRouting:
 
     def test_can_undo_either_stack(self):
         assert not self.undo_mgr.can_undo()
-        self.undo_mgr.push_command(QUndoCommand(), is_text=True)
+        self.undo_mgr.push_text_command(QUndoCommand())
         assert self.undo_mgr.can_undo()
         self.undo_mgr.undo()
         assert not self.undo_mgr.can_undo()
@@ -129,8 +129,8 @@ class TestStackRouting:
     def test_redo_picks_last_pushed_stack_first(self):
         text_cmd = QUndoCommand()
         draw_cmd = QUndoCommand()
-        self.undo_mgr.push_command(text_cmd, is_text=True)
-        self.undo_mgr.push_command(draw_cmd)
+        self.undo_mgr.push_text_command(text_cmd)
+        self.undo_mgr.push_draw_command(draw_cmd)
         self.undo_mgr.undo()  # draw
         self.undo_mgr.undo()  # text
         self.undo_mgr.redo()  # последний push был draw
@@ -138,6 +138,51 @@ class TestStackRouting:
         assert self.undo_mgr.get_text_stack().index() == 0
         self.undo_mgr.redo()
         assert self.undo_mgr.get_text_stack().index() == 1
+
+
+class _TextMarkerCmd(TextUndoCommand):
+    pass
+
+
+class TestResolveIsText:
+    """Единая точка разрешения маршрутизации: явный аргумент > маркер
+    TextUndoCommand > текущий режим (фикс маршрутизации после
+    DI-рефакторинга: команды перевода/шрифтов/замены попадают в текстовый
+    стек без явного is_text)."""
+
+    def test_explicit_true_wins_over_mode(self, qapp):
+        assert resolve_is_text(QUndoCommand(), True, lambda: False) is True
+
+    def test_explicit_false_wins_over_marker(self, qapp):
+        """Новая семантика: явный is_text=False переопределяет маркер
+        (ранее формула 'is_text or attr' держала команду в текстовом стеке).
+        Регрессия: защита от «демарка» теперь обеспечивается тем, что
+        production-сайты асинхронных команд не передают явный False."""
+        assert resolve_is_text(_TextMarkerCmd(), False, lambda: True) is False
+
+    def test_marker_wins_over_draw_mode(self, qapp):
+        assert resolve_is_text(_TextMarkerCmd(), None, lambda: False) is True
+
+    def test_plain_command_follows_text_mode(self, qapp):
+        assert resolve_is_text(QUndoCommand(), None, lambda: True) is True
+
+    def test_plain_command_follows_draw_mode(self, qapp):
+        assert resolve_is_text(QUndoCommand(), None, lambda: False) is False
+
+    def test_none_command_falls_back_to_mode(self, qapp):
+        assert resolve_is_text(None, None, lambda: True) is True
+        assert resolve_is_text(None, None, lambda: False) is False
+
+    def test_text_marker_command_undone_by_undo_text_only(self, qapp):
+        """Ctrl+Z в редакторе откатывает текстовую команду, не трогая draw-стек."""
+        mgr = UndoManager()
+        draw = QUndoCommand()
+        text = _TextMarkerCmd()
+        mgr.push_draw_command(draw)
+        mgr.push_text_command(text)
+        mgr.undo_text()
+        assert mgr.get_text_stack().index() == 0
+        assert mgr.get_draw_stack().index() == 1
 
 
 class TestPanelUndoChain:
@@ -157,7 +202,7 @@ class TestPanelUndoChain:
 
         # Как делает scenetext_manager.on_push_edit_stack: is_text=True
         cmd = TextEditCommand(edit, 1, None)
-        mgr.push_command(cmd, update_step=True, is_text=True)
+        mgr.push_text_command(cmd, update_step=True)
         assert mgr.get_text_stack().index() == 1
         assert mgr.get_draw_stack().index() == 0
 
@@ -179,10 +224,10 @@ class TestPanelUndoChain:
         edit.setPlainText('abc')
         edit.moveCursor(QTextCursor.MoveOperation.End)
         edit.insertPlainText('d')
-        mgr.push_command(TextEditCommand(edit, 1, None), is_text=True)
+        mgr.push_text_command(TextEditCommand(edit, 1, None))
 
         draw_cmd = QUndoCommand()
-        mgr.push_command(draw_cmd)  # например, штрих рисования после правки
+        mgr.push_draw_command(draw_cmd)  # например, штрих рисования после правки
 
         mgr.undo()  # глобальный Ctrl+Z → последний push = draw
         assert mgr.get_draw_stack().index() == 0

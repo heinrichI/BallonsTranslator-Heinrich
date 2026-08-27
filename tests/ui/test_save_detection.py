@@ -64,7 +64,7 @@ class _FakeCanvas:
     def push_undo_command(self, command, update_pushed_step=True):
         """Копия canvas.push_undo_command с фиксом DI UndoManager."""
         if self._undo_mgr:
-            self._undo_mgr.push_command(command)
+            self._undo_mgr.push_draw_command(command)
             self.setProjSaveState(True)
             if update_pushed_step:
                 if self.textEditMode():
@@ -191,13 +191,13 @@ class TestEventDrivenDirtyTracking:
         """UndoManager.is_dirty() возвращает True после push команды."""
         mgr = UndoManager()
         assert not mgr.is_dirty()
-        mgr.push_command(QUndoCommand())
+        mgr.push_draw_command(QUndoCommand())
         assert mgr.is_dirty()
 
     def test_mark_clean_resets_dirty(self):
         """mark_clean() сбрасывает is_dirty() в False."""
         mgr = UndoManager()
-        mgr.push_command(QUndoCommand())
+        mgr.push_draw_command(QUndoCommand())
         assert mgr.is_dirty()
         mgr.mark_clean()
         assert not mgr.is_dirty()
@@ -205,29 +205,27 @@ class TestEventDrivenDirtyTracking:
     def test_multiple_pushes_dirty_after_clean(self):
         """После mark_clean() новый push снова делает is_dirty()=True."""
         mgr = UndoManager()
-        mgr.push_command(QUndoCommand())
+        mgr.push_draw_command(QUndoCommand())
         mgr.mark_clean()
         assert not mgr.is_dirty()
-        mgr.push_command(QUndoCommand())
+        mgr.push_draw_command(QUndoCommand())
         assert mgr.is_dirty()
 
     def test_draw_stack_dirty(self):
         """Команда в draw-стеке делает is_dirty()=True."""
         mgr = UndoManager()
-        mgr._mode = 'draw'
-        mgr.push_command(QUndoCommand())
+        mgr.push_draw_command(QUndoCommand())
         assert mgr.is_dirty()
 
     def test_text_stack_dirty(self):
         """Команда в text-стеке делает is_dirty()=True."""
         mgr = UndoManager()
-        mgr._mode = 'text'
-        mgr.push_command(QUndoCommand())
+        mgr.push_text_command(QUndoCommand())
         assert mgr.is_dirty()
 
     def test_clear_resets_dirty(self):
         """clear() сбрасывает is_dirty() в False."""
         mgr = UndoManager()
-        mgr.push_command(QUndoCommand())
+        mgr.push_draw_command(QUndoCommand())
         mgr.clear()
         assert not mgr.is_dirty()

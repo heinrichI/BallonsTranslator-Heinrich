@@ -15,6 +15,7 @@ from utils.logger import logger as LOGGER
 from utils.textblock import TextBlock
 from .view_interfaces import ISceneView
 from .event_bus import EventBus, Events
+from .undo_manager import resolve_is_text
 
 LOGGER = logging.getLogger('BallonTranslator')
 
@@ -94,14 +95,28 @@ class ScenePresenter:
 
     # ── DI Service Access ──────────────────────────────────────
 
-    def push_undo_command(self, command: Any, update_pushed_step: bool = True):
-        """Добавляет команду в стек undo через DI UndoManager."""
+    def push_undo_command(self, command: Any, update_pushed_step: bool = True,
+                          is_text: Optional[bool] = None):
+        """Добавляет команду в стек undo через DI UndoManager.
+
+        is_text: None — авто (маркер ``TextUndoCommand`` команды, при его
+            отсутствии — режим view); True/False — принудительный выбор стека.
+        """
         # Delegate to view (canvas) which properly updates canvas step counters
         # for save detection. Direct _undo_mgr.push_command bypasses counters.
         if hasattr(self._view, 'push_undo_command'):
-            self._view.push_undo_command(command, update_pushed_step)
-        elif self._undo_mgr:
-            self._undo_mgr.push_command(command)
+            self._view.push_undo_command(command, update_pushed_step, is_text=is_text)
+            return
+        if self._undo_mgr and command is not None:
+            if hasattr(self._view, 'textEditMode'):
+                mode_is_text = lambda: bool(self._view.textEditMode())
+            else:
+                mode_is_text = lambda: False
+            is_text = resolve_is_text(command, is_text, mode_is_text)
+            if is_text:
+                self._undo_mgr.push_text_command(command)
+            else:
+                self._undo_mgr.push_draw_command(command)
 
     def add_item_to_text_layer(self, item: Any):
         """Добавляет элемент на текстовый слой через DI LayerManager."""

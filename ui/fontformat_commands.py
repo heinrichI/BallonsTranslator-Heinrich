@@ -10,6 +10,7 @@ except:
     from qtpy.QtGui import QUndoCommand
 
 from . import shared_widget as SW
+from .undo_manager import TextUndoCommand
 from utils.fontformat import FontFormat, px2pt, pt2px
 from .textitem import TextBlkItem
 
@@ -47,7 +48,7 @@ local_default_set_kwargs = dict(set_selected=True, restore_cursor=True)
 
 
 
-class TextStyleUndoCommand(QUndoCommand):
+class TextStyleUndoCommand(TextUndoCommand):
 
     def __init__(self, style_func: Callable, params: Dict, redo_values: List, undo_values: List):
         super().__init__()
@@ -63,7 +64,7 @@ class TextStyleUndoCommand(QUndoCommand):
         self.style_func(values=self.undo_values, **self.params)
 
 
-class SelectionOutlineUndoCommand(QUndoCommand):
+class SelectionOutlineUndoCommand(TextUndoCommand):
     """Snapshot/restore undo command for per-selection stroke outline.
 
     Captures blk.outline_ranges before/after the change and restores the

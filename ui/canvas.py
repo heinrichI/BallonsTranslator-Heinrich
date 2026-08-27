@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-from typing import List, Union
+from typing import List, Optional, Union
 import os
 
 # Use the shared app logger: module loggers ("ui.*") have no file handler,
@@ -29,6 +29,7 @@ from utils import shared as C
 from utils.config import pcfg
 from utils.proj_imgtrans import ProjImgTrans
 from .event_bus import EventBus, Events
+from .undo_manager import resolve_is_text
 
 CANVAS_SCALE_MAX = 10.0
 CANVAS_SCALE_MIN = 0.01
@@ -1005,7 +1006,7 @@ class Canvas(QGraphicsScene):
             LOGGER.warning("[UNDO] _push_text_command_internal called directly — prefer push_undo_command")
         if command is not None:
             if self._undo_mgr:
-                self._undo_mgr.push_command(command)
+                self._undo_mgr.push_text_command(command)
             else:
                 self.text_undo_stack.push(command)
         if update_pushed_step:
@@ -1116,8 +1117,13 @@ class Canvas(QGraphicsScene):
             if undo_stack == self.text_undo_stack:
                 self.txtblkShapeControl.updateBoundingRect()
 
-    def push_undo_command(self, command: QUndoCommand, update_pushed_step=True):
-        """Единая точка входа для push команд в undo-стек."""
+    def push_undo_command(self, command: QUndoCommand, update_pushed_step=True,
+                          is_text: Optional[bool] = None):
+        """Единая точка входа для push команд в undo-стек.
+
+        is_text: None — авто: маркер ``TextUndoCommand`` (если есть),
+            иначе по ``textEditMode()``; True/False — принудительный выбор стека.
+        """
         if command is None:
             # command=None used to increment step counters without pushing to stack
             if update_pushed_step:
@@ -1127,18 +1133,24 @@ class Canvas(QGraphicsScene):
                     self.num_pushed_drawstep += 1
             logger.debug("[SAVE] push_undo_command: command=None, counters updated")
             return
+        if is_text is None:
+            is_text = resolve_is_text(command, None, self.textEditMode)
         if self._undo_mgr:
-            self._undo_mgr.push_command(command)
+            if is_text:
+                self._undo_mgr.push_text_command(command)
+            else:
+                self._undo_mgr.push_draw_command(command)
             self.setProjSaveState(True)
-            # Increment canvas step counters so save detection works
+            # Increment canvas step counters by the ACTUAL routing decision,
+            # so counters always match the stack the command landed in.
             if update_pushed_step:
-                if self.textEditMode():
+                if is_text:
                     self.num_pushed_textstep += 1
-                elif self.drawMode():
+                else:
                     self.num_pushed_drawstep += 1
-            logger.debug("[SAVE] push_undo_command via _undo_mgr: projstate_unsaved=True")
+            logger.debug("[SAVE] push_undo_command via _undo_mgr: is_text=%s", is_text)
             return
-        # Fallback: old canvas undo stacks
+        # Fallback: old canvas undo stacks (mode-based, как до DI-рефакторинга)
         if self.textEditMode():
             self._push_text_command_internal(command, update_pushed_step)
         elif self.drawMode():

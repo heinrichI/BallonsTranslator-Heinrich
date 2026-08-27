@@ -99,7 +99,8 @@ class TestFlowBlockMoveUndoIntegration:
         )
         mgr.push_undo_command = (
             lambda command, update_pushed_step=True, is_text=False:
-            undo_mgr.push_command(command, update_step=True, is_text=is_text)
+            (undo_mgr.push_text_command(command, update_step=update_pushed_step)
+             if is_text else undo_mgr.push_draw_command(command))
         )
         item.moved.connect(lambda: SceneTextManager.onTextBlkItemMoved(mgr))
 
@@ -112,7 +113,7 @@ class TestFlowBlockMoveUndoIntegration:
         assert item.pos() != old_pos, "drag should have moved the block"
 
         # The real handler must have found the selected flow item and pushed
-        # a MoveBlkItemsCommand onto the DRAW stack (is_text=False).
+        # a MoveBlkItemsCommand onto the DRAW stack (push_draw_command).
         draw = undo_mgr.get_draw_stack()
         assert draw.canUndo(), "real onTextBlkItemMoved path must push the move command"
         assert undo_mgr._last_pushed == 'draw', "move command must route to the draw stack"

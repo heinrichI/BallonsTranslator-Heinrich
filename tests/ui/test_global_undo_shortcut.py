@@ -177,7 +177,7 @@ class TestMoveCommandSmartUndo:
         mgr = UndoManager()
         cmd = MoveBlkItemsCommand([item], FakeShapeCtrl())
         # scenetext_manager.onTextBlkItemMoved: push без is_text -> draw-стек
-        mgr.push_command(cmd, is_text=False)
+        mgr.push_draw_command(cmd)
         assert mgr.get_draw_stack().index() == 1
 
         mgr.undo()
@@ -203,7 +203,7 @@ class TestApplyTextStyleGlobalUndo:
         mgr = UndoManager()
         cmd = ApplyFontformatCommand([item], [FakeEdit()], new_fmt)
         # scenetext_manager.apply_fontformat: push_undo_command(cmd, is_text=True)
-        mgr.push_command(cmd, is_text=True)
+        mgr.push_text_command(cmd)
         assert mgr.get_text_stack().index() == 1
         assert item.get_fontformat().bold is True
 
