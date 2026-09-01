@@ -287,7 +287,7 @@ class PaddleOCRVL16Color(OCRBase):
             x2 = int(min(im_w, x2 + 10))
             y1 = int(max(0, y1 - 2))
             y2 = int(min(im_h, y2 + 5))
-            if y2 < im_h and x2 < im_w and x1 > 0 and y1 > 0 and x1 < x2 and y1 < y2:
+            if x1 < x2 and y1 < y2:
                 region = img[y1:y2, x1:x2]
                 try:
                     answer = self.ocr_img(region)
