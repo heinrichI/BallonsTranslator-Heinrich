@@ -412,28 +412,28 @@ class TransGemmaTranslator(BaseTranslator):
         problems = []
         for i, (src, tr) in enumerate(zip(srcs, result)):
             if not tr.strip() and src.strip():
-                self.logger.debug(f"find_problems: idx={i} flagged (empty translation): {tr!r}")
+                self.logger.warning(f"find_problems: idx={i} flagged (empty translation): {tr!r}")
                 problems.append(i)
                 continue
             if self._has_id_prefix_leak(tr):
                 # Model echoed the request's id=N: prefix — flagged for all
                 # providers so the batch binary-splits down to single elements.
-                self.logger.debug(f"find_problems: idx={i} flagged (id-prefix-leak): {tr!r}")
+                self.logger.warning(f"find_problems: idx={i} flagged (id-prefix-leak): {tr!r}")
                 problems.append(i)
                 continue
             if self.provider != "llama-server" and self._has_id_leak(tr):
-                self.logger.debug(f"find_problems: idx={i} flagged (id-leak): {tr!r}")
+                self.logger.warning(f"find_problems: idx={i} flagged (id-leak): {tr!r}")
             if self._is_echo(src, tr):
                 # Model returned the source text as the translation (ratio ~= 1.0
                 # passes the ratio checks) вЂ” flag it so the batch binary-splits
                 # down to a per-phrase re-request.
-                self.logger.debug(f"find_problems: idx={i} flagged (echo/identity): {tr!r}")
+                self.logger.warning(f"find_problems: idx={i} flagged (echo/identity): {tr!r}")
                 problems.append(i)
                 continue
             if len(src) > 25:
                 ratio = len(tr) / len(src)
                 if ratio < 0.40:
-                    self.logger.debug(f"find_problems: idx={i} flagged (low-ratio {ratio:.2f}): {tr!r}")
+                    self.logger.warning(f"find_problems: idx={i} flagged (low-ratio {ratio:.2f}): {tr!r}")
                     problems.append(i)
                     continue
                 # High-ratio check shares the SAME len(src) > 25 guard as the
@@ -444,7 +444,7 @@ class TransGemmaTranslator(BaseTranslator):
                 # via the absolute-length floor in _is_high_ratio_problem,
                 # causing pointless binary splits down to per-phrase retries.
                 if self._is_high_ratio_problem(src, tr):
-                    self.logger.debug(f"find_problems: idx={i} flagged (high-ratio): {tr!r}")
+                    self.logger.warning(f"find_problems: idx={i} flagged (high-ratio): {tr!r}")
                     problems.append(i)
         return problems
 
@@ -865,7 +865,7 @@ class TransGemmaTranslator(BaseTranslator):
                     if create_yes_no_dialog(f"ID {idx}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}).\nSrc={src}\nTrans={tr}\n\nStop translation?"):
                         raise TranslationIntegrityError(f"ID {idx}: Low compression ratio ({current_ratio:.2f} < {LOW_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
                     else:
-                        self.logger.warning(f"Low compression ignored by user, continuing with: {tr}.")
+                        self.logger.warning(f"Low compression ratio: dialog returned No, continuing with: {tr}.")
             elif current_ratio > HIGH_RATIO_THRESHOLD:
                 self.logger.warning(f"ID {idx}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
                 ratio_response = self._request_single(src, show_dialog=True)
@@ -875,7 +875,7 @@ class TransGemmaTranslator(BaseTranslator):
                     if create_yes_no_dialog(f"ID {idx}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}).\nSrc={src}\nTrans={tr}\n\nStop translation?"):
                         raise TranslationIntegrityError(f"ID {idx}: High compression ratio ({current_ratio:.2f} > {HIGH_RATIO_THRESHOLD}). \nSrc={src} \nTrans={tr}")
                     else:
-                        self.logger.warning(f"High compression ignored by user, continuing with: {tr}.")
+                        self.logger.warning(f"High compression ratio: dialog returned No, continuing with: {tr}.")
 
         if not src.endswith("{}") and tr.endswith("{}"):
             self.logger.warning("Удалён суффикс {}.")
@@ -919,7 +919,7 @@ class TransGemmaTranslator(BaseTranslator):
 
         for j, tr in enumerate(result):
             translations[orig_indices[j]] = tr
-        self.logger.info(f"Successfully translated batch len={len(srcs)}. Tokens used: {self.token_count_last}")
+        self.logger.info(f"Successfully translated batch len={len(srcs)}. Remaining: {sum(1 for t in translations if not t)}. Tokens used: {self.token_count_last}")
 
     # --- Cross-page deduplication (deterministic, instruction-independent) ---
     # TranslateGemma often re-renders a leading word that the previous page's
@@ -1055,6 +1055,22 @@ class TransGemmaTranslator(BaseTranslator):
 
     def _translate(self, src_list: List[str]) -> List[str]:
         if not src_list: return []
+        # Expand multi-line blocks into per-line entries BEFORE batching.
+        #
+        # Without this, a block with \n-separated lines (a TV schedule, credits,
+        # a multi-paragraph caption) reaches the model as a SINGLE "phrase"
+        # (newlines flattened to spaces) and TranslateGemma summarizes it into
+        # one short line instead of translating line by line (error26.txt).
+        # Per-line elements give the model one numbered element per physical
+        # line so it must render each line, keep the ratio/echo checks
+        # meaningful per line, and preserve the block's line count in the
+        # translation (better for text fitting).
+        expanded: List[str] = []
+        line_block: List[int] = []  # expanded line index -> block index in src_list
+        for bi, s in enumerate(src_list):
+            for ln in s.split("\n"):
+                expanded.append(ln)
+                line_block.append(bi)
         # Filter out empty or trivially short texts вЂ” don't send them to the translator
         # Strip soft hyphens (\u00AD) and check if meaningful text remains
         def _is_meaningful(s: str) -> bool:
@@ -1064,16 +1080,19 @@ class TransGemmaTranslator(BaseTranslator):
             # Must contain at least one letter or digit (not just punctuation/spaces)
             return any(c.isalpha() or c.isdigit() for c in clean)
 
-        non_empty_indices = [i for i, s in enumerate(src_list) if _is_meaningful(s)]
-        self.logger.debug(f"_translate: src_list={len(src_list)} items, non_empty={len(non_empty_indices)}")
-        for i, s in enumerate(src_list):
+        non_empty_indices = [i for i, s in enumerate(expanded) if _is_meaningful(s)]
+        self.logger.debug(
+            f"_translate: src_list={len(src_list)} blocks ({len(expanded)} lines), "
+            f"non_empty={len(non_empty_indices)}"
+        )
+        for i, s in enumerate(expanded):
             if not s.strip():
                 self.logger.debug(f"  filtered out [{i}]: repr={repr(s[:50])}")
         if not non_empty_indices:
             return [""] * len(src_list)
-        filtered_src = [src_list[i] for i in non_empty_indices]
+        filtered_src = [expanded[i] for i in non_empty_indices]
 
-        translations = [""] * len(src_list)
+        translations = [""] * len(expanded)
 
         for text, num_src, batch_orig_idx in self._pack_batches(filtered_src):
             batch_src = [filtered_src[k] for k in batch_orig_idx]
@@ -1094,13 +1113,19 @@ class TransGemmaTranslator(BaseTranslator):
             self.rolling_context = "\n".join(translated_tail)
             self.rolling_source_tail = "\n".join(batch_src[-2:])
 
-        # Fall back to original text when translation is empty
-        for i in range(len(translations)):
-            if not translations[i].strip() and src_list[i].strip():
-                self.logger.warning(f"No translation for '{src_list[i][:30]}', using original text")
-                translations[i] = src_list[i]
+        # Fall back to the original LINE (not the whole block) when the
+        # translation of a line is empty.
+        for i, t in enumerate(translations):
+            if not t.strip() and expanded[i].strip():
+                self.logger.warning(f"No translation for '{expanded[i][:30]}', using original text")
+                translations[i] = expanded[i]
 
-        return translations
+        # Rejoin per-line results into the original block structure.
+        # split/join on "\n" is lossless, so a block's line count is preserved.
+        per_block: List[List[str]] = [[] for _ in src_list]
+        for t, bi in zip(translations, line_block):
+            per_block[bi].append(t)
+        return ["\n".join(block_lines) for block_lines in per_block]
     
     # Паттерн для утечки id-префикса — модель эхом возвращает "id=N: " из запроса.
     # НЕ включает хвостовой артефакт "}]}" — он безобиден для llama-server.
@@ -1121,9 +1146,15 @@ class TransGemmaTranslator(BaseTranslator):
     def _single_alternative(self, text: str, src: str = "") -> str:
         """Keep only the first variant when the model returns 'A / B' style alternatives.
 
-        When the source text itself contains the separator (e.g. credits
-        "F. Doyle / D. DeCarlo"), slashes in the output are structural — the
-        model faithfully renders a list of names — so they are preserved.
+        Variant truncation is disabled entirely when the source contains a
+        bare '/' or '|' in ANY spacing (e.g. "HOUR/IN THE KNOW", credits
+        "F. Doyle/D. DeCarlo"): separators in the translation are then
+        structural, a faithful rendering of the source's list, and must be
+        preserved (error26.txt: the old spaced-only source check still cut
+        "«X» / «Y»" because the source's slash had no spaces).
+        Otherwise a spaced " / " or " | " in the translation is treated as
+        the model's alternative variants and only the first one is kept.
+        Unspaced separators in the translation are never treated as variants.
         """
         # If the model echoed the request's id=N: prefix, do NOT truncate here.
         # Leave the full text so _find_problems can flag it and the batch
@@ -1131,10 +1162,10 @@ class TransGemmaTranslator(BaseTranslator):
         if self._has_id_prefix_leak(text):
             self.logger.debug(f"id-prefix leak detected, returning text unchanged: {text!r}")
             return text.strip()
+        if "/" in src or "|" in src:
+            self.logger.debug(f"'/' or '|' present in source, preserving separators: {text!r}")
+            return text.strip()
         for sep in (" / ", " | "):
-            if sep in src:
-                self.logger.debug(f"separator {sep!r} present in source, preserving: {text!r}")
-                continue
             if sep in text:
                 first = text.split(sep, 1)[0].strip()
                 self.logger.warning(

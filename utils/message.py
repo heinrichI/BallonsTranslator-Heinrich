@@ -43,18 +43,38 @@ def create_info_dialog(info_msg, btn_type=None, modal: bool = False, frame_less:
         shared.create_infodialog_in_mainthread({'info_msg': info_msg, 'btn_type': btn_type, 'modal': modal, 'frame_less': frame_less, 'signal_slot_map_list': signal_slot_map_list})
 
 
+# How long the worker thread waits for the main thread to show and answer
+# the yes/no dialog before giving up and using the default.
+_YESNO_DIALOG_TIMEOUT = 60
+
+
 def create_yes_no_dialog(question_msg: str, default_yes: bool = False) -> bool:
     """Show a yes/no question dialog in the main thread and return the user's choice.
-    Returns True if Yes, False if No or in headless mode.
+    Returns True if Yes, False if No, in headless mode, or when the main thread
+    did not answer within the timeout (that case is logged explicitly, so the
+    log never attributes a silent default to the user).
     """
     if shared.HEADLESS:
+        LOGGER.debug(f"headless mode: yes/no dialog skipped, defaulting to {default_yes}: {question_msg[:80]!r}")
         return default_yes
     import uuid
     dialog_id = str(uuid.uuid4())
-    shared.create_yesno_dialog_in_mainthread({'question': question_msg, 'dialog_id': dialog_id})
-    _yesno_event.wait(timeout=60)
-    result = _yesno_result.pop(dialog_id, default_yes)
+    # Drop stale state (e.g. an event left set by a late dialog handler)
+    # BEFORE emitting, so a previous unanswered dialog cannot short-circuit
+    # this wait.
     _yesno_event.clear()
+    LOGGER.debug(f"yes/no dialog [step 1/3] request emitted to main thread: {question_msg[:80]!r}")
+    shared.create_yesno_dialog_in_mainthread({'question': question_msg, 'dialog_id': dialog_id})
+    answered = _yesno_event.wait(timeout=_YESNO_DIALOG_TIMEOUT)
+    result = _yesno_result.pop(dialog_id, None)
+    if result is None:
+        LOGGER.warning(
+            f"yes/no dialog [step 3/3] NOT answered within {_YESNO_DIALOG_TIMEOUT}s "
+            f"(the main thread did not show/answer the dialog; event_set={answered}); "
+            f"defaulting to {'Yes' if default_yes else 'No'}. Question: {question_msg[:80]!r}"
+        )
+        return default_yes
+    LOGGER.debug(f"yes/no dialog [step 3/3] answered: {result}")
     return result
 
 

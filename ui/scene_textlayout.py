@@ -61,6 +61,44 @@ def get_punc_rect(char: str, ffamily: str, size: float, weight: int, italic: boo
     fm = _font_metrics(ffamily, size, weight, italic)
     br = [fm.tightBoundingRect(char), fm.boundingRect(char)]
     return br
+# ── Descender padding ─────────────────────────────────────────────
+# The base line string (the CJK ideograph plus 'f') anchors the top of a
+# line to the CJK glyph body.  Latin/Cyrillic letters with descending stems
+# (g, y, p, q, j, у, р...) draw their glyph extents BELOW the tight bottom
+# of the base line, so on the LAST line of a block their descenders would be
+# clipped by the item boundingRect when rendering the scene at 1:1.  We
+# compensate by reserving extra bottom space for the LAST line of the document
+# only (middle lines overlap the next line's spacing).
+_DESCENDER_BASE_STR = '木fg'
+# Lower-case latin + cyrillic glyphs with deep descending stems.  Kept in the
+# probe so we only reserve extra bottom space when the last line actually
+# contains such a glyph (pure-CJK blocks stay untouched).
+_DESCENDER_CHARS = frozenset('gypqjyур')
+
+
+def _descender_gap(text: str, ffamily: str, size: float, weight: int, italic: bool) -> float:
+    """Extra bottom gap (px) needed so deep descender glyphs of the LAST line
+    (g/y/p/q/j/у/р) are not clipped by the item boundingRect at 1:1 render.
+
+    Returns the maximum of the tight-bottoms of the descender characters
+    actually present in ``text`` minus the tight-bottom of the base line
+    („木fg“).  For pure-CJK text (no deep-descender latin/cyrillic glyphs)
+    this is ~0, so CJK blocks are not inflated.."""
+    try:
+        if not text:
+            return 0.0
+        base_bottom = get_punc_rect(_DESCENDER_BASE_STR, ffamily, size, weight, italic)[0].bottom()
+        max_bottom = -1.0
+        for ch in text:
+            if ch in _DESCENDER_CHARS:
+                tb = get_punc_rect(ch, ffamily, size, weight, italic)[0].bottom()
+                if tb > max_bottom:
+                    max_bottom = tb
+        if max_bottom < 0:
+            return 0.0
+        return max(0.0, float(max_bottom - base_bottom))
+    except Exception:
+        return 0.0
 
 @lru_cache(maxsize=2048)
 def get_char_width(char: str, ffamily: str, size: float, weight: int, italic: bool) -> int:
@@ -1039,6 +1077,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         is_first_block = blk_no == 0
         text_padding = 0
         is_first_line = False
+        last_font = None
 
         while True:
             line = tl.createLine()
@@ -1090,6 +1129,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
                     tbr, br = get_punc_rect('木fg', font.family(), font.pointSizeF(), font.weight(), font.italic())
                     dy = -tbr.top() - line.ascent()
                     idea_height = tbr.height()
+                    last_font = font
 
             if idea_height == -1:
                 idea_height = block_height
@@ -1108,6 +1148,27 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             is_first_line = False
 
         tl.endLayout()
+# ── Descender-padding for the LAST line of the document ──────────
+        # The base line metric (tight „木fg“) does NOT cover deep Latin/Cyrillic
+        # descender glyphs (g/y/p/q/j/у/р).  For every NON-LAST line the next
+        # line's inter-line spacing absorbs them, but on the LAST line they would
+        # fall outside the block's boundingRect and be clipped when the scene is
+        # rendered at 1:1 (export / result image).  Adding the gap here makes
+        # reLayout() expand available_height/_display_rect so the descenders render.
+
+        # Only for the LAST block of the document (this block IS the bottom line..
+        # Uses the actual last-line text so pure-CJK blocks (no latin/cyrillic
+        # descenders) add ~0 padding and are not inflated.
+        if is_last_block and tl.lineCount() > 0 and blk_text:
+            try:
+                gap_font = last_font if last_font is not None else font
+                desc_gap = _descender_gap(blk_text, gap_font.family(), gap_font.pointSizeF(),
+                                          gap_font.weight(), gap_font.italic())
+            except Exception:
+                desc_gap = 0.0
+            if desc_gap > 0.05:
+                self.shrink_height += desc_gap
+                text_padding += desc_gap
 
         # ── Detect forced character-level breaks WITH overflow ──────
         # After endLayout(), check if any line was broken mid-character

@@ -1728,8 +1728,17 @@ class MainWindow(mainwindow_cls):
     def on_create_yesno_dialog(self, info_dict: dict):
         question = info_dict.get('question', '')
         dialog_id = info_dict.get('dialog_id', '')
-        reply = QMessageBox.question(self, self.tr('Translation Quality'), question, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        result = reply == QMessageBox.Yes
+        try:
+            LOGGER.debug(f"yes/no dialog [step 2/3] showing dialog on main thread: {question[:80]!r}")
+            reply = QMessageBox.question(self, self.tr('Translation Quality'), question, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            result = reply == QMessageBox.Yes
+            LOGGER.debug(f"yes/no dialog [step 2/3] dialog closed: {'Yes' if result else 'No'}")
+        except Exception as e:
+            # A dialog that fails to show must not leave the worker thread
+            # waiting the full timeout: answer with the default (No) and log it.
+            LOGGER.error(f'Failed to create yes/no dialog: {e}')
+            LOGGER.error(traceback.format_exc())
+            result = False
         shared._yesno_result[dialog_id] = result
         shared._yesno_event.set()
 

@@ -198,10 +198,13 @@ class TextLayoutManager:
                 cf.setFontPointSize(optimal_size)
             self._restore_charfmts(blkitem, text, text, char_fmts)
 
-        # Restore auto-adjust and run one shrink pass
+        # Restore auto-adjust and run one shrink pass. The block re-lays
+        # itself out per the _update_block_layout contract — control-point
+        # based for FlowTextBlkItem, display-rect based for a plain
+        # TextBlkItem (target_* = the intended size, see _auto_adjust_font).
         saved_grow = blkitem.font_adjuster._auto_grow_enabled
         blkitem.font_adjuster._auto_grow_enabled = False
-        blkitem._update_flow_layout()
+        blkitem._update_block_layout(target_w=block_w, target_h=target_h)
         blkitem.font_adjuster._auto_grow_enabled = saved_grow
 
         final_size = blkitem.font().pointSizeF()

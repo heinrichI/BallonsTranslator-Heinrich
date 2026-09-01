@@ -153,7 +153,7 @@ class RunBlkTransCommand(TextUndoCommand):
                         blkitem._auto_font_adjust = True
                         saved_grow = blkitem.font_adjuster._auto_grow_enabled
                         blkitem.font_adjuster._auto_grow_enabled = False
-                        blkitem._update_flow_layout()
+                        blkitem._update_block_layout(target_w=block_w, target_h=target_h)
                         blkitem.font_adjuster._auto_grow_enabled = saved_grow
 
                         # Post-layout validation: if text still exceeds target height

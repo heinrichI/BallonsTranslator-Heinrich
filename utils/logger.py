@@ -51,7 +51,7 @@ class ColoredFormatter(logging.Formatter):
         return logging.Formatter.format(self, record)
 
 FORMAT = (
-    "[%(levelname2)s] %(module2)s:%(funcName2)s:%(lineno2)s - %(message2)s"
+    "[%(asctime2)s] [%(levelname2)s] %(module2)s:%(funcName2)s:%(lineno2)s - %(message2)s"
 )
 
 class ColoredLogger(logging.Logger):
@@ -104,7 +104,7 @@ def setup_logging(logfile_dir: str, max_num_logs=14):
     fh = logging.FileHandler(logfilep, mode='w', encoding='utf-8')
     fh.setFormatter(
         logging.Formatter(
-            ("[%(levelname)s] %(module)s:%(funcName)s:%(lineno)s - %(message)s")
+            ("[%(asctime)s] [%(levelname)s] %(module)s:%(funcName)s:%(lineno)s - %(message)s")
         )
     )
     fh.setLevel(logging.DEBUG)

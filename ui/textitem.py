@@ -847,6 +847,33 @@ class TextBlkItem(QGraphicsTextItem):
         finally:
             self._auto_adjusting = False
 
+    def _update_block_layout(self, adjust_font: bool = True,
+                             target_w: float = None, target_h: float = None):
+        """Block re-layout contract (plain rectangular version).
+
+        Plain-block counterpart of ``FlowTextBlkItem._update_flow_layout``:
+        no control points — the constraints are the intended display rect.
+
+        Args:
+            adjust_font: True — run the shrink/grow pass (``_auto_adjust_font``)
+                and re-arm ``_auto_font_adjust`` afterwards (same contract as
+                the flow version). False — no-op: a plain block has no extra
+                geometry to re-assert beyond what setRect/set_size did.
+            target_w/target_h: the intended block size (full display rect).
+                Pass explicitly after set_size() — on_document_enlarged may
+                have expanded _display_rect when text overflowed during
+                setMaxSize (see _auto_adjust_font).
+        """
+        if not adjust_font:
+            return
+        if not isinstance(self.layout, HorizontalTextDocumentLayout):
+            return
+        self._auto_adjust_font(target_w=target_w, target_h=target_h)
+        # Re-arm so the next handle drag auto-adjusts (unless "Font Size: use
+        # global setting" is selected) — same contract as
+        # FlowTextBlkItem._update_flow_layout(adjust_font=True).
+        self._auto_font_adjust = (pcfg.let_fntsize_flag != 1)
+
     def updateUndoSteps(self):
         self.old_undo_steps = self.document().availableUndoSteps()
 

@@ -932,3 +932,109 @@ def test_dedup_integrated_in_translate(monkeypatch):
     # Page 2: model re-renders the completed word -> must be stripped.
     r2 = tr._translate(["beds. A stocky young man comes in."])
     assert r2 == ["Входит коренастый молодой человек."]
+
+
+# ---------- _single_alternative: separator policy (error26) ----------
+
+def test_single_alternative_unspaced_slash_in_source_disables_truncation():
+    """error26 case: source 'HOUR/IN THE KNOW' has NO spaces around '/', so the
+    old spaced-only source check did not exempt it and the model's faithful
+    '«X» / «Y»' was cut to '«X»'. Bare '/' in the source must disable cutting."""
+    tr = make_translator()
+    src = "8:00 AM THE BUGS BUNNY-ROADRUNNER HOUR/IN THE KNOW"
+    out = "8:00 — «Час Багса Банни и Родраннера» / «В курсе»"
+    assert tr._single_alternative(out, src) == out
+
+
+def test_single_alternative_unspaced_pipe_in_source_disables_truncation():
+    tr = make_translator()
+    src = "A|B"
+    out = "А | Б"
+    assert tr._single_alternative(out, src) == out
+
+
+def test_single_alternative_source_slash_protects_from_pipe_truncation():
+    """Blanket exemption: any '/' or '|' in the source disables variant
+    truncation for ALL separator styles in the translation."""
+    tr = make_translator()
+    assert tr._single_alternative("Перевод | Второй", "HOUR/IN THE KNOW") == "Перевод | Второй"
+
+
+def test_single_alternative_unspaced_separator_in_translation_is_not_a_variant():
+    """Without '/' or '|' in the source, an UNSPACED separator in the
+    translation is structural, not alternatives — no truncation."""
+    tr = make_translator()
+    assert tr._single_alternative("Час Багса/В курсе") == "Час Багса/В курсе"
+
+
+def test_single_alternative_spaced_variants_still_cut_without_source_separators():
+    """Regression guard: with no '/' or '|' in the source a spaced ' / ' in the
+    translation is still treated as alternatives and cut."""
+    tr = make_translator()
+    assert tr._single_alternative("Вариант один / Вариант два", "SOURCE TEXT") == "Вариант один"
+
+
+# ---------- _translate: per-line expansion of multi-line blocks (error26) ----------
+
+def test_translate_multiline_block_sent_line_by_line(monkeypatch):
+    """A multi-line block must reach the model as separate id=N elements
+    (one per physical line), not as one flattened phrase, and the result
+    must keep the block's line structure."""
+    tr = make_translator()
+    calls = []
+
+    def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, **kwargs):
+        calls.append((text, srcs))
+        return _resp(*[(i, f"TR{i}") for i in range(1, len(srcs) + 1)])
+
+    monkeypatch.setattr(tr, "_request_translation", fake_request)
+    block = "LINE ONE\nLINE TWO\nLINE THREE"
+    result = tr._translate(["OTHER", block])
+    # One numbered element per physical line: 1 + 3 = 4 elements.
+    text, srcs = calls[0]
+    assert srcs == ["OTHER", "LINE ONE", "LINE TWO", "LINE THREE"]
+    assert text.count("id=") == 4
+    assert "id=2: LINE ONE" in text and "id=4: LINE THREE" in text
+    # Block structure is preserved in the output.
+    assert result == ["TR1", "TR2\nTR3\nTR4"]
+
+
+def test_translate_multiline_block_empty_lines_preserved(monkeypatch):
+    """Empty lines inside a block are not sent to the model but stay empty in
+    the reassembled block (line count is preserved)."""
+    tr = make_translator()
+
+    def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, **kwargs):
+        return _resp(*[(i, f"TR{i}") for i in range(1, len(srcs) + 1)])
+
+    monkeypatch.setattr(tr, "_request_translation", fake_request)
+    result = tr._translate(["A\n\nB"])
+    assert result == ["TR1\n\nTR2"]
+
+
+def test_translate_multiline_fallback_uses_line_not_block(monkeypatch):
+    """An empty translation falls back to the original LINE, not the whole
+    block, so the rest of the block keeps its translations."""
+    tr = make_translator()
+
+    def fake_batch(batch_src, batch_orig, translations):
+        for pos, orig in enumerate(batch_orig):
+            translations[orig] = "" if batch_src[pos] == "LINE TWO" else f"TR-{batch_src[pos]}"
+
+    monkeypatch.setattr(tr, "_translate_batch", fake_batch)
+    result = tr._translate(["LINE ONE\nLINE TWO\nLINE THREE"])
+    assert result == ["TR-LINE ONE\nLINE TWO\nTR-LINE THREE"]
+
+
+def test_translate_multiline_rolling_tails_are_per_line(monkeypatch):
+    """Rolling context/source tails are per line now (matching the prompt's
+    'last lines' wording)."""
+    tr = make_translator()
+
+    def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, **kwargs):
+        return _resp(*[(i, f"TR{i}") for i in range(1, len(srcs) + 1)])
+
+    monkeypatch.setattr(tr, "_request_translation", fake_request)
+    tr._translate(["L1\nL2\nL3"])
+    assert tr.rolling_source_tail == "L2\nL3"
+    assert tr.rolling_context == "TR1\nTR2\nTR3"

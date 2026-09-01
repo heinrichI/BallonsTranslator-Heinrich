@@ -488,6 +488,15 @@ class FlowTextBlkItem(TextBlkItem):
         except Exception:
             pass
 
+    def _update_block_layout(self, adjust_font: bool = True,
+                             target_w: float = None, target_h: float = None):
+        """Block re-layout contract (flow version): control-point based.
+
+        target_w/target_h are ignored — flow geometry is derived from the
+        control points, not the display rect.
+        """
+        self._update_flow_layout(adjust_font=adjust_font)
+
     def _update_flow_layout(self, adjust_font: bool = True):
         """Push current boundary functions to the layout engine and repaint.
 
