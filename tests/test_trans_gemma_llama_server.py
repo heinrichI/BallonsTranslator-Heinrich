@@ -39,13 +39,20 @@ shared.HEADLESS = True
 SERVER_URL = "http://127.0.0.1:1234"
 
 
-def make_translator() -> TransGemmaTranslator:
+def make_translator(context_between_pages: bool = False) -> TransGemmaTranslator:
     tr = TransGemmaTranslator(
         lang_source="English",
         lang_target="русский язык",
         raise_unsupported_lang=False,
     )
     tr.n_ctx = 6144  # чтобы _fetch_context_window возвращался сразу, без сети
+    # Параметры здесь хранятся на КЛАССЕ (self.params — это TransGemmaTranslator.params),
+    # поэтому updateParam("max tokens", 100) из тестов на batching протекает в
+    # последующие экземпляры. Ставим детерминированное значение, чтобы тесты не
+    # зависели от порядка исполнения. Значение == продакшн-дефолту.
+    tr.updateParam("max tokens", 4096)
+    # Cross-page context default is OFF; enable explicitly where a test needs it.
+    tr.updateParam("context between pages", context_between_pages)
     return tr
 
 
@@ -690,7 +697,7 @@ def test_rolling_tails_set_after_translate(monkeypatch):
     """After a _translate() call the rolling tails must be populated:
     translated tail (last <=3 non-empty translations) and source tail
     (last <=2 source lines)."""
-    tr = make_translator()
+    tr = make_translator(context_between_pages=True)
 
     def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, **kwargs):
         return _resp((1, "Привет"), (2, "Пока"))
@@ -704,7 +711,7 @@ def test_rolling_tails_set_after_translate(monkeypatch):
 
 
 def test_rolling_source_tail_capped_at_two_lines(monkeypatch):
-    tr = make_translator()
+    tr = make_translator(context_between_pages=True)
 
     def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, **kwargs):
         n = len(srcs) if srcs else text.count("id=")
@@ -716,7 +723,7 @@ def test_rolling_source_tail_capped_at_two_lines(monkeypatch):
 
 
 def test_prompt_includes_continuation_context():
-    tr = make_translator()
+    tr = make_translator(context_between_pages=True)
     tr.rolling_context = "Я ставлю свой чемодан на одну из\nкроватей."
     tr.rolling_source_tail = "I put my suitcase and camera bag down on one of the"
     prompt = tr._build_llama_prompt("beds. A stocky young man comes in.", "en", "ru")
@@ -743,7 +750,7 @@ def test_prompt_no_continuation_block_when_empty():
 def test_rolling_tails_persist_across_pages(monkeypatch):
     """The main regression: tails must NOT be cleared between _translate()
     calls (pages), so page 2 starts with page 1's tail still in place."""
-    tr = make_translator()
+    tr = make_translator(context_between_pages=True)
 
     def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, **kwargs):
         if preserve_newlines and srcs == ["Hello there.", "How are you?"]:
@@ -794,7 +801,7 @@ def _capture_logs(tr, level=logging.DEBUG):
 def test_strip_duplication_across_page_break():
     """Main scenario: prev page ends '...on one of the' -> prev translation ends
     '...на одну из кроватей.' -> page-2 'Кровати. Входит...' must be stripped."""
-    tr = make_translator()
+    tr = make_translator(context_between_pages=True)
     translations = ["Кровати. Входит коренастый молодой человек."]
     tr._maybe_strip_leading_duplication(
         ["beds. A stocky young man comes in."], [0], translations,
@@ -847,7 +854,7 @@ def test_keep_legitimate_completion():
 
 
 def test_capitalization_restored():
-    tr = make_translator()
+    tr = make_translator(context_between_pages=True)
     translations = ["кровати. входит коренастый молодой человек."]
     tr._maybe_strip_leading_duplication(
         ["beds. A stocky young man comes in."], [0], translations,
@@ -858,7 +865,7 @@ def test_capitalization_restored():
 
 
 def test_exact_word_match_stripped():
-    tr = make_translator()
+    tr = make_translator(context_between_pages=True)
     translations = ["Кровати. Входит коренастый молодой человек."]
     tr._maybe_strip_leading_duplication(
         ["beds. A stocky young man comes in."], [0], translations,
@@ -880,7 +887,7 @@ def test_is_duplicate_word_inflection():
 
 
 def test_dedup_logs_warning_on_strip():
-    tr = make_translator()
+    tr = make_translator(context_between_pages=True)
     handler, cleanup = _capture_logs(tr, logging.DEBUG)
     try:
         translations = ["Кровати. Входит коренастый молодой человек."]
@@ -918,7 +925,7 @@ def test_dedup_skip_not_warning():
 def test_dedup_integrated_in_translate(monkeypatch):
     """Full flow: two consecutive pages via _translate() with mocked requests.
     Page 2's leading duplicate must be stripped deterministically."""
-    tr = make_translator()
+    tr = make_translator(context_between_pages=True)
 
     def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, **kwargs):
         if "beds." in text:
@@ -976,10 +983,10 @@ def test_single_alternative_spaced_variants_still_cut_without_source_separators(
 
 # ---------- _translate: per-line expansion of multi-line blocks (error26) ----------
 
-def test_translate_multiline_block_sent_line_by_line(monkeypatch):
-    """A multi-line block must reach the model as separate id=N elements
-    (one per physical line), not as one flattened phrase, and the result
-    must keep the block's line structure."""
+def test_translate_multiline_block_sent_as_single_element(monkeypatch):
+    """One block must reach the model as one numbered element (id) — a multi-line
+    block is NOT expanded into per-line elements, so the model returns exactly one
+    translation per block."""
     tr = make_translator()
     calls = []
 
@@ -988,53 +995,54 @@ def test_translate_multiline_block_sent_line_by_line(monkeypatch):
         return _resp(*[(i, f"TR{i}") for i in range(1, len(srcs) + 1)])
 
     monkeypatch.setattr(tr, "_request_translation", fake_request)
-    block = "LINE ONE\nLINE TWO\nLINE THREE"
+    # Short source (<=25 chars) so the low-ratio heuristic is skipped.
+    block = "A1\nB2\nC3"
     result = tr._translate(["OTHER", block])
-    # One numbered element per physical line: 1 + 3 = 4 elements.
+    # One element per block: 1 + 1 = 2 elements (the multi-line block stays whole).
     text, srcs = calls[0]
-    assert srcs == ["OTHER", "LINE ONE", "LINE TWO", "LINE THREE"]
-    assert text.count("id=") == 4
-    assert "id=2: LINE ONE" in text and "id=4: LINE THREE" in text
-    # Block structure is preserved in the output.
-    assert result == ["TR1", "TR2\nTR3\nTR4"]
+    assert srcs == ["OTHER", block]
+    assert text.count("id=") == 2
+    assert "id=1: OTHER" in text
+    assert "id=2: A1 B2 C3" in text
+    # Each block gets exactly one translation.
+    assert result == ["TR1", "TR2"]
 
 
-def test_translate_multiline_block_empty_lines_preserved(monkeypatch):
-    """Empty lines inside a block are not sent to the model but stay empty in
-    the reassembled block (line count is preserved)."""
+def test_translate_multiline_block_blank_only_filtered(monkeypatch):
+    """Whitespace-only blocks are filtered out (no element sent)."""
     tr = make_translator()
 
     def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, **kwargs):
         return _resp(*[(i, f"TR{i}") for i in range(1, len(srcs) + 1)])
 
     monkeypatch.setattr(tr, "_request_translation", fake_request)
-    result = tr._translate(["A\n\nB"])
-    assert result == ["TR1\n\nTR2"]
+    result = tr._translate([""])
+    assert result == [""]
 
 
-def test_translate_multiline_fallback_uses_line_not_block(monkeypatch):
-    """An empty translation falls back to the original LINE, not the whole
-    block, so the rest of the block keeps its translations."""
+def test_translate_multiline_fallback_uses_block(monkeypatch):
+    """An empty translation falls back to the original whole block."""
     tr = make_translator()
 
     def fake_batch(batch_src, batch_orig, translations):
         for pos, orig in enumerate(batch_orig):
-            translations[orig] = "" if batch_src[pos] == "LINE TWO" else f"TR-{batch_src[pos]}"
+            translations[orig] = ""  # empty -> fallback triggers
 
     monkeypatch.setattr(tr, "_translate_batch", fake_batch)
     result = tr._translate(["LINE ONE\nLINE TWO\nLINE THREE"])
-    assert result == ["TR-LINE ONE\nLINE TWO\nTR-LINE THREE"]
+    # Empty translation falls back to the whole original block.
+    assert result == ["LINE ONE\nLINE TWO\nLINE THREE"]
 
 
-def test_translate_multiline_rolling_tails_are_per_line(monkeypatch):
-    """Rolling context/source tails are per line now (matching the prompt's
-    'last lines' wording)."""
-    tr = make_translator()
+def test_translate_multiline_rolling_tails_are_per_block(monkeypatch):
+    """Rolling context/source tails are per block (last 2 source blocks / last
+    3 translated blocks)."""
+    tr = make_translator(context_between_pages=True)
 
     def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, **kwargs):
         return _resp(*[(i, f"TR{i}") for i in range(1, len(srcs) + 1)])
 
     monkeypatch.setattr(tr, "_request_translation", fake_request)
-    tr._translate(["L1\nL2\nL3"])
-    assert tr.rolling_source_tail == "L2\nL3"
-    assert tr.rolling_context == "TR1\nTR2\nTR3"
+    tr._translate(["L1", "L2\nL3"])
+    assert tr.rolling_source_tail == "L1\nL2\nL3"
+    assert tr.rolling_context == "TR1\nTR2"

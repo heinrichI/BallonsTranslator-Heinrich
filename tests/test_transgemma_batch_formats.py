@@ -39,6 +39,11 @@ def make_translator() -> TransGemmaTranslator:
         raise_unsupported_lang=False,
     )
     tr.n_ctx = 6144  # чтобы _fetch_context_window возвращался сразу, без сети
+    # Параметры хранятся на КЛАССЕ (self.params — это TransGemmaTranslator.params),
+    # поэтому updateParam("max tokens", 100) из тестов на batching протекает в
+    # последующие экземпляры. Ставим детерминированное значение, чтобы тесты не
+    # зависели от порядка исполнения. Значение == продакшн-дефолту.
+    tr.updateParam("max tokens", 4096)
     return tr
 
 
@@ -290,6 +295,64 @@ def test_translate_batch_single_element_skips_json_batch_path(monkeypatch):
 
 
 # ---------- echo retry ----------
+
+def test_is_echo_single_letter_not_flagged():
+    """Однобуквенное совпадение — не эхо.
+
+    Одиночная буква (обозначение персонажа в комиксе: "C", "V", "M", ...)
+    легитимно совпадает с исходником и не должна считаться копией перевода.
+    """
+    tr = make_translator()
+    assert tr._is_echo("C", "C") is False
+    assert tr._is_echo("c", "C") is False  # регистр не важен после нормализации
+    assert tr._find_problems(["C"], ["C"]) == []
+
+
+def test_is_echo_multi_char_kept_with_warning():
+    """Многосимвольное эхо больше НЕ считается проблемой.
+
+    Для непереводимых строк (бренды, адреса, аббревиатуры) эхо — корректный
+    результат: его оставляем as-is и лишь логируем warning (без бинарного
+    сплита). Детект `_is_echo` по-прежнему работает.
+    """
+    tr = make_translator()
+    assert tr._is_echo("Hello world", "Hello world") is True
+    assert tr._find_problems(["Hello world"], ["Hello world"]) == []
+
+
+def test_find_problems_echo_among_real_translations_kept():
+    """Эхо-строка в пачке не ломает остальные: только она остаётся as-is,
+    батч не сплитится (нет повторных запросов на непереводимые бренды)."""
+    tr = make_translator()
+    srcs = ["Real sentence here", "KODAK DISC", "Another real one", "FM"]
+    result = ["Настоящее предложение", "KODAK DISC", "Ещё одно настоящее", "FM"]
+    assert tr._find_problems(srcs, result) == []
+
+
+def test_translate_batch_with_echo_translates_in_one_request(monkeypatch):
+    """Регрессия: батч с эхо-строками переводится за ОДИН запрос.
+
+    Раньше каждая эхо-строка флагалась как проблема -> бинарный сплит ->
+    отдельный HTTP-запрос на каждый бренд/адрес. Теперь эхо оставляется
+    as-is, и весь батч уходит за один вызов `_request_translation`.
+    """
+    tr = make_translator()
+    calls = []
+
+    def fake_request(text, show_dialog=True, srcs=None, preserve_newlines=False, structured_output=True):
+        calls.append(text)
+        return _resp((1, "Привет мир"), (2, "KODAK DISC"), (3, "Как дела"), (4, "FM"))
+
+    monkeypatch.setattr(tr, "_request_translation", fake_request)
+    translations = [""] * 4
+    tr._translate_batch(
+        ["Hello world", "KODAK DISC", "How are you", "FM"],
+        [0, 1, 2, 3],
+        translations,
+    )
+    assert len(calls) == 1
+    assert translations == ["Привет мир", "KODAK DISC", "Как дела", "FM"]
+
 
 def test_translate_single_echo_retry_uses_second_response(monkeypatch):
     src = "The quick brown fox jumps over the lazy dog"

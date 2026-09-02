@@ -24,6 +24,9 @@ MAX_CONSECUTIVE_CONNECTION_ERRORS = 3
 # Token-budget constants for whole-first batching (see _pack_batches).
 PROMPT_OVERHEAD = 150          # tokens for the _build_llama_prompt template
 BATCH_SAFETY_FACTOR = 0.9      # 10% safety margin when packing
+OUTPUT_CAP_FACTOR = 0.5        # output cap for a single batch relative to max_tokens; keeps
+                               # batches small enough that their JSON always completes within
+                               # max_tokens (a truncated JSON forces a catastrophic full redo)
 OUTPUT_PER_ELEMENT = 15        # tokens for the {"id":N,"translation":"..."} wrapper
 OUTPUT_GROWTH_FACTOR = 1.3     # translation length growth factor
 MIN_BUDGET = 256               # lower bound for the token budget
@@ -196,6 +199,11 @@ class TransGemmaTranslator(BaseTranslator):
         "context": {
             "value": "",
             "description": "Дополнительный контекст/стиль, например: юмористический подростковый комикс. Вставляется в промпт (только llama-server). Оставьте пустым, если не нужен.",
+        },
+        "context between pages": {
+            "value": False,
+            "type": "checkbox",
+            "description": "Передавать контекст между страницами. Если включено, хвост предыдущей страницы учитывается при переводе для континуальности. По умолчанию выключено.",
         },
         "retry attempts": {
             "value": 1,
@@ -385,17 +393,20 @@ class TransGemmaTranslator(BaseTranslator):
     def _is_echo(self, src: str, tr: str) -> bool:
         """Detect the model echoing the source as the 'translation'.
 
-        An exact normalized match is always an echo. A near match (difflib
-        ratio >= ECHO_SIMILARITY) also counts, but only for strings of at
-        least ECHO_MIN_LEN normalized characters, to avoid false positives
-        on short, legitimately identical words (brand names, credits, ...).
+        An exact normalized match is always an echo, EXCEPT for a single
+        character: a lone letter is a legitimately identical token (comic
+        character designations like "C", "V", "M"), not a copied translation.
+        A near match (difflib ratio >= ECHO_SIMILARITY) also counts, but only
+        for strings of at least ECHO_MIN_LEN normalized characters, to avoid
+        false positives on short, legitimately identical words (brand names,
+        credits, ...).
         """
         n_src = self._normalize_for_echo(src)
         n_tr = self._normalize_for_echo(tr)
         if not n_src or not n_tr:
             return False
         if n_src == n_tr:
-            return True
+            return len(n_src) > 1
         if min(len(n_src), len(n_tr)) >= ECHO_MIN_LEN:
             return difflib.SequenceMatcher(None, n_src, n_tr).ratio() >= ECHO_SIMILARITY
         return False
@@ -403,11 +414,15 @@ class TransGemmaTranslator(BaseTranslator):
     def _find_problems(self, srcs: List[str], result: List[str]) -> List[int]:
         """Return indices of phrases whose translation is suspicious.
 
-        A problem is: empty translation for a non-empty source, an echoed
-        source (translation identical or nearly identical to the source вЂ”
-        the model copied it instead of translating), or a compression ratio
-        outside [0.40, 2.0] for sources longer than 25 chars (short phrases
-        skip the ratio check).
+        A problem is: empty translation for a non-empty source, an id-prefix
+        leak, or a compression ratio outside [0.40, 2.0] for sources longer
+        than 25 chars (short phrases skip the ratio check).
+
+        An echo of the source (\"WEBCOR ZIP\" -> \"WEBCOR ZIP\") is NOT treated
+        as a problem: for untranslatable strings it is the correct rendering,
+        so it is kept as-is and only warned about. Treating it as a problem
+        caused a binary split + per-element re-request for every brand/address/
+        abbreviation, multiplying round-trips per page.
         """
         problems = []
         for i, (src, tr) in enumerate(zip(srcs, result)):
@@ -423,13 +438,19 @@ class TransGemmaTranslator(BaseTranslator):
                 continue
             if self.provider != "llama-server" and self._has_id_leak(tr):
                 self.logger.warning(f"find_problems: idx={i} flagged (id-leak): {tr!r}")
-            if self._is_echo(src, tr):
-                # Model returned the source text as the translation (ratio ~= 1.0
-                # passes the ratio checks) вЂ” flag it so the batch binary-splits
-                # down to a per-phrase re-request.
-                self.logger.warning(f"find_problems: idx={i} flagged (echo/identity): {tr!r}")
-                problems.append(i)
-                continue
+            # if self._is_echo(src, tr):
+            #     # Untranslatable strings — proper nouns, brand names, addresses,
+            #     # numeric/product codes, abbreviations, song titles — are
+            #     # legitimately echoed verbatim by the model (e.g. "WEBCOR ZIP",
+            #     # "KODAK DISC", "FM", "BMX", "CLAIROL", "TSR DUNGEONS",
+            #     # "AM/FM"). Treating them as a "problem" binary-split the batch
+            #     # down to one per-element re-request for every such line —
+            #     # dozens of extra sequential round-trips per page. For these the
+            #     # echo IS the correct translation, so keep it and only warn.
+            #     self.logger.warning(
+            #         f"find_problems: idx={i} echoed/identity (untranslatable, kept): {tr!r}"
+            #     )
+            #     continue
             if len(src) > 25:
                 ratio = len(tr) / len(src)
                 if ratio < 0.40:
@@ -472,6 +493,17 @@ class TransGemmaTranslator(BaseTranslator):
     @property
     def presence_penalty(self) -> float: return float(self.get_param_value("presence penalty"))
     @property
+    def context_between_pages(self) -> bool:
+        try:
+            v = self.get_param_value("context between pages")
+        except (AssertionError, KeyError):
+            # Toggle absent (legacy config): default to disabled so each page
+            # is translated independently unless explicitly enabled.
+            return False
+        if isinstance(v, str):
+            return v.strip().lower() not in ("", "0", "false", "no", "off")
+        return bool(v)
+    @property
     def global_delay(self) -> float: return float(self.get_param_value("delay"))
 
     def _pack_batches(self, queries: List[str]) -> Generator[Tuple[str, int, List[int]], None, None]:
@@ -482,8 +514,21 @@ class TransGemmaTranslator(BaseTranslator):
         when it fits the budget; otherwise it is split into token-aware batches.
         """
         self._fetch_context_window()
-        budget = max(MIN_BUDGET, self.n_ctx - self.max_tokens - PROMPT_OVERHEAD)
+        # Double-accounting fix: the output space must NOT be reserved twice.
+        # max_tokens is already reflected in the per-element output_tokens
+        # tally checked below. Previously it was ALSO subtracted from the base
+        # budget, so on a ~4k context (budget = n_ctx - max_tokens - overhead
+        # → 256 = MIN_BUDGET) every page was crushed into tiny sequential
+        # batches of ~7 lines, each a separate ~5 s server round-trip.
+        budget = max(MIN_BUDGET, self.n_ctx - PROMPT_OVERHEAD)
         limit = budget * BATCH_SAFETY_FACTOR
+        # Hard cap on the batch's estimated output: if the whole batch alone
+        # would need more than max_tokens, the server truncates mid-JSON and
+        # the batch explodes into a catastrophic full redo (every element
+        # re-translated). Set generously below max_tokens (OUTPUT_CAP_FACTOR)
+        # so a batch's JSON always completes within the budget — bounding both
+        # the generation length and the risk of truncation.
+        output_cap = max(16, int(self.max_tokens * OUTPUT_CAP_FACTOR))
 
         current_prompt = ""
         current_indices: List[int] = []
@@ -509,8 +554,9 @@ class TransGemmaTranslator(BaseTranslator):
             if current_indices and (
                 len(current_prompt) + len(element) > MAX_LEN_APPROX
                 or current_prompt_tokens + prompt_tokens + current_output_tokens + output_tokens > limit
+                or current_output_tokens + output_tokens > output_cap
             ):
-                self.logger.debug(
+                self.logger.info(
                     f"Packing split: prompt_tokens={current_prompt_tokens + prompt_tokens}, "
                     f"output_tokens={current_output_tokens + output_tokens}, budget={budget}"
                 )
@@ -541,8 +587,14 @@ class TransGemmaTranslator(BaseTranslator):
         # rendered as one seamless continuation instead of two standalone
         # fragments (e.g. "...on one of the" / "beds." -> "...на одну из
         # кроватей", not "...на одну из них." + "Кровати.").
-        prev_src = getattr(self, "rolling_source_tail", "").strip()
-        prev_tr = getattr(self, "rolling_context", "").strip()
+        # Only when cross-page context is enabled: otherwise each page is
+        # translated fully independently with no previous-page continuity.
+        if self.context_between_pages:
+            prev_src = getattr(self, "rolling_source_tail", "").strip()
+            prev_tr = getattr(self, "rolling_context", "").strip()
+        else:
+            prev_src = ""
+            prev_tr = ""
         prev_parts = []
         if prev_src:
             prev_parts.append(
@@ -658,6 +710,7 @@ class TransGemmaTranslator(BaseTranslator):
                 },
             }
             self.logger.debug("Using 'json_schema' mode for LM Studio.")
+            # self.logger.debug(f"[TransGemma RAW REQUEST] provider='{provider}':\n{prompt}")
             try:
                 completion = self.client.chat.completions.create(**api_args)
             except Exception as e:
@@ -696,6 +749,7 @@ class TransGemmaTranslator(BaseTranslator):
                 self.logger.debug("Using raw '/v1/completions' with top-level json_schema for llama-server.")
             else:
                 self.logger.debug("Using raw '/v1/completions' in plain-text mode for llama-server.")
+            # self.logger.debug(f"[TransGemma RAW REQUEST] provider='{provider}' structured_output={structured_output}:\n{prompt}")
             try:
                 completion = self.client.completions.create(**api_args)
             except Exception as e:
@@ -709,6 +763,8 @@ class TransGemmaTranslator(BaseTranslator):
 
             if completion.choices and completion.choices[0].text:
                 raw_content = completion.choices[0].text
+
+        # self.logger.debug(f"[TransGemma RAW RESPONSE] provider={provider}:\n{raw_content}")
 
         if raw_content is None:
             self.logger.warning("No valid message content in API response.")
@@ -987,6 +1043,9 @@ class TransGemmaTranslator(BaseTranslator):
         that ends mid-sentence (otherwise the new text legitimately starts its
         own sentence and is never touched).
         """
+        if not self.context_between_pages:
+            self.logger.debug("dedup-check: skipped (context between pages disabled)")
+            return
         if not prev_src_tail or not prev_tr_tail:
             self.logger.debug("dedup-check: skipped (no previous context)")
             return
@@ -1055,24 +1114,14 @@ class TransGemmaTranslator(BaseTranslator):
 
     def _translate(self, src_list: List[str]) -> List[str]:
         if not src_list: return []
-        # Expand multi-line blocks into per-line entries BEFORE batching.
-        #
-        # Without this, a block with \n-separated lines (a TV schedule, credits,
-        # a multi-paragraph caption) reaches the model as a SINGLE "phrase"
-        # (newlines flattened to spaces) and TranslateGemma summarizes it into
-        # one short line instead of translating line by line (error26.txt).
-        # Per-line elements give the model one numbered element per physical
-        # line so it must render each line, keep the ratio/echo checks
-        # meaningful per line, and preserve the block's line count in the
-        # translation (better for text fitting).
-        expanded: List[str] = []
-        line_block: List[int] = []  # expanded line index -> block index in src_list
-        for bi, s in enumerate(src_list):
-            for ln in s.split("\n"):
-                expanded.append(ln)
-                line_block.append(bi)
-        # Filter out empty or trivially short texts вЂ” don't send them to the translator
-        # Strip soft hyphens (\u00AD) and check if meaningful text remains
+        # One block in = one numbered element (id) to the model. Blocks are NOT
+        # expanded per-line: a multi-line block reached the model as a single
+        # phrase with its newlines flattened to spaces (see _batch_text /
+        # _pack_batches), and the model returns exactly one translation per
+        # block. This is the desired b7f6768 behavior — keeping per-line
+        # expansion meant each page sent one id per physical line (7 blocks ->
+        # 17 elements), and on such large batches TranslateGemma dropped lines
+        # (empty translations), forcing slow binary-split re-translations.
         def _is_meaningful(s: str) -> bool:
             clean = s.replace('\u00AD', '').strip()
             if not clean:
@@ -1080,19 +1129,18 @@ class TransGemmaTranslator(BaseTranslator):
             # Must contain at least one letter or digit (not just punctuation/spaces)
             return any(c.isalpha() or c.isdigit() for c in clean)
 
-        non_empty_indices = [i for i, s in enumerate(expanded) if _is_meaningful(s)]
+        non_empty_indices = [i for i, s in enumerate(src_list) if _is_meaningful(s)]
         self.logger.debug(
-            f"_translate: src_list={len(src_list)} blocks ({len(expanded)} lines), "
-            f"non_empty={len(non_empty_indices)}"
+            f"_translate: src_list={len(src_list)} blocks, non_empty={len(non_empty_indices)}"
         )
-        for i, s in enumerate(expanded):
+        for i, s in enumerate(src_list):
             if not s.strip():
                 self.logger.debug(f"  filtered out [{i}]: repr={repr(s[:50])}")
         if not non_empty_indices:
             return [""] * len(src_list)
-        filtered_src = [expanded[i] for i in non_empty_indices]
+        filtered_src = [src_list[i] for i in non_empty_indices]
 
-        translations = [""] * len(expanded)
+        translations = [""] * len(src_list)
 
         for text, num_src, batch_orig_idx in self._pack_batches(filtered_src):
             batch_src = [filtered_src[k] for k in batch_orig_idx]
@@ -1109,23 +1157,23 @@ class TransGemmaTranslator(BaseTranslator):
             # Rolling tails are deliberately NOT reset between _translate()
             # calls (i.e. between pages): they persist so a sentence split
             # across a page boundary translates as one seamless continuation.
-            translated_tail = [t for t in translations if t.strip()][-3:]
-            self.rolling_context = "\n".join(translated_tail)
-            self.rolling_source_tail = "\n".join(batch_src[-2:])
+            # Only accumulate when cross-page context is enabled; otherwise the
+            # tails are cleared so no stale context from a previous page lingers.
+            if self.context_between_pages:
+                translated_tail = [t for t in translations if t.strip()][-3:]
+                self.rolling_context = "\n".join(translated_tail)
+                self.rolling_source_tail = "\n".join(batch_src[-2:])
+            else:
+                self.rolling_context = ""
+                self.rolling_source_tail = ""
 
-        # Fall back to the original LINE (not the whole block) when the
-        # translation of a line is empty.
+        # Fall back to the original block when its translation is empty.
         for i, t in enumerate(translations):
-            if not t.strip() and expanded[i].strip():
-                self.logger.warning(f"No translation for '{expanded[i][:30]}', using original text")
-                translations[i] = expanded[i]
+            if not t.strip() and src_list[i].strip():
+                self.logger.warning(f"No translation for '{src_list[i][:30]}', using original text")
+                translations[i] = src_list[i]
 
-        # Rejoin per-line results into the original block structure.
-        # split/join on "\n" is lossless, so a block's line count is preserved.
-        per_block: List[List[str]] = [[] for _ in src_list]
-        for t, bi in zip(translations, line_block):
-            per_block[bi].append(t)
-        return ["\n".join(block_lines) for block_lines in per_block]
+        return translations
     
     # Паттерн для утечки id-префикса — модель эхом возвращает "id=N: " из запроса.
     # НЕ включает хвостовой артефакт "}]}" — он безобиден для llama-server.
