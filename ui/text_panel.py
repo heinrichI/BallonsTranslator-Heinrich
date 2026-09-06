@@ -192,14 +192,28 @@ class FontSizeBox(QFrame):
     def getFontSize(self) -> str:
         return self.fcombobox.currentText()
 
+    def _parse_size(self) -> tuple:
+        """Parse the box's display text into (size, multi) — never raises.
+
+        Multi-size display text carries a '+' suffix ('15.3+') and the RU
+        locale validator accepts a comma decimal ('12,5'); both would crash
+        a bare float(). Unparseable text (e.g. an empty box) falls back to
+        the last valid value."""
+        txt = self.getFontSize().strip()
+        multi = txt.endswith('+')
+        txt = txt.rstrip('.,+')
+        if ',' in txt:
+            txt = txt.replace(',', '.')
+        if txt:
+            try:
+                return float(txt), multi
+            except ValueError:
+                pass
+        return float(self.fcombobox.value()), False
+
     def onUpBtnClicked(self):
         raito = 1.25
-        size = self.getFontSize()
-        multi_size=False
-        if "+" in size:
-            size = size.strip("+")
-            multi_size=True
-        size = float(size)
+        size, multi_size = self._parse_size()
         newsize = int(round(size * raito))
         if newsize == size:
             newsize += 1
@@ -214,12 +228,7 @@ class FontSizeBox(QFrame):
 
     def onDownBtnClicked(self):
         raito = 0.75
-        size = self.getFontSize()
-        multi_size=False
-        if "+" in size:
-            size = size.strip("+")
-            multi_size=True
-        size = float(size)
+        size, multi_size = self._parse_size()
         newsize = int(round(size * raito))
         if newsize == size:
             newsize -= 1

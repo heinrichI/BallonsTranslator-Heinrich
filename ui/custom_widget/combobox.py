@@ -120,6 +120,12 @@ class SizeComboBox(QComboBox):
         txt = self.currentText().strip()
         if not txt:
             return self._value
+        # The panel writes multi-size display text with a '+' suffix
+        # ("15.3+" — the cursor range spans several sizes). Strip it so the
+        # displayed number parses instead of float() raising on the panel's
+        # own display text (a debugger breaking on exceptions stops on the
+        # internal ValueError) and value() returning the stale _value.
+        txt = txt.rstrip('+')
         # Tolerate a trailing decimal separator while typing ("24.", "24,")
         # and a comma as the decimal separator ("24,5" — RU locale input);
         # without this the typed value is silently dropped (float() fails)
