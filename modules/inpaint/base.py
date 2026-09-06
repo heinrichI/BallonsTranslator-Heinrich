@@ -1,6 +1,6 @@
 import numpy as np
 import cv2
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from collections import OrderedDict
 import sys
 
@@ -362,7 +362,17 @@ class LamaInpainterMPE(InpainterBase):
     def _load_model(self):
         self.model = load_lama_mpe(r'data/models/lama_mpe.ckpt', self.device)
 
-    def inpaint_preprocess(self, img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def inpaint_preprocess(
+        self, img: np.ndarray, mask: np.ndarray,
+    ) -> Tuple[
+        'torch.Tensor', 'torch.Tensor', 'torch.Tensor', 'torch.Tensor',
+        np.ndarray, np.ndarray, int, int,
+    ]:
+        """Pad to a 64-aligned square after applying the configured size limit.
+
+        >>> (max(786, 172) + 63) // 64 * 64
+        832
+        """
 
         img_original = np.copy(img)
         mask_original = np.copy(mask)
@@ -372,13 +382,14 @@ class LamaInpainterMPE(InpainterBase):
 
         new_shape = self.inpaint_size if max(img.shape[0: 2]) > self.inpaint_size else None
         # high resolution input could produce cloudy artifacts
-        img = resize_keepasp(img, new_shape, stride=64)
-        mask = resize_keepasp(mask, new_shape, stride=64)
+        img = resize_keepasp(img, new_shape, stride=None)
+        mask = resize_keepasp(mask, new_shape, stride=None)
 
         im_h, im_w = img.shape[:2]
-        longer = max(im_h, im_w)
-        pad_bottom = longer - im_h if im_h < longer else 0
-        pad_right = longer - im_w if im_w < longer else 0
+        # Align by padding, not resampling, to preserve screentones and mask edges.
+        longer = (max(im_h, im_w) + 63) // 64 * 64
+        pad_bottom = longer - im_h
+        pad_right = longer - im_w
         mask = cv2.copyMakeBorder(mask, 0, pad_bottom, 0, pad_right, cv2.BORDER_REFLECT)
         img = cv2.copyMakeBorder(img, 0, pad_bottom, 0, pad_right, cv2.BORDER_REFLECT)
 
