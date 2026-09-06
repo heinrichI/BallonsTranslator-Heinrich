@@ -497,6 +497,17 @@ class FlowTextBlkItem(TextBlkItem):
         """
         self._update_flow_layout(adjust_font=adjust_font)
 
+    def _refit_font_size(self, target_w: float = None, target_h: float = None):
+        """Fit this flow block's font to its boundary control points
+        (preset-apply path). target_w/target_h are ignored — flow geometry
+        is derived from the control points, not the rect.
+        """
+        if not self._fully_initialized:
+            return
+        # Internal guards live in _update_flow_layout: _auto_font_adjust /
+        # let_fntsize_flag / _font_size_locked (flow_textitem.py:565-571).
+        self._update_flow_layout(adjust_font=True)
+
     def _update_flow_layout(self, adjust_font: bool = True):
         """Push current boundary functions to the layout engine and repaint.
 

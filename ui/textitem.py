@@ -68,6 +68,13 @@ class TextBlkItem(QGraphicsTextItem):
     propagate_user_edited = Signal(int, str, bool)
     toggle_flow_mode_requested = Signal(int)
 
+    # preset-apply refit: suppress the degenerate ReshapeItemCommand that
+    # shrink/grow would otherwise push (rect unchanged, size snapshots both
+    # post-adjust → undo no-op). Set by ApplyFontformatCommand.redo(refit=True)
+    # around _refit_font_size and checked in SceneTextManager.onTextBlkItemReshaped.
+    # Class-level so it defaults to False and is read/set on instances.
+    _reshape_suppressed: bool = False
+
     def __init__(self, blk: TextBlock = None, idx: int = 0, set_format=True, show_rect=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.pre_editing = False
@@ -846,6 +853,21 @@ class TextBlkItem(QGraphicsTextItem):
             return font_changed
         finally:
             self._auto_adjusting = False
+
+    def _refit_font_size(self, target_w: float = None, target_h: float = None):
+        """Fit this block's font size to its bounds (preset-apply path).
+
+        Delegates to _auto_adjust_font which owns all auto-size guards
+        (_auto_font_adjust / _font_size_locked / let_fntsize_flag /
+        horizontal-layout / valid _display_rect). No-op when auto-size is
+        disabled for this block.
+
+        target_w/target_h: the block size captured BEFORE the font change —
+        must be passed because set_fontformat overflow can expand
+        _display_rect in place (same reason the setRect hook captures
+        intended_w/h before setMaxSize, see setRect NOTE, textitem.py:555-566).
+        """
+        self._auto_adjust_font(target_w=target_w, target_h=target_h)
 
     def _update_block_layout(self, adjust_font: bool = True,
                              target_w: float = None, target_h: float = None):

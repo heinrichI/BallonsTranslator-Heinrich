@@ -804,6 +804,12 @@ class FontFormatPanel(Widget):
         finally:
             self._updating_stroke_display = False
 
+    def refresh_size_display(self) -> None:
+        """Public wrapper so programmatic callers (SceneTextManager) can force
+        the font-size box to re-sync after an auto-size refit, without
+        requiring a focus-in on the box."""
+        self._refresh_font_size_display()
+
     def set_textblk_item(self, textblk_item: TextBlkItem = None, multi_select:bool=False):
         if textblk_item is None:
             focus_w = self.app.focusWidget()

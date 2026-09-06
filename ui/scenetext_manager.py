@@ -395,7 +395,7 @@ class SceneTextManager(QObject):
         self.textEditList.selection_changed.connect(self.on_transwidget_selection_changed)
         self.textEditList.rearrange_blks.connect(self.on_rearrange_blks)
         self.formatpanel = textpanel.formatpanel
-        self.formatpanel.textstyle_panel.apply_fontfmt.connect(self.onFormatTextblks)
+        self.formatpanel.textstyle_panel.apply_fontfmt.connect(self._on_preset_font_applied)
 
         self.imgtrans_proj = self.canvas.imgtrans
 
@@ -1025,6 +1025,14 @@ class SceneTextManager(QObject):
             self.push_undo_command(MoveBlkItemsCommand(selected_blks, self.txtblkShapeControl))
         
     def onTextBlkItemReshaped(self, item: TextBlkItem):
+        # Suppress the degenerate ReshapeItemCommand during programmatic
+        # preset-apply refit: the rect does not change and the font-size
+        # snapshots are both taken post-adjust, so the command would be an
+        # undo no-op. Flag-based suppression (not blockSignals) so
+        # FlowPresenter._on_reshaped (which persists flow control points)
+        # still receives the signal — refit only changes font size.
+        if getattr(item, '_reshape_suppressed', False):
+            return
         self.push_undo_command(ReshapeItemCommand(item))
 
     def onTextBlkItemRotated(self, new_angle: float):
@@ -1072,6 +1080,16 @@ class SceneTextManager(QObject):
         if fmt is None:
             fmt = self.formatpanel.global_format
         self.apply_fontformat(fmt)
+
+    def _on_preset_font_applied(self, fmt: FontFormat):
+        """Apply a font from the saved-styles panel, then fit size to blocks.
+
+        Refit runs inside ApplyFontformatCommand.redo(refit=True), so the
+        fitted size belongs to the same undo step as the font change (redo
+        re-fits symmetrically). No-op per item when auto-size is disabled.
+        """
+        self.apply_fontformat(fmt, refit=True)
+        self.formatpanel.refresh_size_display()
 
     def ensure_text_in_block(self, blkitem: TextBlkItem):
         """
@@ -1281,13 +1299,13 @@ class SceneTextManager(QObject):
         propagate_user_edit(edit, blk_item, pos, added_text, joint_previous)
         self.canvas.push_undo_command(command=None, update_pushed_step=True)
 
-    def apply_fontformat(self, fontformat: FontFormat):
+    def apply_fontformat(self, fontformat: FontFormat, refit: bool = False):
         selected_blks = self.canvas.selected_text_items()
         trans_widget_list = []
         for blk in selected_blks:
             trans_widget_list.append(self.pairwidget_list[blk.idx].e_trans)
         if len(selected_blks) > 0:
-            self.push_undo_command(ApplyFontformatCommand(selected_blks, trans_widget_list, fontformat), is_text=True)
+            self.push_undo_command(ApplyFontformatCommand(selected_blks, trans_widget_list, fontformat, refit=refit), is_text=True)
             if self.formatpanel.global_mode():
                 if id(self.formatpanel.active_text_style_format()) != id(fontformat):
                     self.formatpanel.deactivate_style_label()

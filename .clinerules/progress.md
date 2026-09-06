@@ -25,6 +25,7 @@
 - CTD-based refinemask integration in detectors: `refine_mask(img, coarse_mask, blk_list)` returns per-character masks when blk_list aligns to text lines.
 - Debug tooling: scripts to run detector and compare masks.
 - Russian comments added to CTD detector and CTD basemodel/inference files for maintainability.
+- **Preset-apply auto-refit**: applying a saved-styles preset auto-shrinks/grows font size to fit blocks when auto-size is on. Implemented in `ApplyFontformatCommand` (`refit` flag) so refit belongs to the same undo step and redo re-fits symmetrically; degenerate `ReshapeItemCommand` suppressed via `_reshape_suppressed`. 9 tests in `tests/ui/test_preset_font_autosize.py` (shrink, global-size flag, lock, flow fit, redo-symmetry, single-step, no-selection).
 
 ## What's Left
 - Split large merged blocks into lines before calling `refine_mask` to obtain character-level masks instead of block masks.
@@ -77,6 +78,7 @@ All known issues (vertical mode alignment, text clipping, _display_rect regressi
 17. Updated `_auto_shrink_font()` to trigger on char-level breaks even without vertical overflow — two-stage strategy: hyphenation first, then shrink if needed
 18. Expanded test suite to 25 tests — added 9 hyphenation tests
 19. Overrode `setHtml()` and `setPlainTextAndKeepUndoStack()` to apply hyphenation before passing text to layout
+20. Chose **Variant B** for preset-apply auto-refit: refit lives inside `ApplyFontformatCommand.redo(refit=True)` (not in the manager handler) so redo re-fits symmetrically and the command is directly testable on a `QUndoStack`. Refit suppression is consumer-side via `_reshape_suppressed` flag.
 ## Next Milestones
 - [ ] Implement splitting of oversized merged blocks into lines and re-run diagnostics.
 - [ ] Add unit tests for `_safe_box_from_item` and split logic.

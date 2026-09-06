@@ -72,7 +72,7 @@ class MoveBlkItemsCommand(QUndoCommand):
 
 
 class ApplyFontformatCommand(QUndoCommand):
-    def __init__(self, items: List[TextBlkItem], trans_widget_lst: List[TransTextEdit], fontformat: FontFormat):
+    def __init__(self, items: List[TextBlkItem], trans_widget_lst: List[TransTextEdit], fontformat: FontFormat, refit: bool = False):
         super(ApplyFontformatCommand, self).__init__()
         self.items = items
         self.old_html_lst = []
@@ -80,15 +80,43 @@ class ApplyFontformatCommand(QUndoCommand):
         self.old_fmt_lst = []
         self.new_fmt = fontformat
         self.trans_widget_lst = trans_widget_lst
+        self.refit = refit
+        self._refit_targets: dict = {}
         for item in items:
             self.old_html_lst.append(item.toHtml())
             self.old_fmt_lst.append(item.get_fontformat())
             self.old_rect_lst.append(item.absBoundingRect(qrect=True))
 
+    def _capture_refit_targets(self) -> dict:
+        """Intended block sizes (full display rect) right before a font
+        change. Must be captured BEFORE set_fontformat: its overflow can
+        expand _display_rect in place (same reason the setRect hook captures
+        intended_w/h before setMaxSize, see setRect NOTE, textitem.py:555-566).
+        """
+        return {
+            id(item): (item._display_rect.width(), item._display_rect.height())
+            if item._display_rect is not None else (None, None)
+            for item in self.items
+        }
+
     def redo(self):
+        if self.refit:
+            # Re-derived on every redo: the user may have resized blocks
+            # between undo and redo, so refit against the current bounds.
+            self._refit_targets = self._capture_refit_targets()
         for item, edit in zip(self.items, self.trans_widget_lst):
             item.set_fontformat(self.new_fmt, set_char_format=True)
             edit.document().clearUndoRedoStacks()
+        if self.refit:
+            # Refit must not push a degenerate ReshapeItemCommand
+            # (see SceneTextManager.onTextBlkItemReshaped).
+            for item in self.items:
+                tw, th = self._refit_targets.get(id(item), (None, None))
+                item._reshape_suppressed = True
+                try:
+                    item._refit_font_size(tw, th)
+                finally:
+                    item._reshape_suppressed = False
 
     def undo(self):
         for rect, item, html, fmt, edit in zip(self.old_rect_lst, self.items, self.old_html_lst, self.old_fmt_lst, self.trans_widget_lst):
