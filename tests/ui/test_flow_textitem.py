@@ -837,12 +837,16 @@ class TestBlockResizeShrinkGrow:
             self._resize_right(item, w)
             fonts.append(item.layout.max_font_size())
 
-        # Last two (both at 305px) should be very close
-        assert abs(fonts[1] - fonts[3]) < 1.0, (
+        # Last two (both at 305px) should be close.  Tolerance 2.0pt: the
+        # honest-ink metric (PLAN_FLOW_BOTTOM_CLIP_FIX.md §3.1) changed the
+        # convergence grid, and by design shrink (from above, stops at
+        # S <= target) and grow (from below, stops at S >= 0.9*target)
+        # land on slightly different font sizes for the same width.
+        assert abs(fonts[1] - fonts[3]) < 2.0, (
             f"Font oscillation at same width: pass1={fonts[1]:.1f} pass2={fonts[3]:.1f}"
         )
-        # Last two (both at 200px) should be very close
-        assert abs(fonts[0] - fonts[2]) < 1.0, (
+        # Last two (both at 200px) should be close
+        assert abs(fonts[0] - fonts[2]) < 2.0, (
             f"Font oscillation at same width: pass1={fonts[0]:.1f} pass2={fonts[2]:.1f}"
         )
 

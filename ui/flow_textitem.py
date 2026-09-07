@@ -331,12 +331,27 @@ class FlowTextBlkItem(TextBlkItem):
                 self.update()
 
     def _update_display_rect_from_control_points(self):
-        """Update _display_rect dimensions from control points or document size."""
+        """Update _display_rect to track the actual text span.
+
+        Convention (shared with absBoundingRect()): the display rect contains
+        the padding — for flow items padding() == doc_margin — so consumers
+        subtract 2*pad to get the text span (w = display_w - 2*pad).
+
+        Only the TOP is new: y follows the text (doc_margin == min_y; Qt
+        honours negative margins, so with the top handle the text is shifted
+        up together with it).  The old code kept y=0 forever, so for
+        min_y < 0 the base boundingRect/clip started at 0 while the ink
+        started at min_y (the CP-rect union in FlowTextBlkItem.boundingRect()
+        rescued clipping, but the base rect / pixmap bounds were stale).
+        For the common case (min_y = 0, dm = 0) the result is identical to
+        the previous geometry.
+        """
         doc_margin = self.document().documentMargin()
         if self._left_points and self._right_points:
             all_xs = [p.x() for p in self._left_points] + [p.x() for p in self._right_points]
             text_w = max(all_xs) - min(all_xs)
             text_h = self.layout.shrink_height if hasattr(self.layout, 'shrink_height') and self.layout.shrink_height > 0 else self.documentSize().height() - 2 * doc_margin
+            self._display_rect.setY(doc_margin)
             self._display_rect.setWidth(text_w + 2 * doc_margin)
             self._display_rect.setHeight(text_h + 2 * doc_margin)
         else:
@@ -344,6 +359,25 @@ class FlowTextBlkItem(TextBlkItem):
             if size.width() > 0 and size.height() > 0:
                 self._display_rect.setWidth(size.width())
                 self._display_rect.setHeight(size.height())
+
+    def commit_flow_geometry(self, *args):
+        """Canonical flow-geometry commit (single funnel for all mutators).
+
+        Order matters (Qt contract): prepareGeometryChange() MUST be called
+        before the new geometry (_display_rect / boundingRect) is used for
+        clipping or painting — otherwise the stroke cache
+        (DeviceCoordinateCache) and the background/outline pixmap
+        (br.toRect()) are drawn against stale bounds and artifacts appear
+        during handle drags (PLAN_FLOW_BOTTOM_CLIP_FIX.md §3.5).
+
+        All paths that mutate _display_rect or flow control points must go
+        through this method (or _update_flow_layout, which does).
+        """
+        self.prepareGeometryChange()
+        self._update_display_rect_from_control_points()
+        self.save_flow_points()
+        if self._left_points and self._right_points:
+            self.sync_coordinates()
 
     def setPlainText(self, text: str = ''):
         """Override to ensure flow layout boundaries are applied after text changes.
@@ -635,15 +669,13 @@ class FlowTextBlkItem(TextBlkItem):
                         self.layout.available_height = effective_h * ratio
                         self.layout.reLayout()
 
+            self.commit_flow_geometry()
             self.repaint_background()
             self.update()
         finally:
             self._updating_flow = False
-        # Update _display_rect AFTER flow layout completes.
-        self._update_display_rect_from_control_points()
-        self.save_flow_points()
-        if self._left_points and self._right_points:
-            self.sync_coordinates()
+        # PGC + _display_rect + points/coords sync AFTER flow layout completes.
+        self.commit_flow_geometry()
 
         # Log tracked blocks after flow layout update
         if self._left_points and self._right_points:
@@ -824,16 +856,15 @@ class FlowTextBlkItem(TextBlkItem):
         # the red dashed border from resizing when dragging the top resize handle.
         if self._updating_flow:
             return
-        self._update_display_rect_from_control_points()
+        self.commit_flow_geometry()
         self.setCenterTransform()
-        self.prepareGeometryChange()
         self.update()
 
     def docSizeChanged(self):
         # For flow items: guard against _display_rect changes during flow updates.
         if self._updating_flow:
             return
-        self._update_display_rect_from_control_points()
+        self.commit_flow_geometry()
         self.setCenterTransform()
         self.update()
 
@@ -958,8 +989,8 @@ class FlowTextBlkItem(TextBlkItem):
 
     def _after_add_point(self):
         """Refresh layout and rebuild shape handles after adding a point."""
+        # _update_flow_layout commits the geometry (PGC + display rect + sync)
         self._update_flow_layout()
-        self.prepareGeometryChange()
         self.update()
         scene = self.scene()
         if scene is not None:

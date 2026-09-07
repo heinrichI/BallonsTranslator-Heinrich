@@ -185,10 +185,54 @@ class FontAutoAdjuster:
             text_extent = layout.shrink_height
             text_width = layout.shrink_width
             width_ok = text_width <= target_width if target_width > 0 else True
+            height_overflow = text_extent > target_height
 
-            if not width_ok:
-                self._log("  _auto_grow iter %d: width overflow %.1f>%.1f, STOP" %
-                             (iteration, text_width, target_width))
+            if not width_ok or height_overflow:
+                if not width_ok:
+                    self._log("  _auto_grow iter %d: width overflow %.1f>%.1f, correct" %
+                                 (iteration, text_width, target_width))
+                else:
+                    self._log("  _auto_grow iter %d: height overflow %.1f>%.1f, correct" %
+                                 (iteration, text_extent, target_height))
+                # The growth step overshot the boundary.  A full step rollback
+                # (the earlier §3.7 fix) left the font ~8% smaller than it
+                # should be in overflow cases.  Instead, scale the font
+                # proportionally so the binding dimension lands just inside the
+                # target, then confirm — shrink_height is NOT monotonic in font
+                # size (line reflow / char-level breaks), so a single linear
+                # correction may still overflow and needs one confirming shrink
+                # (PLAN_FLOW_BOTTOM_CLIP_FIX.md §3.7).
+                cur = layout.max_font_size()
+                if cur > 0:
+                    if height_overflow:
+                        factor = (target_height / max(text_extent, 1)) * 0.999
+                    else:
+                        factor = (target_width / max(text_width, 1)) * 0.999
+                    factor = min(factor, 1.0)
+                    self._log("  _auto_grow: correcting font by factor %.3f" % factor)
+                    self._internal_font_change = True
+                    try:
+                        self._change_font_size(factor)
+                    finally:
+                        self._internal_font_change = False
+                    layout.available_height = target_height
+                    layout.max_height = target_height + doc_margin * 2
+                    layout.reLayout()
+                    t_e = layout.shrink_height
+                    t_w = layout.shrink_width
+                    still_h = t_e > target_height
+                    still_w = (t_w > target_width) if target_width > 0 else False
+                    if still_h or still_w:
+                        self._log("  _auto_grow: correction still overflows (h=%.1f w=%.1f), extra shrink 0.95" %
+                                     (t_e, t_w))
+                        self._internal_font_change = True
+                        try:
+                            self._change_font_size(0.95)
+                        finally:
+                            self._internal_font_change = False
+                        layout.available_height = target_height
+                        layout.max_height = target_height + doc_margin * 2
+                        layout.reLayout()
                 break
 
             height_ok = text_extent >= target_height * 0.90

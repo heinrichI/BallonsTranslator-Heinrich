@@ -203,3 +203,64 @@ Unit tests with "Hello world" don't catch flow layout bugs. Test with:
 - `TestAutoFontAdjustFlag` — flag survives shrink/grow cycles
 - `TestBlockResizeShrinkGrow` — shrink/grow on handle drag
 - `TestEmptyBlockNoGrow` — no font change on empty blocks
+
+---
+
+## Обновление (2026-08-17): нижняя строка обрезается после авторазмера
+
+Полный разбор — в `PLAN_FLOW_BOTTOM_CLIP_FIX.md` (поглощает `PLAN_flowtext_bottom_clip.md`).
+Коротко:
+
+**Симптом**: детерминированно, зависит от шрифта/букв/размера: после авторазмера
+нижняя часть последней строки вылезает за ограничивающую линию и клипится
+boundingRect-ом (BOMGcomPsuedoSaudi + «г»: ink 270 vs br 266.8; sweep: 30/60 красных кейсов).
+
+**Причины** (всё было подтверждено оффскрин-пробами до правки):
+1. **Метрика**: `shrink_height` мерял tight-bottom базовой строки «木fg», а не реальный
+   инк. В большинстве из 330 шрифтов base bottom = 2–8px, тогда как обычные глифы
+   уходят ниже на 1–17px; компенсировались только 8 хардкод-букв (`_DESCENDER_CHARS`).
+   После shrink/grow S ≤ target, но инк = S + дефицит > target → клип.
+2. **Grow-переполнение**: `FontAutoAdjuster.grow()` мог остановиться на шрифте,
+   который уже не влезает (shrink_height не монотонен по размеру из-за перефлоу).
+3. **Geometry**: `_update_display_rect_from_control_points` не двигал `y` (всегда 0) —
+   при `min_y < 0` (Qt уважает отрицательный documentMargin, показано пробом) базовый
+   rect/пиксмап отставали от текста (клиппинг спасал union boundingRect с CP-rect).
+
+**Правки**:
+- `ui/scene_textlayout.py` — `layoutBlock`: `shrink_height` = максимум
+  `line.naturalTextRect().bottom()` (что реально рисует Qt, включая fallback-глифы);
+  удалены `_DESCENDER_BASE_STR`/`_DESCENDER_CHARS`/`_descender_gap()` (эвристика
+  заменена честным измерением).
+- `ui/font_auto_adjuster.py` — `grow()`: при переполнении после шага grow
+  пропорциональное масштабирование к границе (`factor = target/extent · 0.999`)
+  + подтверждающий shrink 0.95 (немоноотонный reflow). (v1 — откат к
+  `last_good_size` — заменён: он оставлял шрифт на шаг 8% меньше влезшего.)
+- `ui/flow_textitem.py` — `commit_flow_geometry()`: единая воронка
+  `prepareGeometryChange()` → display-rect → `save_flow_points` → `sync_coordinates`
+  (все мутаторы геометрии идут через неё, в т.ч. `_update_flow_layout` и
+  `repaint_background` после коммита); `_update_display_rect_from_control_points`:
+  `setY(doc_margin)` (width/height сохраняют конвенцию «display-rect содержит
+  padding», её вычитают потребители, напр. `absBoundingRect`).
+
+**Тесты**: `tests/ui/test_flow_resize_bottom_clip.py` (12 тестов: красные кейсы
+A.C.M.E/г, BOMGcom004/д, BOMGcomPsuedoSaudi/г, v_Blambot Casual MOD/щ,
+fallback-кейс, отрицательные CP). Фикстура регистрирует только 4 нужных шрифта
+(addApplicationFont необратим — масса шрифтов смещает fallback у других тестов).
+Толеранс осцилляции в `test_multiple_resizes_no_oscillation` 1.0→2.0pt
+(конвергенция-грид сместился: shrink останавливается на S ≤ target, grow — на
+S ≥ 0.9·target — по дизайну).
+
+**Регрессия того же дня (поймана пользователем: «шрифт везде меньше, чем
+должен»)**: промежуточная метрика была `y_offset + dy + naturalTextRect().bottom()`
+— двойной учёт позиции строки (`naturalTextRect()` возвращается в АБСОЛЮТНЫХ
+координатах лейаута: его `top() == line.position().y()`). `shrink_height`
+раздувался ~в 2 раза на многострочных блоках → авторазмер давал шрифт вдвое
+меньше. Исправлено: `ink_bottom = ntr.bottom()` без `y_offset + dy`. A/B с
+HEAD-`FontAutoAdjuster` подтвердил: при честной метрике 5/6 кейсов дают
+идентичные размеры, а в width-ограниченном старая `grow()` оставляла текст в
+переполнении (S=125.4 > target=120) — т.е. исходный баг вылезания за линию.
+Попутно поправлен контракт `test_layout_metric_covers_ink`: текст в flow-блоках
+всегда центрируется (`VERTICAL_CENTER` + `_vertical_center_always`), сдвиг
+`(max_height − S)/2 − dm` добавляется к ink ПОСЛЕ расчёта `shrink_height`;
+test учитывает сдвиг (раньше проходил только благодаря раздутой метрике —
+ложная позитивность).
