@@ -18,26 +18,27 @@ from .page_search_widget import PageSearchWidget, Matched
 from utils.proj_imgtrans import ProjImgTrans
 from .scene_textlayout import PUNSET_HALF
 from .undo_manager import TextUndoCommand
+from .text_sync import apply_edit, write_clean_text, replace_spans_in_doc, write_model_text
+from . import text_coords as TC
 
 LOGGER = logging.getLogger('BallonTranslator')
 
 
-def propagate_user_edit(src_edit: Union[TransTextEdit, TextBlkItem], target_edit: Union[TransTextEdit, TextBlkItem], pos: int, added_text: str, joint_previous: bool = False):
-    ori_count = target_edit.document().characterCount()
-    new_count = src_edit.document().characterCount()
-    removed = ori_count + len(added_text) - new_count
+def propagate_user_edit(src_edit: Union[TransTextEdit, TextBlkItem], target_edit: Union[TransTextEdit, TextBlkItem], pos: int, added_text: str, joint_previous: bool = False, removed: int = None):
+    """Перенос одной пользовательской правки между панелью и item.
 
-    cursor = target_edit.textCursor()
-    cursor.setPosition(pos)
-    if joint_previous:
-        cursor.joinPreviousEditBlock()
-    else:
-        cursor.beginEditBlock()
-    if removed > 0:
-        cursor.setPosition(pos + removed, QTextCursor.MoveMode.KeepAnchor)
-    cursor.insertText(added_text)
-    cursor.endEditBlock()
-    target_edit.old_undo_steps = target_edit.document().availableUndoSteps()
+    Реальная работа — в :func:`ui.text_sync.apply_edit`: позиция переводится
+    в пространство целевого документа через CLEAN-координаты, а ``removed``
+    берётся из ``QTextDocument::contentsChange`` (4-й аргумент сигнала
+    ``propagate_user_edited``).
+
+    Прежняя реализация выводила ``removed`` из разницы ``characterCount()``
+    двух РАЗНЫХ документов и применяла позицию источника вербатим — на
+    flow-блоке (в документе которого сидят soft hyphens) это приводило к
+    «пережёванному» тексту в баллоне (bug1.txt).
+    """
+    return apply_edit(src_edit, target_edit, pos, added_text, joint_previous,
+                      removed, where=f"blk idx={getattr(src_edit, 'idx', '?')}")
 
 
 class MoveBlkItemsCommand(QUndoCommand):
@@ -244,19 +245,28 @@ class AutoLayoutCommand(QUndoCommand):
         if self.counter <= 1:
             return
         for item, trans_widget, html, rect  in zip(self.items, self.trans_widget_lst, self.new_html_lst, self.new_rect_lst):
-            trans_widget.setPlainText(item.toPlainText())
+            # в панель льётся CLEAN: item (flow) содержит U+00AD, и после
+            # такой записи панель перестаёт быть чистой, а idempotence-guard
+            # гифенизации больше её не перегифенизирует → H «едет» на
+            # середине сессии (L1)
             item.setPlainText('')
             item.setRect(rect, repaint=False)
             item.setHtml(html)
+            # панель снимается с item ПОСЛЕ того, как item приведён к новому
+            # состоянию: раньше она писала текущий (ещё старый) текст item и
+            # после этого item откатывался — панель и баллон разъезжались
+            write_clean_text(trans_widget, item.toPlainText(),
+                             where="AutoLayoutCommand.redo")
             if item.fontformat.letter_spacing != 1:
                 item.setLetterSpacing(item.fontformat.letter_spacing, force=True)
             
     def undo(self):
         for item, trans_widget, html, rect  in zip(self.items, self.trans_widget_lst, self.old_html_lst, self.old_rect_lst):
-            trans_widget.setPlainText(item.toPlainText())
             item.setPlainText('')
             item.setRect(rect, repaint=False)
             item.setHtml(html)
+            write_clean_text(trans_widget, item.toPlainText(),
+                             where="AutoLayoutCommand.undo")
             if item.fontformat.letter_spacing != 1:
                 item.setLetterSpacing(item.fontformat.letter_spacing, force=True)
 
@@ -407,11 +417,19 @@ class PageReplaceOneCommand(QUndoCommand):
                 self.sw.result_pos = 0
 
         if not self.edit_is_src:
+            # Спан получен из ПАНЕЛИ (чистый текст), а применяется документу
+            # item, у которого в flow-режиме внутри сидят soft hyphens —
+            # вербатимные координаты режут не то слово (PLAN §2.1, S1).
+            item_text = self.blkitem.document().toPlainText()
+            cs = TC.clean_offset(self.edit.toPlainText(), self.sel_start)
+            ce = TC.clean_offset(self.edit.toPlainText(), self.sel_start + self.ori_len)
+            item_start = TC.doc_start_for_clean(item_text, cs)
+            item_end = TC.doc_end_for_clean(item_text, ce)
             cursor = self.blkitem.textCursor()
-            cursor.setPosition(self.sel_start)
-            cursor.setPosition(self.sel_start+self.ori_len, QTextCursor.MoveMode.KeepAnchor)
+            cursor.setPosition(item_start)
+            cursor.setPosition(item_end, QTextCursor.MoveMode.KeepAnchor)
             cursor.beginEditBlock()
-            cursor.insertText(self.reptxt)
+            cursor.insertText(TC.normalize_edit_text(self.reptxt))
             cursor.endEditBlock()
 
         self.rep_cursor = self.edit.textCursor()
@@ -472,9 +490,12 @@ class PageReplaceAllCommand(QUndoCommand):
                 blkitem = self.sw.textblk_item_list[edit.idx]
                 self.blkitem_list.append(blkitem)
             span_list = [[matched.start, matched.end] for matched in curpos_lst]
+            # матчи считались по панели (clean) — панельный текст ДО замен
+            # нужен как референс для переноса спанов в hyphenated-документ
+            panel_ref = edit.document().toPlainText()
             sel_list = doc_replace(edit.document(), span_list, replace)
             if redo_blk:
-                doc_replace_no_shift(blkitem.document(), sel_list, replace)
+                replace_spans_in_doc(blkitem.document(), panel_ref, span_list, replace)
                 blkitem.updateUndoSteps()
 
     def redo(self):
@@ -510,9 +531,10 @@ class GlobalRepalceAllCommand(TextUndoCommand):
             edit: TransTextEdit = trans_dict['edit']
             item: TextBlkItem = trans_dict['item']
             matched_map = trans_dict['matched_map']
+            panel_ref = edit.document().toPlainText()
             sel_list = doc_replace(edit.document(), matched_map, target_text)
 
-            doc_replace_no_shift(item.document(), sel_list, target_text)
+            replace_spans_in_doc(item.document(), panel_ref, matched_map, target_text)
             item.updateUndoSteps()
             item.updateUndoSteps()
 
@@ -541,7 +563,10 @@ class GlobalRepalceAllCommand(TextUndoCommand):
 
         for trans_dict in self.btrans_list:
             blk: TextBlock = self.proj.pages[trans_dict['pagename']][trans_dict['idx']]
-            blk.translation = trans_dict['replace']
+            # I2: снимок фонового replace мог быть снят с hyphenated rich_text
+            # (L3) — модель остаётся clean
+            write_model_text(blk, trans_dict['replace'],
+                             where='GlobalRepalceAllCommand.redo')
             blk.rich_text = trans_dict['replace_html']
 
         for src_dict in self.bsrc_list:
@@ -561,7 +586,8 @@ class GlobalRepalceAllCommand(TextUndoCommand):
 
         for trans_dict in self.btrans_list:
             blk: TextBlock = self.proj.pages[trans_dict['pagename']][trans_dict['idx']]
-            blk.translation = trans_dict['ori']
+            write_model_text(blk, trans_dict['ori'],
+                             where='GlobalRepalceAllCommand.undo')
             blk.rich_text = trans_dict['ori_html']
 
         for src_dict in self.src_list:
@@ -581,7 +607,8 @@ class MultiPasteCommand(QUndoCommand):
                 text_list = [text_list] * len(blkitems)
 
         for blkitem, etran, text in zip(self.blkitems, self.etrans, text_list):
-            etran.setPlainTextAndKeepUndoStack(text)
+            text = write_clean_text(etran, text, where="MultiPasteCommand",
+                                    keep_undo=True)
             blkitem.setPlainTextAndKeepUndoStack(text)
 
     def redo(self):

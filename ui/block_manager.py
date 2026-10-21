@@ -9,6 +9,8 @@ from typing import List, Optional, Set
 from qtpy.QtCore import QObject, Signal
 
 from .textitem import TextBlkItem, TextBlock
+from .text_sync import write_model_text, write_clean_text
+from . import text_coords as TC
 from .flow_textitem import FlowTextBlkItem
 from .textedit_area import TransPairWidget, TextEditListScrollArea
 from utils.fontformat import FontFormat
@@ -129,9 +131,35 @@ class BlockManager(QObject):
 
         cbl.clear()
         for blk_item, trans_pair in zip(self.textblk_item_list, self.pairwidget_list):
+            # I7 (последняя линия перед save): панель — канал ввода, поэтому
+            # её текст и текст item обязаны описывать одно и то же. После
+            # фикса (этим PR) любой штатный переписчик (auto-layout,
+            # paste, updateTranslation) пишет и в панель тоже, так что
+            # расхождение здесь — порча, а не «панель отстала»: item
+            # пере-синкается по панели, и в проект-файл уходит текст
+            # пользователя, а не испорченное зеркало (§5.2, §6).
+            panel = getattr(trans_pair, 'e_trans', None)
+            if panel is not None:
+                item_text = blk_item.toPlainText()
+                ok, reason = TC.texts_match(item_text, panel.toPlainText())
+                if not ok:
+                    LOGGER.error(
+                        "[SYNC] I7 pre-save MISMATCH blk idx=%s: %s\n"
+                        "  panel : %r\n  item  : %r\n"
+                        "  hint: item пере-синкается по панели (канал ввода); "
+                        "в проект-файл сохраняется текст панели "
+                        "(см. PLAN_panel_edit_propagation.md §5.2 I7)",
+                        blk_item.idx, reason, panel.toPlainText(),
+                        item_text)
+                    write_clean_text(blk_item, panel.toPlainText(),
+                                     where=f"update_textblk_list blk idx={blk_item.idx}",
+                                     keep_undo=True)
             if not blk_item.document().isEmpty():
                 blk_item.blk.rich_text = blk_item.toHtml()
-                blk_item.blk.translation = blk_item.toPlainText()
+                # FlowTextBlkItem содержит в документе soft hyphens (U+00AD)
+                # — сохраняем чистый текст без них (инвариант I2).
+                write_model_text(blk_item.blk, blk_item.toPlainText(),
+                                 where="update_textblk_list")
             else:
                 blk_item.blk.rich_text = ''
                 blk_item.blk.translation = ''

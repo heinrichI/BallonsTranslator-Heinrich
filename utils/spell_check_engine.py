@@ -1,4 +1,3 @@
-from ui.SpellCheckDialog import SpellCheckDialog
 from spylls.hunspell.dictionary import Dictionary
 from utils.logger import logger as LOGGER
 from typing import Dict, List, Union, Optional
@@ -204,19 +203,6 @@ class SpellCheckEngine:
     #                 yield word
     #                 # unknown_words.append(word)
     #     # return unknown_words
-
-    # def Handle(self, spellCheckDialog: SpellCheckDialog):
-    #     if (spellCheckDialog.state == SpellCheckDialog.SkipAll):
-    #         self.logger.debug('Handle SkipAll')
-    #         self.logger.debug(f'word {spellCheckDialog.word_line_edit.text()} added to skipped')
-    #         self.skipped_words.append(spellCheckDialog.word_line_edit.text())
-    #     elif (spellCheckDialog.state == SpellCheckDialog.ReplaceAll):
-    #         self.logger.debug('Handle ReplaceAll')
-    #         self.replace_words.append((spellCheckDialog.before_word, spellCheckDialog.word_line_edit.text()))
-    #     elif (spellCheckDialog.state == SpellCheckDialog.EditAllText):
-    #         self.logger.debug('Handle EditAllText')
-    #         self.fixed_text = spellCheckDialog.text_edit.toPlainText()
-    #         self.stop = True
 
     def GetUnknownWordsViaDictionaryFromList(self, words_with_objects: List) -> list:
         split_chars = set('!?,:.\"\'();')

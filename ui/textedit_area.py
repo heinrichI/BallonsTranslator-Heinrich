@@ -60,7 +60,7 @@ class SourceTextEdit(QTextEdit):
     hover_enter = Signal(int)
     hover_leave = Signal(int)
     focus_in = Signal(int)
-    propagate_user_edited = Signal(int, str, bool)
+    propagate_user_edited = Signal(int, str, bool, int)
     ensure_scene_visible = Signal()
     redo_signal = Signal()
     undo_signal = Signal()
@@ -83,6 +83,7 @@ class SourceTextEdit(QTextEdit):
         self.in_redo_undo = False
         self.change_from: int = 0
         self.change_added: int = 0
+        self.change_removed: int = 0
         self.input_method_from = -1
         self.input_method_text = ''
         self.text_content_changed = False
@@ -157,6 +158,12 @@ class SourceTextEdit(QTextEdit):
             if self.hasFocus():
                 self.change_from = from_
                 self.change_added = added
+                # Точное число удалённых символов именно ЭТОГО изменения.
+                # Раньше оно выбрасывалось, а «removed» для зеркала выводили
+                # из арифметики characterCount() двух разных документов —
+                # на flow-блоке (soft hyphens в документе item) это съедало
+                # реальные символы (bug1.txt).
+                self.change_removed = removed
 
     def adjustSize(self):
         h = self.document().documentLayout().documentSize().toSize().height()
@@ -205,8 +212,10 @@ class SourceTextEdit(QTextEdit):
             undo_steps = self.document().availableUndoSteps()
             new_steps = undo_steps - self.old_undo_steps
             joint_previous = new_steps == 0
-            self.propagate_user_edited.emit(change_from, added_text, joint_previous)
+            self.propagate_user_edited.emit(change_from, added_text, joint_previous,
+                                            self.change_removed)
             self.change_added = 0
+            self.change_removed = 0
 
             if new_steps > 0:
                 self.old_undo_steps = undo_steps

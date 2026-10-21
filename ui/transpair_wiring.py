@@ -39,9 +39,13 @@ class TransPairWiring:
             pair_widget: TransPairWidget для подключения
             blk_item: TextBlkItem для инициализации текста
         """
-        # Установка текста
+        # Установка текста.
+        # Панель держит «чистый» текст без soft hyphens (U+00AD):
+        # FlowTextBlkItem содержит их в документе (гифенизация), а
+        # TextBlkItem._effective_selection() сравнивает панельный текст с
+        # item-текстом минус hyphens и маппит позиции через hyphens.
         pair_widget.e_source.setPlainText(blk_item.blk.get_text())
-        pair_widget.e_trans.setPlainText(blk_item.toPlainText())
+        pair_widget.e_trans.setPlainText(blk_item.toPlainText().replace('\u00ad', ''))
 
         # Подключение сигналов e_source
         pair_widget.e_source.focus_in.connect(self._manager.on_transwidget_focus_in)

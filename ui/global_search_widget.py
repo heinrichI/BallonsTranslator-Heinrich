@@ -8,6 +8,7 @@ from qtpy.QtGui import QFont, QPainter, QTextCursor, QStandardItemModel, QStanda
 from utils.logger import logger as LOGGER
 from .page_search_widget import SearchEditor, HighlightMatched, SEARCHRST_HIGHLIGHT_COLOR
 from .misc import doc_replace
+from .text_sync import write_model_text, replace_spans_in_doc
 from utils.config import pcfg
 from .custom_widget import ProgressMessageBox, Widget, NoBorderPushBtn
 from .textitem import TextBlkItem, TextBlock
@@ -252,12 +253,14 @@ class GlobalReplaceThead(ThreadBase):
                         ori_html = blk.rich_text
                         doc.setHtml(blk.rich_text)
                         span_list = [[rstitem.start, rstitem.end] for rstitem in rstitem_list]
-                        doc_replace(doc, span_list, target)
+                        # матчи искали по blk.translation (clean), а режут мы
+                        # rich_text — в flow-блоках он с soft hyphens (L3/S1)
+                        replace_spans_in_doc(doc, ori, span_list, target)
                         replace_html = doc.toHtml()
                         replace = doc.toPlainText()
                     else:
                         replace = self.searched_pattern.sub(target, ori)
-                    blk.translation = replace
+                    write_model_text(blk, replace, where="global_replace")
                     blk.rich_text = replace_html
                     background_list['trans'].append({
                         'ori': ori, 

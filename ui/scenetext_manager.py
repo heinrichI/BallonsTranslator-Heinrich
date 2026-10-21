@@ -15,10 +15,11 @@ except:
 from .textitem import TextBlkItem, TextBlock
 from .flow_textitem import FlowTextBlkItem
 from .canvas import Canvas
-from .undo_manager import TextUndoCommand, resolve_is_text
+from .undo_manager import TextUndoCommand, UndoManager, resolve_is_text
 from .textedit_area import TransTextEdit, SourceTextEdit, TransPairWidget, SelectTextMiniMenu, TextEditListScrollArea, QVBoxLayout, Widget
 from utils.fontformat import FontFormat
 from .textedit_commands import propagate_user_edit, TextEditCommand, ReshapeItemCommand, MoveBlkItemsCommand, AutoLayoutCommand, ApplyFontformatCommand, RotateItemCommand, TextItemEditCommand, TextEditCommand, PageReplaceOneCommand, PageReplaceAllCommand, MultiPasteCommand, ResetAngleCommand, SqueezeCommand
+from .text_sync import write_clean_text, write_model_text, clean_text_value
 from .text_panel import FontFormatPanel
 from utils.config import pcfg
 from utils import shared
@@ -367,7 +368,8 @@ class SceneTextManager(QObject):
                  app: QApplication,
                  mainwindow: QWidget,
                  canvas: Canvas, 
-                 textpanel: TextPanel, 
+                 textpanel: TextPanel,
+                 undo_manager: "UndoManager | None" = None,
                  *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.app = app     
@@ -438,7 +440,7 @@ class SceneTextManager(QObject):
         self._subscribe_to_events()
 
         # DI services (set by CompositionRoot after creation)
-        self._undo_mgr = None
+        self._undo_mgr = undo_manager
 
     @property
     def auto_textlayout_flag(self) -> bool:
@@ -642,7 +644,11 @@ class SceneTextManager(QObject):
         else:
             translation = ''
             if self.auto_textlayout_flag and not blk.vertical:
-                translation = blk.translation
+                # I2: legacy-проект мог сохранить U+00AD в translation —
+                # эта грязь не должна уйти в документ item (idempotence-guard
+                # гифенизации сохранил бы устаревшие hyphens, PLAN §6)
+                translation = clean_text_value(blk.translation or '',
+                                               where="load_textblk")
                 blk.translation = ''
             _debug("  creating %s with blk.xyxy=%s", "FlowTextBlkItem" if blk.is_flow_mode else "TextBlkItem", blk.xyxy if blk else "None")
             if blk.is_flow_mode:
@@ -650,7 +656,7 @@ class SceneTextManager(QObject):
             else:
                 blk_item = TextBlkItem(blk, len(self.textblk_item_list), show_rect=self.canvas.textblock_mode)
             if translation:
-                blk.translation = translation
+                write_model_text(blk, translation, where="load_textblk")
                 rst = self.layout_textblk(blk_item, text=translation)
                 did_auto_layout = True
                 if rst is None:
@@ -713,6 +719,16 @@ class SceneTextManager(QObject):
             logging.debug(f"[TOGGLE] blk_item is None for idx={blk_idx}, returning")
             return
         logging.debug(f"[TOGGLE] blk_item type: {type(blk_item).__name__}")
+
+        # Per-range обводки (outline_ranges) хранятся в документных координатах
+        # ТЕКУЩЕГО item: flow-документ содержит soft hyphens, normal — нет.
+        # После смены режима диапазоны молча указывали бы на другие символы,
+        # поэтому сбрасываем их. Block-level stroke (fontformat.stroke_width)
+        # координат не зависит и сохраняется.
+        if getattr(blk_item.blk, 'outline_ranges', None):
+            logging.debug(f"[TOGGLE] clearing outline_ranges={blk_item.blk.outline_ranges} "
+                          f"on flow-mode switch (idx={blk_idx})")
+            blk_item.blk.outline_ranges = []
 
         if isinstance(blk_item, FlowTextBlkItem):
             # Convert to TextBlkItem
@@ -1187,7 +1203,10 @@ class SceneTextManager(QObject):
 
         # Update View (translation widget) if text changed
         if new_text is not None and len(self.pairwidget_list) > blkitem.idx:
-            self.pairwidget_list[blkitem.idx].e_trans.setPlainText(new_text)
+            # new_text взят из документа item — в flow-режиме он с U+00AD
+            # и с жёсткими \n (mask mode); в панель должен попасть clean (L2)
+            write_clean_text(self.pairwidget_list[blkitem.idx].e_trans, new_text,
+                             where="layout_textblk")
 
         return new_text is not None
 
@@ -1285,18 +1304,18 @@ class SceneTextManager(QObject):
         blkitem = self.textblk_item_list[edit.idx] if is_trans else None
         self.push_undo_command(TextEditCommand(edit, num_steps, blkitem), update_pushed_step=not is_trans, is_text=True)
 
-    def on_propagate_textitem_edit(self, pos: int, added_text: str, joint_previous: bool):
+    def on_propagate_textitem_edit(self, pos: int, added_text: str, joint_previous: bool, removed: int = 0):
         blk_item: TextBlkItem = self.sender()
         edit = self.pairwidget_list[blk_item.idx].e_trans
-        propagate_user_edit(blk_item, edit, pos, added_text, joint_previous)
+        propagate_user_edit(blk_item, edit, pos, added_text, joint_previous, removed)
         self.canvas.push_undo_command(command=None, update_pushed_step=True)
 
-    def on_propagate_transwidget_edit(self, pos: int, added_text: str, joint_previous: bool):
+    def on_propagate_transwidget_edit(self, pos: int, added_text: str, joint_previous: bool, removed: int = 0):
         edit: TransTextEdit = self.sender()
         blk_item = self.textblk_item_list[edit.idx]
         if blk_item.isEditing():
             blk_item.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-        propagate_user_edit(edit, blk_item, pos, added_text, joint_previous)
+        propagate_user_edit(edit, blk_item, pos, added_text, joint_previous, removed)
         self.canvas.push_undo_command(command=None, update_pushed_step=True)
 
     def apply_fontformat(self, fontformat: FontFormat, refit: bool = False):
@@ -1338,8 +1357,13 @@ class SceneTextManager(QObject):
 
     def updateTranslation(self):
         for blk_item, transwidget in zip(self.textblk_item_list, self.pairwidget_list):
-            transwidget.e_trans.setPlainText(blk_item.blk.translation)
-            blk_item.setPlainText(blk_item.blk.translation)
+            # Защита от legacy-загрязнения soft hyphens (U+00AD) в
+            # blk.translation до перезагрузки: панель и item должны
+            # получать чистый текст (flow item сам прогифенизирует).
+            clean_text = clean_text_value(blk_item.blk.translation or '',
+                                          where="updateTranslation")
+            write_clean_text(transwidget.e_trans, clean_text, where="updateTranslation")
+            write_clean_text(blk_item, clean_text, where="updateTranslation")
         self.canvas.clear_text_stack()
 
     def showTextblkItemRect(self, draw_rect: bool):

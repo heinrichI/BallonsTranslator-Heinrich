@@ -13,6 +13,7 @@ from .image_edit import ImageEditMode, PixmapItem, DrawingLayer, StrokeImgItem
 from .canvas import Canvas, TextBlkItem
 from .textedit_area import TransPairWidget
 from .undo_manager import TextUndoCommand
+from .text_sync import clean_text_value
 from utils.config import pcfg
 
 class StrokeItemUndoCommand(QUndoCommand):
@@ -104,6 +105,10 @@ class RunBlkTransCommand(TextUndoCommand):
         if mode < 3:
             for blkitem, transpairw in zip(self.blkitems, self.transpairw_list):
                 trs = blkitem.blk.translation if mode != 0 else ''
+                # trs идёт и в панель, и в документ item; значение из модели
+                # обязан быть чистым (I2) — legacy-проекты могли сохранить
+                # в translation soft hyphens (PLAN §6)
+                trs = clean_text_value(trs, where="StrokeItemUndoCommand")
 
                 # Check whether auto font-size fitting should be applied
                 needs_layout = (

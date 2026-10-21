@@ -1,6 +1,11 @@
 """
 Общие настройки для всего дерева tests/.
 
+STRICT-режим текстовых инвариантов (BTRANS_STRICT_TEXT_SYNC): в тестах
+рассогласование панели / документа item / blk.translation обязано быть
+падением, а не молчаливым re-sync'ом — иначе тест «починил» текст и стал
+зелёным (PLAN_panel_edit_propagation.md §5.3).
+
 Затухание atexit-дампов torch._dynamo ("TorchDynamo compilation metrics",
 "TorchDynamo attempted to trace the following frames"):
 оба хука регистрируются без условия при импорте (torch/_dynamo/utils.py:444,
@@ -22,8 +27,20 @@ utils/logger.py) улетает в ValueError: I/O operation on closed file.
 import atexit
 import importlib
 import logging
+import os
+import sys
+
+os.environ.setdefault("BTRANS_STRICT_TEXT_SYNC", "1")
 
 import pytest
+
+# pytest (без pytest.ini/__init__.py) добавляет в sys.path только каталог
+# conftest, поэтому корень репозитория поднимает сам conftest
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from ui import text_coords as TC
 
 _DYNAMO_EXIT_HOOKS = (
     ("torch._dynamo.utils", "dump_compile_times"),
@@ -32,6 +49,16 @@ _DYNAMO_EXIT_HOOKS = (
 
 for _module_name, _hook_name in _DYNAMO_EXIT_HOOKS:
     logging.getLogger(_module_name).setLevel(logging.WARNING)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_text_diagnostics():
+    """Дедупликация `[SYNC]`-логов и счётчик сессии — состояние процесса.
+    Тесты не должны наследовать его друг у друга: иначе лог рассогласования
+    «исчезает» в зависимости от порядка запуска."""
+    TC.reset_dedup()
+    TC.reset_trip_counts()
+    yield
 
 
 @pytest.fixture(autouse=True, scope="session")

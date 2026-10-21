@@ -1,25 +1,31 @@
 """
-CompositionRoot — точка сборки всех зависимостей.
+CompositionRoot — единственная точка сборки приложения.
 
-Создает и связывает все компоненты приложения.
+Создаёт и связывает все компоненты через конструкторное внедрение.
+
+DIContainer / Service Locator удалён (решение A, ARCHITECTURE_REFACTOR_PLAN.md):
+в production-коде ``DIContainer.resolve`` не имел ни одного вызывающего места —
+сервисы «внедрялись» патчем приватных атрибутов (``canvas._undo_mgr = ...``)
+после сборки, а зарегистрированная в контейнере модель теньсялась
+класс-уровневым экземпляром в MainWindow. Теперь корень явно создаёт
+единственный набор сервисов и передаёт их в MainWindow конструктором.
 """
 
-from typing import Optional
+from typing import Any
+
 from qtpy.QtWidgets import QApplication
 
 from utils.config import ProgramConfig
 from utils.proj_imgtrans import ProjImgTrans
-from .di_container import DIContainer
 
 
 class CompositionRoot:
-    """
-    Composition Root — фабрика сборки приложения.
+    """Composition root — фабрика сборки приложения.
 
     Responsibilities:
-    - Создание сервисов
-    - Регистрация в DI контейнере
-    - Сборка графа зависимостей
+    - создание сервисов (UndoManager, LayerManager, ClipboardService, ScaleManager);
+    - создание единственного экземпляра модели данных (ProjImgTrans);
+    - передача всего в MainWindow через конструктор.
     """
 
     @staticmethod
@@ -27,69 +33,45 @@ class CompositionRoot:
         config: ProgramConfig,
         app: QApplication,
         open_dir: str = '',
-        **exec_args
-    ):
-        """
-        Собирает все зависимости и возвращает MainWindow.
+        **exec_args: Any,
+    ) -> "MainWindow":
+        """Собирает все зависимости и возвращает MainWindow.
 
         Args:
             config: Конфигурация приложения
             app: QApplication
             open_dir: Директория для открытия
-            **exec_args: Дополнительные аргументы
+            **exec_args: Дополнительные аргументы (прокидываются в MainWindow
+                и, в HEADLESS-режиме, в run_batch)
 
         Returns:
             MainWindow
         """
-        from utils import shared
-        from .event_bus import EventBus
-
-        # Очищаем контейнер
-        DIContainer.reset()
-
-        # Создаем EventBus
-        event_bus = EventBus.get_instance()
-        DIContainer.register(EventBus, event_bus)
-
-        # Создаем ProjImgTrans (Model)
-        proj = ProjImgTrans()
-        DIContainer.register(ProjImgTrans, proj)
-
-        # Создаем сервисы
-        from .undo_manager import UndoManager
-        from .layer_manager import LayerManager
         from .clipboard_service import ClipboardService
-        from .scale_manager import ScaleManager
-
-        undo_mgr = UndoManager()
-        layer_mgr = LayerManager()
-        clipboard_svc = ClipboardService()
-        scale_mgr = ScaleManager()
-
-        # Регистрируем сервисы
-        DIContainer.register(UndoManager, undo_mgr)
-        DIContainer.register(LayerManager, layer_mgr)
-        DIContainer.register(ClipboardService, clipboard_svc)
-        DIContainer.register(ScaleManager, scale_mgr)
-
-        # Создаем MainWindow (Canvas создаётся внутри setupUi())
+        from .event_bus import EventBus
+        from .layer_manager import LayerManager
         from .mainwindow import MainWindow
-        main_window = MainWindow(app, config, open_dir=open_dir, **exec_args)
+        from .scale_manager import ScaleManager
+        from .undo_manager import UndoManager
 
-        # Устанавливаем DI-сервисы на Canvas после создания
-        if hasattr(main_window, 'canvas'):
-            main_window.canvas._undo_mgr = undo_mgr
-            main_window.canvas._layer_mgr = layer_mgr
-            main_window.canvas._scale_mgr = scale_mgr
-            main_window.canvas._clipboard_svc = clipboard_svc
+        # Синглтон EventBus создаётся один раз в точке сборки.
+        EventBus.get_instance()
 
-        # Устанавливаем DI-сервисы на SceneTextManager после создания
-        if hasattr(main_window, 'st_manager'):
-            main_window.st_manager._undo_mgr = undo_mgr
+        # Единственный экземпляр модели данных: раньше он теньсялся
+        # класс-уровневым ``MainWindow.imgtrans_proj`` (решение A).
+        proj: ProjImgTrans = ProjImgTrans()
+        undo_mgr: UndoManager = UndoManager()
+        layer_mgr: LayerManager = LayerManager()
+        clipboard_svc: ClipboardService = ClipboardService()
+        scale_mgr: ScaleManager = ScaleManager()
 
-        return main_window
-
-    @staticmethod
-    def reset():
-        """Сбрасывает контейнер (для тестов)."""
-        DIContainer.reset()
+        return MainWindow(
+            app, config,
+            open_dir=open_dir,
+            proj=proj,
+            undo_mgr=undo_mgr,
+            layer_mgr=layer_mgr,
+            scale_mgr=scale_mgr,
+            clipboard_svc=clipboard_svc,
+            **exec_args,
+        )

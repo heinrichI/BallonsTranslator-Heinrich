@@ -20,6 +20,7 @@ from .text_graphical_effect import apply_shadow_effect
 from .text_format_manager import TextFormatManager
 from .font_size_manager import FontSizeManager
 from .font_auto_adjuster import FontAutoAdjuster
+from . import text_coords as TC
 from utils.config import pcfg
 
 LOGGER = logging.getLogger('BallonTranslator')
@@ -65,7 +66,7 @@ class TextBlkItem(QGraphicsTextItem):
     redo_signal = Signal()
     undo_signal = Signal()
     push_undo_stack = Signal(int, bool)
-    propagate_user_edited = Signal(int, str, bool)
+    propagate_user_edited = Signal(int, str, bool, int)
     toggle_flow_mode_requested = Signal(int)
 
     # preset-apply refit: suppress the degenerate ReshapeItemCommand that
@@ -114,6 +115,7 @@ class TextBlkItem(QGraphicsTextItem):
         self.in_redo_undo = False
         self.change_from: int = 0
         self.change_added: int = 0
+        self.change_removed: int = 0
         self.input_method_from = -1
         self.input_method_text = ''
         self.block_all_input = False
@@ -181,8 +183,10 @@ class TextBlkItem(QGraphicsTextItem):
                         cursor.setPosition(change_from + self.change_added, QTextCursor.MoveMode.KeepAnchor)
                         added_text = cursor.selectedText()
 
-                    self.propagate_user_edited.emit(change_from, added_text, joint_previous)
+                    self.propagate_user_edited.emit(change_from, added_text, joint_previous,
+                                                    self.change_removed)
                     self.change_added = 0
+                    self.change_removed = 0
 
                 if new_steps > 0:
                     self.old_undo_steps = undo_steps
@@ -904,6 +908,9 @@ class TextBlkItem(QGraphicsTextItem):
             if self.hasFocus():
                 self.change_from = from_
                 self.change_added = added
+                # см. SourceTextEdit.on_content_changing: removed нужен,
+                # чтобы не выводить его из арифметики characterCount()
+                self.change_removed = removed
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
 
@@ -1129,7 +1136,7 @@ class TextBlkItem(QGraphicsTextItem):
                 e_trans = st.pairwidget_list[self.idx].e_trans
                 if e_trans is not None:
                     item_text = self.document().toPlainText()
-                    if item_text.replace('\xad', '') == e_trans.toPlainText():
+                    if TC.texts_match(item_text, e_trans.toPlainText())[0]:
                         c2 = e_trans.textCursor()
                         if c2.hasSelection():
                             ps, pe = c2.selectionStart(), c2.selectionEnd()
@@ -1789,14 +1796,21 @@ class TextBlkItem(QGraphicsTextItem):
                     c2 = e_trans.textCursor()
                     if c2.hasSelection():
                         item_text = self.document().toPlainText()
-                        if item_text.replace('\xad', '') != e_trans.toPlainText():
-                            _debug("[stroke] idx=%d panel selection REJECTED (text mismatch): item=%r panel=%r",
-                                        self.idx, item_text.replace('\xad', ''),
-                                        e_trans.toPlainText())
+                        panel_text = e_trans.toPlainText()
+                        # Единый страж «панель и item говорят об одном
+                        # тексте» (I8): раньше в классе жили две разные копии
+                        # этого правила — одна промахивалась на legacy-панели
+                        # с hyphens и молча сбрасывала панельное выделение в
+                        # whole-block (обводка «всего текста» вместо части).
+                        ok, why = TC.texts_match(item_text, panel_text)
+                        if not ok:
+                            _debug("[stroke] idx=%d panel selection REJECTED (text mismatch): %s; item=%r panel=%r",
+                                        self.idx, why, TC.strip_hyphens(item_text),
+                                        panel_text)
                             return None
                         ps, pe = c2.selectionStart(), c2.selectionEnd()
-                        sel = (self._panel_pos_to_doc_start(item_text, ps),
-                               self._panel_pos_to_doc_end(item_text, pe))
+                        sel = (self._panel_pos_to_doc_start(item_text, ps, panel_text),
+                               self._panel_pos_to_doc_end(item_text, pe, panel_text))
                         _debug("[stroke] idx=%d _effective_selection -> panel %s (panel sel (%d, %d))",
                                      self.idx, sel, ps, pe)
                         return sel
@@ -1816,27 +1830,39 @@ class TextBlkItem(QGraphicsTextItem):
         return None
 
     @staticmethod
-    def _panel_pos_to_doc_start(item_text: str, pos: int) -> int:
-        """Item-document offset of the *pos*-th non-soft-hyphen char."""
-        clean, i, n = 0, 0, len(item_text)
-        while i < n and clean < pos:
-            if item_text[i] != '\xad':
-                clean += 1
-            i += 1
-        while i < n and item_text[i] == '\xad':
-            i += 1
-        return i
+    def _panel_pos_to_clean(panel_text: str, pos: int) -> int:
+        """Число non-hyphen-символов в panel_text[:pos] (clean-смещение).
+
+        Для clean-панели (без U+00AD, как устанавливает TransPairWiring)
+        равно pos; для legacy-панели с hyphens (до перезагрузки страницы)
+        сбрасывает позиции hyphens, чтобы панельную позицию можно было
+        сопоставить с item-документом через clean-смещения.
+
+        Реализация — в :mod:`ui.text_coords` (единственный владелец перевода
+        clean↔document, §7 PLAN_panel_edit_propagation.md); здесь тонкий
+        делегат, чтобы существующие вызовы и тесты не менялись."""
+        return TC.clean_offset(panel_text, pos)
 
     @staticmethod
-    def _panel_pos_to_doc_end(item_text: str, pos: int) -> int:
+    def _panel_pos_to_doc_start(item_text: str, pos: int, panel_text: str = None) -> int:
+        """Item-document offset of the *pos*-th non-soft-hyphen char.
+
+        Если передан *panel_text* (сырой текст панели), pos — смещение в
+        тексте панели и сначала нормализуется к clean-смещению (панель
+        может содержать soft hyphens из legacy-состояния)."""
+        if panel_text is not None:
+            pos = TC.clean_offset(panel_text, pos)
+        return TC.doc_start_for_clean(item_text, pos)
+
+    @staticmethod
+    def _panel_pos_to_doc_end(item_text: str, pos: int, panel_text: str = None) -> int:
         """Exclusive item-document offset covering *pos* non-soft-hyphen
-        chars (for selection end mapping)."""
-        clean, i, n = 0, 0, len(item_text)
-        while i < n and clean < pos:
-            if item_text[i] != '\xad':
-                clean += 1
-            i += 1
-        return i
+        chars (for selection end mapping).
+
+        *panel_text* — см. _panel_pos_to_doc_start."""
+        if panel_text is not None:
+            pos = TC.clean_offset(panel_text, pos)
+        return TC.doc_end_for_clean(item_text, pos)
 
     def _has_effective_selection(self) -> bool:
         return self._effective_selection() is not None

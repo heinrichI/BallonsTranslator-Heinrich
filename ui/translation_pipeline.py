@@ -13,6 +13,8 @@ from utils.textblock import TextBlock
 from utils.config import pcfg
 from utils import shared
 
+from .text_sync import write_clean_text, write_model_text
+
 
 def postprocess_translations(text_list: List[str]) -> List[str]:
     """
@@ -136,8 +138,10 @@ def finish_translate_page(
     """
     for i, (blk_item, text) in enumerate(zip(blk_items, translations)):
         if text and text.strip():
-            blk_item.setPlainText(text)
-            blk_item.blk.translation = text
+            # I2/I3: тексты идут и в документ item (flow перегифенизует сам),
+            # и в модель — только через единые владельцы записи
+            write_clean_text(blk_item, text, where="finish_translate_page")
+            write_model_text(blk_item.blk, text, where="finish_translate_page")
 
             # Автоматический layout если включен
             if auto_textlayout and not blk_item.fontformat.vertical:

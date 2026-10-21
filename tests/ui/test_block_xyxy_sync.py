@@ -412,6 +412,10 @@ class TestAbsBoundingRectControlPoints:
         mgr.textblk_item_list = [item]
         mgr.pairwidget_list = [MagicMock()]
         mgr.pairwidget_list[0].e_source.toPlainText.return_value = "test"
+        # e_trans обязан держать clean-текст item (боевой wiring, transpair_wiring.py:48)
+        # — иначе пред-save страж I7 решит, что проекции разъехались
+        mgr.pairwidget_list[0].e_trans.toPlainText.return_value = \
+            item.toPlainText().replace("\u00ad", "")
 
         mgr.update_textblk_list(proj)
 
@@ -732,6 +736,10 @@ class TestCoordinateInvariant:
         mgr.textblk_item_list = [item]
         mgr.pairwidget_list = [MagicMock()]
         mgr.pairwidget_list[0].e_source.toPlainText.return_value = "test"
+        # e_trans обязан держать clean-текст item (боевой wiring)
+        # — иначе пред-save страж I7 решит, что проекции разъехались
+        mgr.pairwidget_list[0].e_trans.toPlainText.return_value = \
+            item.toPlainText().replace("\u00ad", "")
 
         mgr.update_textblk_list(proj)
         saved_blk = cbl[0]

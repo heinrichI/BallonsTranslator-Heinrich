@@ -17,7 +17,6 @@ from utils.text_processing import is_cjk, full_len, half_len
 from utils.textblock import TextBlock, TextAlignment
 from utils import shared
 from utils.message import create_error_dialog, create_info_dialog
-from modules.translators.trans_chatgpt import GPTTranslator
 from modules import GET_VALID_TEXTDETECTORS, GET_VALID_INPAINTERS, GET_VALID_TRANSLATORS, GET_VALID_OCR
 from .misc import parse_stylesheet, set_html_family, QKEY
 from utils.config import ProgramConfig, pcfg, save_config, text_styles, save_text_styles, load_textstyle_from, FontFormat
@@ -83,7 +82,6 @@ class PageListView(QListWidget):
 mainwindow_cls = Widget if shared.HEADLESS else FramelessWindow
 class MainWindow(mainwindow_cls):
 
-    imgtrans_proj: ProjImgTrans = ProjImgTrans()
     save_on_page_changed = True
     opening_dir = False
     page_changing = False
@@ -101,6 +99,15 @@ class MainWindow(mainwindow_cls):
     
     def __init__(self, app: QApplication, config: ProgramConfig, open_dir='', **exec_args) -> None:
         super().__init__()
+
+        # Явное конструкторное внедрение из CompositionRoot (решение A плана:
+        # DIContainer/service-locator убран). Без инъекции — собственная
+        # сборка (тесты и прямой запуск без composition root).
+        self.imgtrans_proj: ProjImgTrans = exec_args.pop('proj', None) or ProjImgTrans()
+        self._undo_mgr = exec_args.pop('undo_mgr', None)
+        self._layer_mgr = exec_args.pop('layer_mgr', None)
+        self._scale_mgr = exec_args.pop('scale_mgr', None)
+        self._clipboard_svc = exec_args.pop('clipboard_svc', None)
 
         shared.create_errdialog_in_mainthread = self.create_errdialog.emit
         self.create_errdialog.connect(self.on_create_errdialog)
@@ -225,7 +232,12 @@ class MainWindow(mainwindow_cls):
         mainHLayout.setSpacing(0)
 
         # set up canvas
-        SW.canvas = self.canvas = Canvas()
+        SW.canvas = self.canvas = Canvas(
+            undo_manager=self._undo_mgr,
+            layer_manager=self._layer_mgr,
+            scale_manager=self._scale_mgr,
+            clipboard_service=self._clipboard_svc,
+        )
         self.canvas.imgtrans_proj = self.imgtrans_proj
         self.canvas.hide_canvas_signal.connect(self.onHideCanvas)
         self.canvas.proj_savestate_changed.connect(self.on_savestate_changed)
@@ -261,7 +273,10 @@ class MainWindow(mainwindow_cls):
         self.mtSubWidget.setWindowFlags(Qt.WindowType.Window)
         self.mtSubWidget.hide()
 
-        SW.st_manager = self.st_manager = SceneTextManager(self.app, self, self.canvas, self.textPanel)
+        SW.st_manager = self.st_manager = SceneTextManager(
+            self.app, self, self.canvas, self.textPanel,
+            undo_manager=self._undo_mgr,
+        )
         self.st_manager.new_textblk.connect(self.canvas.search_widget.on_new_textblk)
         self.canvas.search_widget.pairwidget_list = self.st_manager.pairwidget_list
         self.canvas.search_widget.textblk_item_list = self.st_manager.textblk_item_list
@@ -1639,7 +1654,8 @@ class MainWindow(mainwindow_cls):
         if len(blks) == 0:
             return
         
-        if isinstance(self.module_manager.translator, GPTTranslator):
+        # Реестровое имя вместо isinstance на конкретный класс (см. modules/__init__.py)
+        if getattr(self.module_manager.translator, 'name', None) == 'ChatGPT':
             src_list = [self.st_manager.pairwidget_list[blk.idx].e_source.toPlainText() for blk in blks]
             src_txt = ''
             for (prompt, num_src) in self.module_manager.translator._assemble_prompts(src_list, max_tokens=4294967295):

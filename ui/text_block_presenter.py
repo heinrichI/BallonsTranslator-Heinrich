@@ -66,13 +66,13 @@ class TextBlockPresenter:
 
     # ── View → Model (события от View) ──────────────────────
 
-    def _on_text_edited(self, pos: int, added_text: str, joint_previous: bool):
+    def _on_text_edited(self, pos: int, added_text: str, joint_previous: bool, removed: int = 0):
         """Обработчик: текст изменился в View → обновляем Model."""
         if self._model is None:
             return
 
-        # Обновляем Model
-        self._model.translation = self._view.toPlainText()
+        # Обновляем Model (без soft hyphens: flow-view содержит их в документе)
+        self._model.translation = self._view.toPlainText().replace('\u00ad', '')
 
         LOGGER.debug("[Presenter] text edited: pos=%d, added='%s'", pos, added_text)
 
@@ -107,8 +107,8 @@ class TextBlockPresenter:
         if self._model is None or self._view is None:
             return
 
-        # Текст
-        self._model.translation = self._view.toPlainText()
+        # Текст (без soft hyphens: flow-view содержит их в документе)
+        self._model.translation = self._view.toPlainText().replace('\u00ad', '')
         self._model.rich_text = self._view.toHtml()
 
         # Шрифт
